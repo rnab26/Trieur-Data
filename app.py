@@ -4,7 +4,6 @@ import numpy as np
 import io
 import unicodedata
 import re
-import requests
 from difflib import SequenceMatcher
 
 st.set_page_config(page_title="Trieur de Fichiers Leads", layout="wide")
@@ -102,48 +101,33 @@ def read_excel_all_sheets(file_obj):
             st.error(f"❌ Erreur lecture Excel: {str(e)}")
             return {}
 
-def extract_sheet_id_from_url(url):
-    """Extraire l'ID du sheet depuis l'URL Google"""
+def read_google_sheets_all_sheets(url):
+    """Lire Google Sheets avec tous les onglets détectés"""
     try:
         if "/edit" in url:
             url = url.split("/edit")[0]
-        if "/d/" in url:
-            sheet_id = url.split("/d/")[1].split("/")[0]
-            return sheet_id
-    except Exception:
-        pass
-    return None
-
-def get_google_sheets_all_tabs(sheet_id):
-    """Récupérer TOUS les onglets d'un Google Sheet public via export HTML"""
-    all_sheets = {}
-    try:
-        # Exporter le fichier en ODS, puis parser pour obtenir les noms des onglets
-        # Méthode alternative: essayer d'accéder aux exports CSV avec différents gid
+        if url.endswith("/"):
+            url = url[:-1]
+        if "/d/" not in url:
+            return {}
         
-        # Essayer d'abord le premier onglet (par défaut)
-        csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid=0"
-        try:
-            df = pd.read_csv(csv_url, dtype=str)
-            if len(df) > 0:
-                all_sheets["Sheet1"] = df
-        except Exception:
-            pass
+        sheet_id = url.split("/d/")[1].split("/")[0]
+        all_sheets = {}
         
-        # Essayer tous les gid possibles jusqu'à 50
-        for gid in range(1, 50):
+        # Essayer d'accéder directement avec gid pour tous les onglets
+        for gid in range(0, 50):
             try:
                 csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
-                df = pd.read_csv(csv_url, dtype=str, timeout=5)
+                df = pd.read_csv(csv_url, dtype=str, timeout=10)
                 if len(df) > 0 and not df.isnull().all().all():
-                    sheet_name = f"Sheet{gid}" if gid > 0 else "Sheet1"
+                    sheet_name = f"Sheet{gid+1}" if gid > 0 else "Sheet1"
                     all_sheets[sheet_name] = df
             except Exception:
                 continue
         
-        return all_sheets
+        return all_sheets if all_sheets else {}
     except Exception as e:
-        st.error(f"❌ Erreur récupération Google Sheets: {str(e)}")
+        st.error(f"❌ Erreur Google Sheets: {str(e)}")
         return {}
 
 def export_csv_safe(df):
@@ -202,25 +186,25 @@ def cp_matches_prefix(cp_value, prefixes):
     return cp5[:2] in prefixes
 
 st.title("Trieur de Fichiers Leads")
-st.caption("Import Excel/Google Sheets → mapping colonnes → aperçu → filtrage → export")
+st.caption("Import Excel ou Google Sheets → mapping colonnes → aperçu → filtrage → export")
 
 tab1, tab2, tab3, tab4 = st.tabs(["1. Colonnes maitres", "2. Import et Mapping", "3. Filtrage & Dedup", "4. Export"])
 
 with tab1:
-    st.subheader("Gérer vos colonnes maîtres")
-    st.write("Ajoutez, supprimez ou modifiez vos colonnes maîtres ci-dessous, une par ligne.")
-    cols_text = st.text_area("Colonnes maîtres", value="\n".join(st.session_state.master_columns), height=250, key="master_cols_input")
-    if st.button("✅ Enregistrer"):
+    st.subheader("Gerer vos colonnes maitres")
+    st.write("Ajoutez, supprimez ou modifiez vos colonnes maitres ci-dessous, une par ligne.")
+    cols_text = st.text_area("Colonnes maitres", value="\n".join(st.session_state.master_columns), height=250, key="master_cols_input")
+    if st.button("Enregistrer la liste des colonnes maitres"):
         new_list = [c.strip() for c in cols_text.split("\n") if c.strip()]
         if new_list:
             st.session_state.master_columns = new_list
-            st.success(f"✅ {len(new_list)} colonnes maîtres enregistrées.")
+            st.success(str(len(new_list)) + " colonnes maitres enregistrees.")
         else:
             st.error("❌ Veuillez entrer au moins une colonne maître.")
 
 with tab2:
-    st.subheader("Importer vos fichiers")
-    files = st.file_uploader("Déposez un ou plusieurs fichiers Excel", type=["xlsx", "xls"], accept_multiple_files=True)
+    st.subheader("Importer vos fichiers Excel ou Google Sheets")
+    files = st.file_uploader("Deposez un ou plusieurs fichiers Excel", type=["xlsx", "xls"], accept_multiple_files=True)
     google_url = st.text_input("Ou collez une URL Google Sheets publique (optionnel)")
 
     all_sheets = {}
@@ -234,8 +218,9 @@ with tab2:
                     continue
                 for sheet_name, df in sheets.items():
                     if df is None or len(df) == 0:
+                        st.warning(f"⚠️ {f.name} :: {sheet_name} est vide, ignoré.")
                         continue
-                    key = f"{f.name} :: {sheet_name}"
+                    key = f.name + " :: " + sheet_name
                     df = df.copy()
                     df["__source_file__"] = f.name
                     df["__source_sheet__"] = sheet_name
@@ -244,34 +229,30 @@ with tab2:
                 st.error(f"❌ Erreur lecture {f.name}: {str(e)}")
 
     if google_url.strip() and is_google_sheet_url(google_url):
-        sheet_id = extract_sheet_id_from_url(google_url)
-        if sheet_id:
-            with st.spinner("🔄 Récupération des onglets Google Sheets..."):
-                sheets = get_google_sheets_all_tabs(sheet_id)
-                if sheets:
-                    for sheet_name, df in sheets.items():
-                        if len(df) > 0:
-                            key = f"Google Sheets :: {sheet_name}"
-                            df = df.copy()
-                            df["__source_file__"] = "Google Sheets"
-                            df["__source_sheet__"] = sheet_name
-                            all_sheets[key] = df
-                    st.success(f"✅ Google Sheets importé avec {len(sheets)} onglet(s) détecté(s).")
-                else:
-                    st.warning("⚠️ Impossible de lire le Google Sheets.")
-        else:
-            st.warning("⚠️ URL Google Sheets invalide.")
+        with st.spinner("🔄 Récupération des onglets Google Sheets..."):
+            sheets = read_google_sheets_all_sheets(google_url)
+            if sheets:
+                for sheet_name, df in sheets.items():
+                    if len(df) > 0:
+                        key = "Google Sheets :: " + sheet_name
+                        df = df.copy()
+                        df["__source_file__"] = "Google Sheets"
+                        df["__source_sheet__"] = sheet_name
+                        all_sheets[key] = df
+                st.success(f"✅ Google Sheets importé avec {len(sheets)} onglet(s) détecté(s).")
+            else:
+                st.warning("⚠️ Impossible de lire le Google Sheets.")
 
     if all_sheets:
         st.session_state.all_sheets = all_sheets
         total_files = len(set([k.split(" :: ")[0] for k in all_sheets.keys()]))
-        st.success(f"✅ {total_files} fichier(s) importés, {len(all_sheets)} onglet(s) détecté(s) au total.")
+        st.success(str(total_files) + " fichier(s) importes, " + str(len(all_sheets)) + " onglet(s) detecte(s) au total.")
 
-        with st.expander("📋 Détail des onglets importés"):
+        with st.expander("📋 Detail des onglets importes"):
             for k, df in all_sheets.items():
                 num_dup = df.duplicated().sum()
                 real_cols = [c for c in df.columns if c not in ["__source_file__", "__source_sheet__"]]
-                st.write(f"**{k}** → {len(df)} lignes | {len(real_cols)} colonnes | {num_dup} doublons")
+                st.write(f"**{k}** : {len(df)} lignes, {len(real_cols)} colonnes, {num_dup} doublons")
 
         st.markdown("---")
         st.subheader("Assignation des colonnes")
@@ -286,77 +267,81 @@ with tab2:
             num_cols = len(real_columns)
             num_duplicates = sheet_df.duplicated().sum()
             
-            st.write(f"📊 **Résumé :** {num_rows} lignes | {num_cols} colonnes | {num_duplicates} doublons")
+            st.write(f"**Résumé :** {num_rows} lignes | {num_cols} colonnes | {num_duplicates} doublons")
             
             if sheet_key not in st.session_state.sheet_mappings:
                 st.session_state.sheet_mappings[sheet_key] = {}
             
             col_auto, col_space = st.columns([1, 3])
             with col_auto:
-                if st.button(f"🚀 Auto-assign", key=f"auto_{sheet_key}"):
+                if st.button(f"🚀 Auto", key=f"auto_{sheet_key}"):
                     new_mapping = {}
                     for src_col in real_columns:
                         best_master = find_best_master_col(src_col, st.session_state.master_columns)
-                        new_mapping[src_col] = best_master if best_master else "(non assigné)"
-                        st.write(f"✅ {src_col} → {new_mapping[src_col]}")
+                        new_mapping[src_col] = best_master if best_master else "(non assigne)"
                     st.session_state.sheet_mappings[sheet_key] = new_mapping
-                    st.success("✅ Auto-assignation terminée !")
+                    st.rerun()
             
-            st.write("**Sélectionnez les colonnes maîtres correspondantes :**")
+            st.write("**Aperçu des 7 premières lignes avec assignation au-dessus :**")
             
             preview_df = sheet_df.head(7).copy()
             
+            st.write("**Sélectionnez les colonnes maîtres correspondantes :**")
+            
             current_mapping = st.session_state.sheet_mappings[sheet_key]
+            mapping_options = ["(non assigne)"] + st.session_state.master_columns
+            
             updated_mapping = {}
             
-            # Afficher les selectbox en colonnes égales
-            num_cols_display = len(real_columns)
-            if num_cols_display > 0:
-                cols_display = st.columns(min(num_cols_display, 5))
-                
-                for idx, src_col in enumerate(real_columns):
-                    col_idx = idx % min(num_cols_display, 5)
-                    with cols_display[col_idx]:
-                        current = current_mapping.get(src_col, "(non assigné)")
-                        
-                        available_options = ["(non assigné)"] + [m for m in st.session_state.master_columns 
-                                                                   if m not in [updated_mapping.get(c, "") for c in real_columns if c != src_col]]
-                        
-                        if current not in available_options:
-                            current = "(non assigné)"
-                        
-                        try:
-                            idx_val = available_options.index(current)
-                        except ValueError:
-                            idx_val = 0
-                        
-                        choice = st.selectbox(
-                            src_col,
-                            options=available_options,
-                            index=idx_val,
-                            key=f"map_{sheet_key}_{src_col}",
-                            label_visibility="visible"
-                        )
-                        updated_mapping[src_col] = choice
-                        if choice != "(non assigné)":
-                            any_assigned = True
+            cols_display = st.columns(len(real_columns))
+            
+            for idx, src_col in enumerate(real_columns):
+                with cols_display[idx]:
+                    current = current_mapping.get(src_col, "(non assigne)")
+                    if current not in mapping_options:
+                        current = "(non assigne)"
+                    
+                    available_options = ["(non assigne)"] + [m for m in st.session_state.master_columns 
+                                                               if m not in [updated_mapping.get(c, "") for c in real_columns if c != src_col]]
+                    
+                    if current not in available_options:
+                        current = "(non assigne)"
+                    
+                    try:
+                        idx_val = available_options.index(current)
+                    except ValueError:
+                        idx_val = 0
+                    
+                    choice = st.selectbox(
+                        src_col,
+                        options=available_options,
+                        index=idx_val,
+                        key=f"map_{sheet_key}_{src_col}",
+                        label_visibility="visible"
+                    )
+                    updated_mapping[src_col] = choice
+                    if choice != "(non assigne)":
+                        any_assigned = True
             
             st.session_state.sheet_mappings[sheet_key] = updated_mapping
+            
             st.dataframe(preview_df, use_container_width=True)
+            
             st.markdown("---")
 
         if not any_assigned:
             st.warning("⚠️ Veuillez assigner au moins une colonne maître avant de construire la base.")
         else:
-            if st.button("✅ Construire la base de travail fusionnée", type="primary"):
+            if st.button("✅ Construire la base de travail fusionnee", type="primary"):
                 rows = []
+                total_merged = 0
                 
                 for sheet_key, sheet_df in all_sheets.items():
                     source_file = sheet_df["__source_file__"].iloc[0] if len(sheet_df) > 0 else sheet_key
                     source_sheet = sheet_df["__source_sheet__"].iloc[0] if len(sheet_df) > 0 else "Unknown"
                     mapping = st.session_state.sheet_mappings.get(sheet_key, {})
                     
-                    assigned_cols = [m for m in mapping.values() if m != "(non assigné)"]
+                    assigned_cols = [m for m in mapping.values() if m != "(non assigne)"]
                     if not assigned_cols:
                         st.warning(f"⚠️ {sheet_key}: Aucune colonne assignée, ignoré.")
                         continue
@@ -374,8 +359,8 @@ with tab2:
                                 is_empty = combined.isna() | (combined.astype(str).str.strip() == "")
                                 combined = combined.where(~is_empty, sheet_df[extra_col])
                             sub[master_col] = combined
-                    
                     rows.append(sub)
+                    total_merged += len(sub)
                 
                 if not rows:
                     st.error("❌ Aucun onglet avec assignation trouvé.")
@@ -390,136 +375,81 @@ with tab2:
                         st.success(f"✅ Base construite : {len(final_df)} lignes fusionnées.")
                         st.dataframe(final_df.head(50), use_container_width=True)
     else:
-        st.info("ℹ️ Importez des fichiers pour continuer.")
+        st.info("ℹ️ Importe un fichier Excel ou colle une URL Google Sheets pour continuer.")
 
 with tab3:
-    st.subheader("Filtrer et Déduplicater")
-    
+    st.subheader("Filtrer la base de travail")
     if st.session_state.final_df is None:
-        st.info("ℹ️ Importez et mappez des fichiers dans l'onglet précédent avant de filtrer.")
+        st.info("ℹ️ Importez et mappez des fichiers dans l'onglet precedent avant de filtrer.")
     else:
         df = st.session_state.final_df.copy()
         total_lines = len(df)
+        st.write(f"Base actuelle : **{total_lines}** lignes importees")
         
-        st.write(f"📊 **Base de travail :** {total_lines} lignes importées")
+        filter_col = st.selectbox("Filtrer par colonne", options=["(aucun filtre)"] + st.session_state.master_columns)
+        filtered_df = df
         
-        col_filter, col_dedup = st.columns(2)
-        
-        with col_filter:
-            st.markdown("#### 🔍 Filtrage")
-            filter_col = st.selectbox("Filtrer par colonne", options=["(aucun filtre)"] + st.session_state.master_columns)
-            filtered_df = df.copy()
-            
-            if filter_col == "CP":
-                dep_input = st.text_input("Départements (ex: 02,33,77)")
-                if dep_input.strip():
-                    prefixes = set(p.strip().zfill(2) for p in dep_input.split(",") if p.strip())
-                    mask = df["CP"].apply(lambda v: cp_matches_prefix(v, prefixes) if pd.notna(v) else False)
-                    filtered_df = df[mask]
-            elif filter_col != "(aucun filtre)":
-                unique_vals = sorted([str(v) for v in df[filter_col].dropna().unique()])
-                selected_vals = st.multiselect(f"Valeurs pour {filter_col}", options=unique_vals)
-                if selected_vals:
-                    filtered_df = df[df[filter_col].isin(selected_vals)]
-        
-        with col_dedup:
-            st.markdown("#### 🔄 Déduplication")
-            dup_col = st.selectbox("Colonne de déduplication", options=["(aucune)"] + st.session_state.master_columns, key="dedup_col")
-            
-            if dup_col != "(aucune)":
-                dup_before = filtered_df[dup_col].duplicated(keep=False).sum()
-                if dup_before > 0:
-                    st.warning(f"⚠️ {dup_before} lignes en doublon détectées sur '{dup_col}'")
-                    if st.checkbox(f"Supprimer les doublons sur '{dup_col}'", key=f"dup_checkbox_{dup_col}"):
-                        filtered_df = filtered_df.drop_duplicates(subset=[dup_col], keep='first')
-                        dup_after = filtered_df[dup_col].duplicated(keep=False).sum()
-                        st.success(f"✅ {dup_before - dup_after} doublons supprimés.")
-                else:
-                    st.info(f"ℹ️ Aucun doublon sur '{dup_col}'")
+        if filter_col == "CP":
+            dep_input = st.text_input("Departements a filtrer (separes par des virgules, ex: 02,33,77)")
+            if dep_input.strip():
+                prefixes = set(p.strip().zfill(2) for p in dep_input.split(",") if p.strip())
+                mask = df["CP"].apply(lambda v: cp_matches_prefix(v, prefixes) if pd.notna(v) else False)
+                filtered_df = df[mask]
+        elif filter_col != "(aucun filtre)":
+            unique_vals = sorted([v for v in df[filter_col].dropna().unique()])
+            selected_vals = st.multiselect("Valeurs a conserver pour " + filter_col, options=unique_vals)
+            if selected_vals:
+                filtered_df = df[df[filter_col].isin(selected_vals)]
         
         remaining_lines = len(filtered_df)
         remaining_duplicates = filtered_df.duplicated().sum()
         
-        st.markdown("---")
-        st.write(f"📊 **Résumé filtre :** {remaining_lines} lignes restantes | {remaining_duplicates} doublons globaux | {total_lines} au total")
+        st.write(f"Resultat filtre : **{remaining_lines}** lignes | **{remaining_duplicates}** doublons conserves | **{total_lines}** lignes importees au total")
         st.dataframe(filtered_df.head(50), use_container_width=True)
+        
+        dup_check_col = st.selectbox("Colonne pour detecter les doublons (ex: TELEPHONE MOBILE)", options=["(aucune)"] + st.session_state.master_columns)
+        if dup_check_col != "(aucune)":
+            dup_count = filtered_df[dup_check_col].duplicated(keep=False).sum()
+            st.warning(f"{dup_count} lignes en doublon detectees sur la colonne '{dup_check_col}' (non supprimees automatiquement).")
         
         st.session_state.filtered_df = filtered_df
 
 with tab4:
-    st.subheader("Exporter le résultat")
-    
+    st.subheader("Exporter le resultat filtre")
     if st.session_state.filtered_df is None:
-        st.info("ℹ️ Filtrez et préparez vos données dans l'onglet précédent avant d'exporter.")
+        st.info("ℹ️ Appliquez un filtre dans l'onglet precedent avant d'exporter.")
     else:
-        export_df = st.session_state.filtered_df.copy()
-        
+        export_df = st.session_state.filtered_df
         if len(export_df) == 0:
             st.error("❌ Impossible d'exporter : aucune donnée à exporter après filtrage.")
         else:
-            st.write(f"📊 **Prêt à exporter :** {len(export_df)} lignes en {export_df.shape[1]} colonnes")
-            
-            st.markdown("---")
-            st.subheader("Configuration de l'export")
-            
-            col_mode, col_name = st.columns(2)
-            
-            with col_mode:
-                st.markdown("#### 📤 Mode d'export")
-                export_mode = st.radio(
-                    "Choisissez le mode :",
-                    options=["fusionné", "par fichier source", "par onglet source"],
-                    key="export_mode_radio",
-                    index=0
-                )
-                st.session_state.export_mode = export_mode
-                
-                if export_mode == "fusionné":
-                    st.info("ℹ️ Un seul fichier final avec toutes les données")
-                elif export_mode == "par fichier source":
-                    st.info("ℹ️ Un fichier par fichier source importé")
-                else:
-                    st.info("ℹ️ Un fichier par onglet source importé")
-            
-            with col_name:
-                st.markdown("#### ✏️ Renommage optionnel")
-                export_name_base = st.text_input(
-                    "Nom de base pour l'export (optionnel)",
-                    placeholder="Ex: mon_export",
-                    key="export_name_input"
-                )
-                st.session_state.export_name_base = export_name_base
-                st.caption("Si vide, utilise le nom par défaut.")
-            
-            st.markdown("---")
+            st.write(f"{len(export_df)} lignes pretes a l'export.")
             
             col1, col2 = st.columns(2)
             
             with col1:
-                st.markdown("#### 📥 CSV")
-                if st.button("📥 Générer CSV", key="btn_csv"):
+                st.markdown("**Export CSV**")
+                if st.button("Telecharger CSV", key="btn_csv"):
                     csv_bytes = export_csv_safe(export_df)
                     if csv_bytes:
-                        fname = export_name_base if export_name_base else "export_leads"
                         st.download_button(
-                            label="💾 Télécharger CSV",
+                            label="💾 Telecharger CSV",
                             data=csv_bytes,
-                            file_name=f"{fname}.csv",
+                            file_name="export_leads.csv",
                             mime="text/csv"
                         )
             
             with col2:
-                st.markdown("#### 📥 Excel")
-                if st.button("📥 Générer Excel", key="btn_xlsx"):
+                st.markdown("**Export Excel**")
+                if st.button("Telecharger Excel", key="btn_xlsx"):
                     buffer = export_excel_safe(export_df)
                     if buffer:
-                        fname = export_name_base if export_name_base else "export_leads"
                         st.download_button(
-                            label="💾 Télécharger Excel",
+                            label="💾 Telecharger Excel",
                             data=buffer,
-                            file_name=f"{fname}.xlsx",
+                            file_name="export_leads.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                         )
             
             st.markdown("---")
-            st.info("ℹ️ Fichiers encodés en UTF-8. Utilisez l'onglet Filtrage pour déduplicater si besoin.")
+            st.info("ℹ️ Les fichiers sont encodés en UTF-8.")

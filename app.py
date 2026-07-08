@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import io
 from difflib import SequenceMatcher
-from pathlib import Path
+from functools import lru_cache
 
 st.set_page_config(page_title="Trieur de Fichiers Leads", layout="wide")
 
@@ -66,17 +66,22 @@ def export_excel_bytes(df):
     buffer.seek(0)
     return buffer
 
-def build_mapped_preview(df, mapping, master_columns):
-    preview = pd.DataFrame(index=df.index)
-    for master_col in master_columns:
-        src_cols_for_master = [s for s, m in mapping.items() if m == master_col and s in df.columns]
-        if master_col == "Source Data":
-            preview[master_col] = df.get("__source_file__", "")
-        elif src_cols_for_master:
-            preview[master_col] = df[src_cols_for_master[0]]
-        else:
-            preview[master_col] = None
-    return preview.head(7)
+@st.cache_data
+def auto_assign_columns(real_columns_tuple, master_columns_tuple):
+    real_columns = list(real_columns_tuple)
+    master_columns = list(master_columns_tuple)
+    threshold_auto = 0.75
+    new_mapping = {}
+    for src_col in real_columns:
+        best_master = None
+        best_score = 0
+        for master_col in master_columns:
+            score = similarity(src_col, master_col)
+            if score > best_score:
+                best_score = score
+                best_master = master_col
+        new_mapping[src_col] = best_master if best_score >= threshold_auto else "(non assigne)"
+    return new_mapping
 
 def is_google_sheet_url(text):
     t = str(text).strip().lower()
@@ -143,51 +148,39 @@ with tab2:
         st.session_state.all_sheets = all_sheets
         st.success(str(len(files)) + " fichier(s) importes, " + str(len(all_sheets)) + " onglet(s) detecte(s) au total.")
 
-        with st.expander("Voir le detail des onglets detectes"):
+        with st.expander("📋 Detail des onglets importes"):
             for k, df in all_sheets.items():
-                st.write(k + " -- " + str(len(df)) + " lignes, " + str(len(df.columns)) + " colonnes")
-                st.dataframe(df.head(7), use_container_width=True)
+                st.write(f"**{k}** : {len(df)} lignes, {len(df.columns)} colonnes")
 
         st.markdown("---")
         st.subheader("Mapping par fichier/onglet")
-        st.write("Pour chaque fichier et onglet, mappez les colonnes sources aux colonnes maitres.")
 
         for sheet_key, sheet_df in all_sheets.items():
             st.markdown(f"### 📄 {sheet_key}")
             
             real_columns = [c for c in sheet_df.columns if c != "__source_file__"]
-            
-            st.write(f"**Colonnes detectees ({len(real_columns)}) :** {', '.join(real_columns)}")
-            st.write(f"**Aperçu des 7 premieres lignes :**")
-            st.dataframe(sheet_df.head(7), use_container_width=True)
+            st.write(f"**Colonnes detectees ({len(real_columns)}) :** `{' | '.join(real_columns)}`")
             
             if sheet_key not in st.session_state.sheet_mappings:
                 st.session_state.sheet_mappings[sheet_key] = {}
             
             current_mapping = st.session_state.sheet_mappings[sheet_key]
             
-            col_auto, col_space = st.columns([2, 4])
+            col_auto, col_space = st.columns([1, 3])
             with col_auto:
-                if st.button(f"🚀 Auto-assign {sheet_key[:30]}...", key=f"auto_{sheet_key}"):
-                    threshold_auto = 0.75
-                    new_mapping = {}
-                    for src_col in real_columns:
-                        best_master = None
-                        best_score = 0
-                        for master_col in st.session_state.master_columns:
-                            score = similarity(src_col, master_col)
-                            if score > best_score:
-                                best_score = score
-                                best_master = master_col
-                        new_mapping[src_col] = best_master if best_score >= threshold_auto else "(non assigne)"
+                if st.button(f"🚀 Auto", key=f"auto_{sheet_key}"):
+                    new_mapping = auto_assign_columns(tuple(real_columns), tuple(st.session_state.master_columns))
                     st.session_state.sheet_mappings[sheet_key] = new_mapping
-                    st.success(f"✓ Assignation auto pour {sheet_key[:30]}...")
+                    st.rerun()
             
-            st.write("**Mapping manuel (affichage horizontal) :**")
+            st.write("**Aperçu des 7 premieres lignes :**")
+            st.dataframe(sheet_df.head(7), use_container_width=True)
+            
+            st.write("**Mapping des colonnes (affichage horizontal compact) :**")
             mapping_options = ["(non assigne)"] + st.session_state.master_columns
             updated_mapping = {}
             
-            cols_per_row = 3
+            cols_per_row = 4
             for i in range(0, len(real_columns), cols_per_row):
                 cols = st.columns(cols_per_row)
                 batch = real_columns[i:i+cols_per_row]
@@ -197,19 +190,23 @@ with tab2:
                         current = current_mapping.get(src_col, "(non assigne)")
                         if current not in mapping_options:
                             current = "(non assigne)"
+                        try:
+                            idx_val = mapping_options.index(current)
+                        except ValueError:
+                            idx_val = 0
                         choice = st.selectbox(
                             src_col,
                             options=mapping_options,
-                            index=mapping_options.index(current),
+                            index=idx_val,
                             key=f"map_{sheet_key}_{src_col}",
-                            label_visibility="visible"
+                            label_visibility="collapsed"
                         )
                         updated_mapping[src_col] = choice
             
             st.session_state.sheet_mappings[sheet_key] = updated_mapping
             st.markdown("---")
 
-        if st.button("✓ Construire la base de travail fusionnee"):
+        if st.button("✅ Construire la base de travail fusionnee", type="primary"):
             rows = []
             for sheet_key, sheet_df in all_sheets.items():
                 source_file = sheet_df["__source_file__"].iloc[0] if len(sheet_df) > 0 else sheet_key
@@ -233,7 +230,7 @@ with tab2:
             final_df = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=st.session_state.master_columns)
             final_df = final_df.dropna(how="all")
             st.session_state.final_df = final_df
-            st.success("✓ Base de travail construite : " + str(len(final_df)) + " lignes.")
+            st.success(f"✅ Base de travail construite : {len(final_df)} lignes.")
             st.dataframe(final_df.head(50), use_container_width=True)
     else:
         st.info("Importe un fichier Excel ou colle une URL Google Sheets pour continuer.")
@@ -244,7 +241,7 @@ with tab3:
         st.info("Importez et mappez des fichiers dans l'onglet precedent avant de filtrer.")
     else:
         df = st.session_state.final_df.copy()
-        st.write("Base actuelle : " + str(len(df)) + " lignes")
+        st.write(f"Base actuelle : {len(df)} lignes")
         filter_col = st.selectbox("Filtrer par colonne", options=["(aucun filtre)"] + st.session_state.master_columns)
         filtered_df = df
         if filter_col == "CP":
@@ -258,12 +255,12 @@ with tab3:
             selected_vals = st.multiselect("Valeurs a conserver pour " + filter_col, options=unique_vals)
             if selected_vals:
                 filtered_df = df[df[filter_col].isin(selected_vals)]
-        st.write("Resultat filtre : " + str(len(filtered_df)) + " lignes")
+        st.write(f"Resultat filtre : {len(filtered_df)} lignes")
         st.dataframe(filtered_df.head(50), use_container_width=True)
         dup_check_col = st.selectbox("Colonne pour detecter les doublons (ex: TELEPHONE MOBILE)", options=["(aucune)"] + st.session_state.master_columns)
         if dup_check_col != "(aucune)":
             dup_count = filtered_df[dup_check_col].duplicated(keep=False).sum()
-            st.warning(str(dup_count) + " lignes en doublon detectees sur la colonne '" + dup_check_col + "' (non supprimees automatiquement).")
+            st.warning(f"{dup_count} lignes en doublon detectees sur la colonne '{dup_check_col}' (non supprimees automatiquement).")
         st.session_state.filtered_df = filtered_df
 
 with tab4:
@@ -272,18 +269,18 @@ with tab4:
         st.info("Appliquez un filtre dans l'onglet precedent avant d'exporter.")
     else:
         export_df = st.session_state.filtered_df
-        st.write(str(len(export_df)) + " lignes pretes a l'export.")
+        st.write(f"{len(export_df)} lignes pretes a l'export.")
         chunks = np.array_split(export_df, max(1, -(-len(export_df) // 1000000))) if len(export_df) > 0 else [export_df]
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("**Export CSV**")
             for i, chunk in enumerate(chunks):
                 csv_bytes = chunk.to_csv(index=False, sep=",").encode("utf-8-sig")
-                fname = "export_leads.csv" if len(chunks) == 1 else "export_leads_partie" + str(i+1) + ".csv"
-                st.download_button("Telecharger CSV" + ("" if len(chunks)==1 else " (partie " + str(i+1) + ")"), data=csv_bytes, file_name=fname, mime="text/csv", key="csv_"+str(i))
+                fname = "export_leads.csv" if len(chunks) == 1 else f"export_leads_partie{i+1}.csv"
+                st.download_button(f"Telecharger CSV" + ("" if len(chunks)==1 else f" (partie {i+1})"), data=csv_bytes, file_name=fname, mime="text/csv", key="csv_"+str(i))
         with col2:
             st.markdown("**Export Excel**")
             for i, chunk in enumerate(chunks):
                 buffer = export_excel_bytes(chunk)
-                fname = "export_leads.xlsx" if len(chunks) == 1 else "export_leads_partie" + str(i+1) + ".xlsx"
-                st.download_button("Telecharger Excel" + ("" if len(chunks)==1 else " (partie " + str(i+1) + ")"), data=buffer, file_name=fname, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="xlsx_"+str(i))
+                fname = "export_leads.xlsx" if len(chunks) == 1 else f"export_leads_partie{i+1}.xlsx"
+                st.download_button(f"Telecharger Excel" + ("" if len(chunks)==1 else f" (partie {i+1})"), data=buffer, file_name=fname, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="xlsx_"+str(i))

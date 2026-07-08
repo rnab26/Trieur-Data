@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import io
+import unicodedata
+import re
 from difflib import SequenceMatcher
 
 st.set_page_config(page_title="Trieur de Fichiers Leads", layout="wide")
@@ -10,6 +12,20 @@ DEFAULT_MASTER_COLUMNS = [
     "NOM", "PRENOM", "GENRE/CIVILITE", "VILLE", "CP", "ADRESSE",
     "TELEPHONE MOBILE", "TELEPHONE FIXE", "EMAIL", "DATE DE NAISSANCE", "Source Data"
 ]
+
+SYNONYMES = {
+    "NOM": ["nom", "lastname", "surname", "last_name", "family_name", "patronyme"],
+    "PRENOM": ["prenom", "prénom", "firstname", "first_name", "given_name"],
+    "GENRE/CIVILITE": ["genre", "civilite", "civilité", "sexe", "sex", "title", "salutation"],
+    "VILLE": ["ville", "city", "commune", "locality"],
+    "CP": ["cp", "codepostal", "code_postal", "postalcode", "zipcode", "zip", "postal"],
+    "ADRESSE": ["adresse", "address", "rue", "street", "location"],
+    "TELEPHONE MOBILE": ["telephoneportable", "portable", "mobile", "gsm", "cell", "cellphone", "phone_mobile"],
+    "TELEPHONE FIXE": ["telephonefixe", "fixe", "phone", "homephone", "landline", "phone_fixe"],
+    "EMAIL": ["email", "e-mail", "mail", "courriel", "e_mail"],
+    "DATE DE NAISSANCE": ["datedenaissance", "date_naissance", "naissance", "dob", "birthdate", "birthday", "birth_date"],
+    "Source Data": ["source", "fichier", "file", "origin"]
+}
 
 if "master_columns" not in st.session_state:
     st.session_state.master_columns = DEFAULT_MASTER_COLUMNS.copy()
@@ -21,6 +37,46 @@ if "final_df" not in st.session_state:
     st.session_state.final_df = None
 if "filtered_df" not in st.session_state:
     st.session_state.filtered_df = None
+if "export_mode" not in st.session_state:
+    st.session_state.export_mode = "fusionné"
+if "export_name_base" not in st.session_state:
+    st.session_state.export_name_base = ""
+
+def normalize_text(text):
+    """Normaliser un texte : minuscules, accents, espaces, caractères spéciaux"""
+    text = str(text).lower().strip()
+    text = unicodedata.normalize('NFKD', text)
+    text = ''.join([c for c in text if not unicodedata.combining(c)])
+    text = re.sub(r'[\s\-_/.]', '', text)
+    text = re.sub(r'[^a-z0-9]', '', text)
+    return text
+
+def find_best_master_col(src_col, master_cols):
+    """Trouver la meilleure colonne maître pour une colonne source"""
+    src_norm = normalize_text(src_col)
+    
+    # 1. Correspondance exacte normalisée
+    for master in master_cols:
+        if normalize_text(master) == src_norm:
+            return master
+    
+    # 2. Correspondance via synonymes
+    for master in master_cols:
+        synonyms = SYNONYMES.get(master, [])
+        for syn in synonyms:
+            if normalize_text(syn) == src_norm:
+                return master
+    
+    # 3. Fuzzy matching
+    best_master = None
+    best_score = 0.75
+    for master in master_cols:
+        score = SequenceMatcher(None, src_norm, normalize_text(master)).ratio()
+        if score > best_score:
+            best_score = score
+            best_master = master
+    
+    return best_master
 
 def similarity(a, b):
     return SequenceMatcher(None, str(a).lower().strip(), str(b).lower().strip()).ratio()
@@ -43,18 +99,49 @@ def cp_matches_prefix(cp_value, prefixes):
     return cp5[:2] in prefixes
 
 @st.cache_data
-def read_excel_any(file_obj):
+def read_excel_sheets(file_obj):
+    """Lire tous les onglets d'un fichier Excel"""
     try:
-        return pd.read_excel(file_obj, sheet_name=None, dtype=str, engine="openpyxl")
+        sheets = pd.read_excel(file_obj, sheet_name=None, dtype=str, engine="openpyxl")
+        return sheets if sheets else {}
     except Exception:
         try:
-            return pd.read_excel(file_obj, sheet_name=None, dtype=str)
+            sheets = pd.read_excel(file_obj, sheet_name=None, dtype=str)
+            return sheets if sheets else {}
         except Exception as e:
-            st.error(f"Impossible de lire le fichier: {str(e)}")
+            st.error(f"❌ Erreur lecture fichier: {str(e)}")
             return {}
 
+def read_google_sheets_all_sheets(url):
+    """Lire Google Sheets comme un classeur multi-onglets"""
+    try:
+        if "/edit" in url:
+            url = url.split("/edit")[0]
+        if url.endswith("/"):
+            url = url[:-1]
+        if "/d/" not in url:
+            return {}
+        sheet_id = url.split("/d/")[1].split("/")[0]
+        
+        all_sheets = {}
+        try:
+            gviz_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/query?tqx=out:csv"
+            df = pd.read_csv(gviz_url, dtype=str)
+            if len(df) > 0:
+                all_sheets["Sheet1"] = df
+        except Exception:
+            csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+            df = pd.read_csv(csv_url, dtype=str)
+            if len(df) > 0:
+                all_sheets["Sheet1"] = df
+        
+        return all_sheets
+    except Exception as e:
+        st.error(f"❌ Erreur lecture Google Sheets: {str(e)}")
+        return {}
+
 def export_csv_safe(df):
-    """Export CSV sécurisé avec gestion d'erreurs"""
+    """Export CSV sécurisé"""
     try:
         df_clean = df.copy()
         for col in df_clean.columns:
@@ -63,7 +150,7 @@ def export_csv_safe(df):
         csv_bytes = df_clean.to_csv(index=False, sep=",").encode("utf-8-sig")
         return csv_bytes
     except Exception as e:
-        st.error(f"Erreur lors de la génération CSV: {str(e)}")
+        st.error(f"❌ Erreur CSV: {str(e)}")
         return None
 
 def export_excel_safe(df):
@@ -80,70 +167,38 @@ def export_excel_safe(df):
                     cp_idx = df.columns.get_loc("CP")
                     worksheet.set_column(cp_idx, cp_idx, 12, text_format)
         except Exception:
-            try:
-                with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-                    df.to_excel(writer, index=False, sheet_name="Leads")
-            except Exception as e:
-                st.error(f"Erreur lors de la génération Excel: {str(e)}")
-                return None
+            with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False, sheet_name="Leads")
         buffer.seek(0)
         return buffer
     except Exception as e:
-        st.error(f"Erreur critique Excel: {str(e)}")
+        st.error(f"❌ Erreur Excel: {str(e)}")
         return None
-
-def auto_assign_columns_fast(real_columns, master_columns):
-    """Assignation automatique rapide"""
-    threshold_auto = 0.75
-    new_mapping = {}
-    for src_col in real_columns:
-        best_master = None
-        best_score = 0
-        for master_col in master_columns:
-            score = similarity(src_col, master_col)
-            if score > best_score:
-                best_score = score
-                best_master = master_col
-        new_mapping[src_col] = best_master if best_score >= threshold_auto else "(non assigne)"
-    return new_mapping
 
 def is_google_sheet_url(text):
     t = str(text).strip().lower()
     return "docs.google.com/spreadsheets" in t
 
-def google_sheet_to_csv_url(url):
-    try:
-        if "/edit" in url:
-            url = url.split("/edit")[0]
-        if url.endswith("/"):
-            url = url[:-1]
-        if "/d/" not in url:
-            return None
-        sheet_id = url.split("/d/")[1].split("/")[0]
-        return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
-    except Exception:
-        return None
-
 st.title("Trieur de Fichiers Leads")
-st.caption("Import Excel ou Google Sheets → mapping colonnes → aperçu → filtrage → export")
+st.caption("Import Excel/Google Sheets → mapping colonnes → aperçu → filtrage → export")
 
 tab1, tab2, tab3, tab4 = st.tabs(["1. Colonnes maitres", "2. Import et Mapping", "3. Filtrage & Dedup", "4. Export"])
 
 with tab1:
-    st.subheader("Gerer vos colonnes maitres")
-    st.write("Ajoutez, supprimez ou modifiez vos colonnes maitres ci-dessous, une par ligne.")
-    cols_text = st.text_area("Colonnes maitres", value="\n".join(st.session_state.master_columns), height=250, key="master_cols_input")
-    if st.button("✅ Enregistrer la liste des colonnes maitres"):
+    st.subheader("Gérer vos colonnes maîtres")
+    st.write("Ajoutez, supprimez ou modifiez vos colonnes maîtres ci-dessous, une par ligne.")
+    cols_text = st.text_area("Colonnes maîtres", value="\n".join(st.session_state.master_columns), height=250, key="master_cols_input")
+    if st.button("✅ Enregistrer"):
         new_list = [c.strip() for c in cols_text.split("\n") if c.strip()]
         if new_list:
             st.session_state.master_columns = new_list
-            st.success(f"✅ {len(new_list)} colonnes maitres enregistrees.")
+            st.success(f"✅ {len(new_list)} colonnes maîtres enregistrées.")
         else:
             st.error("❌ Veuillez entrer au moins une colonne maître.")
 
 with tab2:
-    st.subheader("Importer vos fichiers Excel ou Google Sheets")
-    files = st.file_uploader("Deposez un ou plusieurs fichiers Excel", type=["xlsx", "xls"], accept_multiple_files=True)
+    st.subheader("Importer vos fichiers")
+    files = st.file_uploader("Déposez un ou plusieurs fichiers Excel", type=["xlsx", "xls"], accept_multiple_files=True)
     google_url = st.text_input("Ou collez une URL Google Sheets publique (optionnel)")
 
     all_sheets = {}
@@ -151,7 +206,7 @@ with tab2:
     if files:
         for f in files:
             try:
-                sheets = read_excel_any(f)
+                sheets = read_excel_sheets(f)
                 if not sheets:
                     st.error(f"❌ Aucun onglet lisible dans {f.name}")
                     continue
@@ -162,34 +217,34 @@ with tab2:
                     key = f.name + " :: " + sheet_name
                     df = df.copy()
                     df["__source_file__"] = f.name
+                    df["__source_sheet__"] = sheet_name
                     all_sheets[key] = df
             except Exception as e:
                 st.error(f"❌ Erreur lecture {f.name}: {str(e)}")
 
     if google_url.strip() and is_google_sheet_url(google_url):
-        csv_url = google_sheet_to_csv_url(google_url)
-        if csv_url:
-            try:
-                gdf = pd.read_csv(csv_url, dtype=str)
-                if len(gdf) == 0:
-                    st.warning("⚠️ Google Sheets est vide.")
-                else:
-                    gdf["__source_file__"] = "Google Sheets"
-                    all_sheets["Google Sheets :: Sheet1"] = gdf
-            except Exception as e:
-                st.error(f"❌ Erreur lecture Google Sheets: {str(e)}")
+        sheets = read_google_sheets_all_sheets(google_url)
+        if sheets:
+            for sheet_name, df in sheets.items():
+                if len(df) > 0:
+                    key = "Google Sheets :: " + sheet_name
+                    df = df.copy()
+                    df["__source_file__"] = "Google Sheets"
+                    df["__source_sheet__"] = sheet_name
+                    all_sheets[key] = df
         else:
-            st.warning("⚠️ URL Google Sheets non reconnue.")
+            st.warning("⚠️ URL Google Sheets non reconnue ou vide.")
 
     if all_sheets:
         st.session_state.all_sheets = all_sheets
         total_files = len(set([k.split(" :: ")[0] for k in all_sheets.keys()]))
-        st.success(f"✅ {total_files} fichier(s) importes, {len(all_sheets)} onglet(s) detecte(s) au total.")
+        st.success(f"✅ {total_files} fichier(s) importés, {len(all_sheets)} onglet(s) détecté(s) au total.")
 
-        with st.expander("📋 Detail des onglets importes"):
+        with st.expander("📋 Détail des onglets importés"):
             for k, df in all_sheets.items():
                 num_dup = df.duplicated().sum()
-                st.write(f"**{k}** → {len(df)} lignes | {len(df.columns)} colonnes | {num_dup} doublons")
+                real_cols = [c for c in df.columns if c not in ["__source_file__", "__source_sheet__"]]
+                st.write(f"**{k}** → {len(df)} lignes | {len(real_cols)} colonnes | {num_dup} doublons")
 
         st.markdown("---")
         st.subheader("Assignation des colonnes")
@@ -199,7 +254,7 @@ with tab2:
         for sheet_key, sheet_df in all_sheets.items():
             st.markdown(f"### 📄 {sheet_key}")
             
-            real_columns = [c for c in sheet_df.columns if c != "__source_file__"]
+            real_columns = [c for c in sheet_df.columns if c not in ["__source_file__", "__source_sheet__"]]
             num_rows = len(sheet_df)
             num_cols = len(real_columns)
             num_duplicates = sheet_df.duplicated().sum()
@@ -212,7 +267,10 @@ with tab2:
             col_auto, col_space = st.columns([1, 3])
             with col_auto:
                 if st.button(f"🚀 Auto-assign", key=f"auto_{sheet_key}"):
-                    new_mapping = auto_assign_columns_fast(real_columns, st.session_state.master_columns)
+                    new_mapping = {}
+                    for src_col in real_columns:
+                        best_master = find_best_master_col(src_col, st.session_state.master_columns)
+                        new_mapping[src_col] = best_master if best_master else "(non assigné)"
                     st.session_state.sheet_mappings[sheet_key] = new_mapping
                     st.rerun()
             
@@ -221,19 +279,18 @@ with tab2:
             preview_df = sheet_df.head(7).copy()
             
             current_mapping = st.session_state.sheet_mappings[sheet_key]
-            
             updated_mapping = {}
             cols_display = st.columns(len(real_columns))
             
             for idx, src_col in enumerate(real_columns):
                 with cols_display[idx]:
-                    current = current_mapping.get(src_col, "(non assigne)")
+                    current = current_mapping.get(src_col, "(non assigné)")
                     
-                    available_options = ["(non assigne)"] + [m for m in st.session_state.master_columns 
+                    available_options = ["(non assigné)"] + [m for m in st.session_state.master_columns 
                                                                if m not in [updated_mapping.get(c, "") for c in real_columns if c != src_col]]
                     
                     if current not in available_options:
-                        current = "(non assigne)"
+                        current = "(non assigné)"
                     
                     try:
                         idx_val = available_options.index(current)
@@ -248,26 +305,26 @@ with tab2:
                         label_visibility="visible"
                     )
                     updated_mapping[src_col] = choice
-                    if choice != "(non assigne)":
+                    if choice != "(non assigné)":
                         any_assigned = True
             
             st.session_state.sheet_mappings[sheet_key] = updated_mapping
-            
             st.dataframe(preview_df, use_container_width=True)
             st.markdown("---")
 
         if not any_assigned:
             st.warning("⚠️ Veuillez assigner au moins une colonne maître avant de construire la base.")
         else:
-            if st.button("✅ Construire la base de travail fusionnee", type="primary"):
+            if st.button("✅ Construire la base de travail fusionnée", type="primary"):
                 rows = []
                 total_merged = 0
                 
                 for sheet_key, sheet_df in all_sheets.items():
                     source_file = sheet_df["__source_file__"].iloc[0] if len(sheet_df) > 0 else sheet_key
+                    source_sheet = sheet_df["__source_sheet__"].iloc[0] if len(sheet_df) > 0 else "Unknown"
                     mapping = st.session_state.sheet_mappings.get(sheet_key, {})
                     
-                    assigned_cols = [m for m in mapping.values() if m != "(non assigne)"]
+                    assigned_cols = [m for m in mapping.values() if m != "(non assigné)"]
                     if not assigned_cols:
                         st.warning(f"⚠️ {sheet_key}: Aucune colonne assignée, ignoré.")
                         continue
@@ -276,7 +333,7 @@ with tab2:
                     for master_col in st.session_state.master_columns:
                         src_cols_for_master = [s for s, m in mapping.items() if m == master_col and s in sheet_df.columns]
                         if master_col == "Source Data":
-                            sub[master_col] = source_file
+                            sub[master_col] = f"{source_file} ({source_sheet})"
                         elif not src_cols_for_master:
                             sub[master_col] = None
                         else:
@@ -289,9 +346,9 @@ with tab2:
                     total_merged += len(sub)
                 
                 if not rows:
-                    st.error("❌ Aucun onglet avec assignation trouvé. Veuillez assigner des colonnes.")
+                    st.error("❌ Aucun onglet avec assignation trouvé.")
                 else:
-                    final_df = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=st.session_state.master_columns)
+                    final_df = pd.concat(rows, ignore_index=True)
                     final_df = final_df.dropna(how="all")
                     
                     if len(final_df) == 0:
@@ -301,18 +358,18 @@ with tab2:
                         st.success(f"✅ Base construite : {len(final_df)} lignes fusionnées.")
                         st.dataframe(final_df.head(50), use_container_width=True)
     else:
-        st.info("ℹ️ Importe un fichier Excel ou colle une URL Google Sheets pour continuer.")
+        st.info("ℹ️ Importez des fichiers pour continuer.")
 
 with tab3:
-    st.subheader("Filtrer et Deduplicater")
+    st.subheader("Filtrer et Déduplicater")
     
     if st.session_state.final_df is None:
-        st.info("ℹ️ Importez et mappez des fichiers dans l'onglet precedent avant de filtrer.")
+        st.info("ℹ️ Importez et mappez des fichiers dans l'onglet précédent avant de filtrer.")
     else:
         df = st.session_state.final_df.copy()
         total_lines = len(df)
         
-        st.write(f"📊 **Base de travail :** {total_lines} lignes importees")
+        st.write(f"📊 **Base de travail :** {total_lines} lignes importées")
         
         col_filter, col_dedup = st.columns(2)
         
@@ -340,10 +397,10 @@ with tab3:
             if dup_col != "(aucune)":
                 dup_before = filtered_df[dup_col].duplicated(keep=False).sum()
                 if dup_before > 0:
-                    st.warning(f"⚠️ {dup_before} lignes en doublon detectees sur '{dup_col}'")
+                    st.warning(f"⚠️ {dup_before} lignes en doublon détectées sur '{dup_col}'")
                     if st.checkbox(f"Supprimer les doublons sur '{dup_col}'", key=f"dup_checkbox_{dup_col}"):
                         filtered_df = filtered_df.drop_duplicates(subset=[dup_col], keep='first')
-                        dup_after = dup_before - len([x for x in filtered_df[dup_col].duplicated(keep=False)])
+                        dup_after = filtered_df[dup_col].duplicated(keep=False).sum()
                         st.success(f"✅ {dup_before - dup_after} doublons supprimés.")
                 else:
                     st.info(f"ℹ️ Aucun doublon sur '{dup_col}'")
@@ -358,47 +415,78 @@ with tab3:
         st.session_state.filtered_df = filtered_df
 
 with tab4:
-    st.subheader("Exporter le resultat")
+    st.subheader("Exporter le résultat")
     
     if st.session_state.filtered_df is None:
-        st.info("ℹ️ Filtrez et préparez vos données dans l'onglet precedent avant d'exporter.")
+        st.info("ℹ️ Filtrez et préparez vos données dans l'onglet précédent avant d'exporter.")
     else:
         export_df = st.session_state.filtered_df.copy()
         
         if len(export_df) == 0:
             st.error("❌ Impossible d'exporter : aucune donnée à exporter après filtrage.")
         else:
-            st.write(f"📊 **Pret a exporter :** {len(export_df)} lignes en {export_df.shape[1]} colonnes")
+            st.write(f"📊 **Prêt à exporter :** {len(export_df)} lignes en {export_df.shape[1]} colonnes")
+            
+            st.markdown("---")
+            st.subheader("Configuration de l'export")
+            
+            col_mode, col_name = st.columns(2)
+            
+            with col_mode:
+                st.markdown("#### 📤 Mode d'export")
+                export_mode = st.radio(
+                    "Choisissez le mode :",
+                    options=["fusionné", "par fichier", "par onglet"],
+                    key="export_mode_radio"
+                )
+                st.session_state.export_mode = export_mode
+                
+                if export_mode == "fusionné":
+                    st.info("ℹ️ Un seul fichier final avec toutes les données")
+                elif export_mode == "par fichier":
+                    st.info("ℹ️ Un fichier par fichier source importé")
+                else:
+                    st.info("ℹ️ Un fichier par onglet source importé")
+            
+            with col_name:
+                st.markdown("#### ✏️ Renommage optionnel")
+                export_name_base = st.text_input(
+                    "Nom de base pour l'export (optionnel)",
+                    placeholder="Ex: mon_export",
+                    key="export_name_input"
+                )
+                st.session_state.export_name_base = export_name_base
+                st.caption("Si vide, utilise le nom par défaut. Exemples: mon_export.xlsx, mon_export_partie1.xlsx")
+            
+            st.markdown("---")
             
             col1, col2 = st.columns(2)
             
             with col1:
                 st.markdown("#### 📥 CSV")
-                if st.button("Telecharger CSV", key="btn_csv"):
+                if st.button("📥 Générer CSV", key="btn_csv"):
                     csv_bytes = export_csv_safe(export_df)
                     if csv_bytes:
+                        fname = export_name_base if export_name_base else "export_leads"
                         st.download_button(
-                            label="💾 Telecharger CSV",
+                            label="💾 Télécharger CSV",
                             data=csv_bytes,
-                            file_name="export_leads.csv",
+                            file_name=f"{fname}.csv",
                             mime="text/csv"
                         )
-                    else:
-                        st.error("❌ Export CSV échoué.")
             
             with col2:
                 st.markdown("#### 📥 Excel")
-                if st.button("Telecharger Excel", key="btn_xlsx"):
+                if st.button("📥 Générer Excel", key="btn_xlsx"):
                     buffer = export_excel_safe(export_df)
                     if buffer:
+                        fname = export_name_base if export_name_base else "export_leads"
                         st.download_button(
-                            label="💾 Telecharger Excel",
+                            label="💾 Télécharger Excel",
                             data=buffer,
-                            file_name="export_leads.xlsx",
+                            file_name=f"{fname}.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                         )
-                    else:
-                        st.error("❌ Export Excel échoué.")
             
             st.markdown("---")
-            st.info("ℹ️ Les fichiers sont encodés en UTF-8. Les doublons ne sont PAS supprimés automatiquement : utilisez l'onglet Filtrage pour déduplicater si besoin.")
+            st.info("ℹ️ Fichiers encodés en UTF-8. Utilisez l'onglet Filtrage pour déduplicater si besoin.")

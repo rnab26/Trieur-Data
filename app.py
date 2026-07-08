@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import io
 from difflib import SequenceMatcher
-from functools import lru_cache
 
 st.set_page_config(page_title="Trieur de Fichiers Leads", layout="wide")
 
@@ -66,10 +65,8 @@ def export_excel_bytes(df):
     buffer.seek(0)
     return buffer
 
-@st.cache_data
-def auto_assign_columns(real_columns_tuple, master_columns_tuple):
-    real_columns = list(real_columns_tuple)
-    master_columns = list(master_columns_tuple)
+def auto_assign_columns_fast(real_columns, master_columns):
+    """Assignation automatique rapide sans cache pour instantané"""
     threshold_auto = 0.75
     new_mapping = {}
     for src_col in real_columns:
@@ -168,12 +165,10 @@ with tab2:
             if sheet_key not in st.session_state.sheet_mappings:
                 st.session_state.sheet_mappings[sheet_key] = {}
             
-            current_mapping = st.session_state.sheet_mappings[sheet_key]
-            
             col_auto, col_space = st.columns([1, 3])
             with col_auto:
                 if st.button(f"🚀 Auto", key=f"auto_{sheet_key}"):
-                    new_mapping = auto_assign_columns(tuple(real_columns), tuple(st.session_state.master_columns))
+                    new_mapping = auto_assign_columns_fast(real_columns, st.session_state.master_columns)
                     st.session_state.sheet_mappings[sheet_key] = new_mapping
                     st.rerun()
             
@@ -181,24 +176,23 @@ with tab2:
             
             preview_df = sheet_df.head(7).copy()
             
+            st.write("**Sélectionnez les colonnes maîtres correspondantes :**")
+            
+            current_mapping = st.session_state.sheet_mappings[sheet_key]
             mapping_options = ["(non assigne)"] + st.session_state.master_columns
+            
             updated_mapping = {}
             
-            st.write("**Mapping des colonnes (ligne d'en-têtes avec assignation) :**")
-            
-            num_cols_display = len(real_columns)
-            col_width = max(1, 12 // min(num_cols_display, 6))
-            
-            cols = st.columns(num_cols_display)
+            cols_display = st.columns(len(real_columns))
             
             for idx, src_col in enumerate(real_columns):
-                with cols[idx]:
+                with cols_display[idx]:
                     current = current_mapping.get(src_col, "(non assigne)")
-                    if current not in st.session_state.master_columns + ["(non assigne)"]:
+                    if current not in mapping_options:
                         current = "(non assigne)"
                     
                     available_options = ["(non assigne)"] + [m for m in st.session_state.master_columns 
-                                                               if m not in updated_mapping.values() or updated_mapping.get(src_col) == m]
+                                                               if m not in [updated_mapping.get(c, "") for c in real_columns if c != src_col]]
                     
                     if current not in available_options:
                         current = "(non assigne)"
@@ -209,17 +203,17 @@ with tab2:
                         idx_val = 0
                     
                     choice = st.selectbox(
-                        f"**{src_col}**",
+                        src_col,
                         options=available_options,
                         index=idx_val,
                         key=f"map_{sheet_key}_{src_col}",
-                        label_visibility="collapsed"
+                        label_visibility="visible",
+                        on_change=lambda sc=src_col, sk=sheet_key: None
                     )
                     updated_mapping[src_col] = choice
             
             st.session_state.sheet_mappings[sheet_key] = updated_mapping
             
-            st.markdown("")
             st.dataframe(preview_df, use_container_width=True)
             
             st.markdown("---")

@@ -63,13 +63,12 @@ def find_best_master_col(src_col, master_cols):
     # 2. Correspondance via synonymes
     for master in master_cols:
         synonyms = SYNONYMES.get(master, [])
-        for syn in synonyms:
-            if normalize_text(syn) == src_norm:
-                return master
+        if src_norm in [normalize_text(syn) for syn in synonyms]:
+            return master
     
-    # 3. Fuzzy matching
+    # 3. Fuzzy matching avec seuil
     best_master = None
-    best_score = 0.75
+    best_score = 0.65
     for master in master_cols:
         score = SequenceMatcher(None, src_norm, normalize_text(master)).ratio()
         if score > best_score:
@@ -78,42 +77,31 @@ def find_best_master_col(src_col, master_cols):
     
     return best_master
 
-def similarity(a, b):
-    return SequenceMatcher(None, str(a).lower().strip(), str(b).lower().strip()).ratio()
-
-def normalize_cp(value):
-    s = str(value).strip()
-    s = s.split(".")[0]
-    if not s.isdigit():
-        return None
-    if len(s) == 4:
-        s = "0" + s
-    if len(s) != 5:
-        return None
-    return s
-
-def cp_matches_prefix(cp_value, prefixes):
-    cp5 = normalize_cp(cp_value)
-    if cp5 is None:
-        return False
-    return cp5[:2] in prefixes
-
-@st.cache_data
-def read_excel_sheets(file_obj):
-    """Lire tous les onglets d'un fichier Excel"""
+def read_excel_all_sheets(file_obj):
+    """Lire TOUS les onglets d'un fichier Excel"""
     try:
-        sheets = pd.read_excel(file_obj, sheet_name=None, dtype=str, engine="openpyxl")
-        return sheets if sheets else {}
+        xls = pd.ExcelFile(file_obj, engine="openpyxl")
+        sheets = {}
+        for sheet_name in xls.sheet_names:
+            df = pd.read_excel(file_obj, sheet_name=sheet_name, dtype=str, engine="openpyxl")
+            if len(df) > 0:
+                sheets[sheet_name] = df
+        return sheets
     except Exception:
         try:
-            sheets = pd.read_excel(file_obj, sheet_name=None, dtype=str)
-            return sheets if sheets else {}
+            xls = pd.ExcelFile(file_obj)
+            sheets = {}
+            for sheet_name in xls.sheet_names:
+                df = pd.read_excel(file_obj, sheet_name=sheet_name, dtype=str)
+                if len(df) > 0:
+                    sheets[sheet_name] = df
+            return sheets
         except Exception as e:
-            st.error(f"❌ Erreur lecture fichier: {str(e)}")
+            st.error(f"❌ Erreur lecture Excel: {str(e)}")
             return {}
 
 def read_google_sheets_all_sheets(url):
-    """Lire Google Sheets comme un classeur multi-onglets"""
+    """Lire Google Sheets avec tous les onglets détectés"""
     try:
         if "/edit" in url:
             url = url.split("/edit")[0]
@@ -121,23 +109,36 @@ def read_google_sheets_all_sheets(url):
             url = url[:-1]
         if "/d/" not in url:
             return {}
-        sheet_id = url.split("/d/")[1].split("/")[0]
         
+        sheet_id = url.split("/d/")[1].split("/")[0]
         all_sheets = {}
+        
+        # Essayer d'obtenir la liste des onglets via export CSV
+        # Google Sheets exporte par défaut le premier onglet
         try:
-            gviz_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/query?tqx=out:csv"
-            df = pd.read_csv(gviz_url, dtype=str)
-            if len(df) > 0:
-                all_sheets["Sheet1"] = df
-        except Exception:
             csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
             df = pd.read_csv(csv_url, dtype=str)
             if len(df) > 0:
                 all_sheets["Sheet1"] = df
+        except Exception:
+            pass
+        
+        # Essayer d'accéder directement avec gviz pour tous les onglets
+        for i in range(20):
+            try:
+                gid = i
+                csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+                df = pd.read_csv(csv_url, dtype=str)
+                if len(df) > 0:
+                    sheet_name = f"Sheet{i+1}" if i > 0 else "Sheet1"
+                    all_sheets[sheet_name] = df
+            except Exception:
+                if i > 3 and len(all_sheets) > 0:
+                    break
         
         return all_sheets
     except Exception as e:
-        st.error(f"❌ Erreur lecture Google Sheets: {str(e)}")
+        st.error(f"❌ Erreur Google Sheets: {str(e)}")
         return {}
 
 def export_csv_safe(df):
@@ -145,8 +146,7 @@ def export_csv_safe(df):
     try:
         df_clean = df.copy()
         for col in df_clean.columns:
-            if df_clean[col].dtype == 'object':
-                df_clean[col] = df_clean[col].astype(str)
+            df_clean[col] = df_clean[col].astype(str)
         csv_bytes = df_clean.to_csv(index=False, sep=",").encode("utf-8-sig")
         return csv_bytes
     except Exception as e:
@@ -179,6 +179,23 @@ def is_google_sheet_url(text):
     t = str(text).strip().lower()
     return "docs.google.com/spreadsheets" in t
 
+def normalize_cp(value):
+    s = str(value).strip()
+    s = s.split(".")[0]
+    if not s.isdigit():
+        return None
+    if len(s) == 4:
+        s = "0" + s
+    if len(s) != 5:
+        return None
+    return s
+
+def cp_matches_prefix(cp_value, prefixes):
+    cp5 = normalize_cp(cp_value)
+    if cp5 is None:
+        return False
+    return cp5[:2] in prefixes
+
 st.title("Trieur de Fichiers Leads")
 st.caption("Import Excel/Google Sheets → mapping colonnes → aperçu → filtrage → export")
 
@@ -206,7 +223,7 @@ with tab2:
     if files:
         for f in files:
             try:
-                sheets = read_excel_sheets(f)
+                sheets = read_excel_all_sheets(f)
                 if not sheets:
                     st.error(f"❌ Aucun onglet lisible dans {f.name}")
                     continue
@@ -214,7 +231,7 @@ with tab2:
                     if df is None or len(df) == 0:
                         st.warning(f"⚠️ {f.name} :: {sheet_name} est vide, ignoré.")
                         continue
-                    key = f.name + " :: " + sheet_name
+                    key = f"{f.name} :: {sheet_name}"
                     df = df.copy()
                     df["__source_file__"] = f.name
                     df["__source_sheet__"] = sheet_name
@@ -227,13 +244,14 @@ with tab2:
         if sheets:
             for sheet_name, df in sheets.items():
                 if len(df) > 0:
-                    key = "Google Sheets :: " + sheet_name
+                    key = f"Google Sheets :: {sheet_name}"
                     df = df.copy()
                     df["__source_file__"] = "Google Sheets"
                     df["__source_sheet__"] = sheet_name
                     all_sheets[key] = df
+            st.success(f"✅ Google Sheets importé avec {len(sheets)} onglet(s) détecté(s).")
         else:
-            st.warning("⚠️ URL Google Sheets non reconnue ou vide.")
+            st.warning("⚠️ Impossible de lire le Google Sheets.")
 
     if all_sheets:
         st.session_state.all_sheets = all_sheets
@@ -280,10 +298,10 @@ with tab2:
             
             current_mapping = st.session_state.sheet_mappings[sheet_key]
             updated_mapping = {}
-            cols_display = st.columns(len(real_columns))
+            cols_display = st.columns(len(real_columns)) if len(real_columns) > 0 else [st.container()]
             
             for idx, src_col in enumerate(real_columns):
-                with cols_display[idx]:
+                with cols_display[idx % len(cols_display)]:
                     current = current_mapping.get(src_col, "(non assigné)")
                     
                     available_options = ["(non assigné)"] + [m for m in st.session_state.master_columns 
@@ -317,7 +335,7 @@ with tab2:
         else:
             if st.button("✅ Construire la base de travail fusionnée", type="primary"):
                 rows = []
-                total_merged = 0
+                sheet_to_data = {}
                 
                 for sheet_key, sheet_df in all_sheets.items():
                     source_file = sheet_df["__source_file__"].iloc[0] if len(sheet_df) > 0 else sheet_key
@@ -342,8 +360,9 @@ with tab2:
                                 is_empty = combined.isna() | (combined.astype(str).str.strip() == "")
                                 combined = combined.where(~is_empty, sheet_df[extra_col])
                             sub[master_col] = combined
+                    
                     rows.append(sub)
-                    total_merged += len(sub)
+                    sheet_to_data[f"{source_file}::{source_sheet}"] = sub
                 
                 if not rows:
                     st.error("❌ Aucun onglet avec assignation trouvé.")
@@ -355,6 +374,7 @@ with tab2:
                         st.error("❌ La base fusionnée est vide après nettoyage.")
                     else:
                         st.session_state.final_df = final_df
+                        st.session_state.sheet_to_data = sheet_to_data
                         st.success(f"✅ Base construite : {len(final_df)} lignes fusionnées.")
                         st.dataframe(final_df.head(50), use_container_width=True)
     else:
@@ -436,14 +456,15 @@ with tab4:
                 st.markdown("#### 📤 Mode d'export")
                 export_mode = st.radio(
                     "Choisissez le mode :",
-                    options=["fusionné", "par fichier", "par onglet"],
-                    key="export_mode_radio"
+                    options=["fusionné", "par fichier source", "par onglet source"],
+                    key="export_mode_radio",
+                    index=0
                 )
                 st.session_state.export_mode = export_mode
                 
                 if export_mode == "fusionné":
                     st.info("ℹ️ Un seul fichier final avec toutes les données")
-                elif export_mode == "par fichier":
+                elif export_mode == "par fichier source":
                     st.info("ℹ️ Un fichier par fichier source importé")
                 else:
                     st.info("ℹ️ Un fichier par onglet source importé")
@@ -456,7 +477,7 @@ with tab4:
                     key="export_name_input"
                 )
                 st.session_state.export_name_base = export_name_base
-                st.caption("Si vide, utilise le nom par défaut. Exemples: mon_export.xlsx, mon_export_partie1.xlsx")
+                st.caption("Si vide, utilise le nom par défaut.")
             
             st.markdown("---")
             

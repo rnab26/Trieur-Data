@@ -14,16 +14,16 @@ DEFAULT_MASTER_COLUMNS = [
 ]
 
 SYNONYMES = {
-    "NOM": ["nom", "lastname", "surname", "last_name", "family_name", "patronyme"],
-    "PRENOM": ["prenom", "prénom", "firstname", "first_name", "given_name"],
-    "GENRE/CIVILITE": ["genre", "civilite", "civilité", "sexe", "sex", "title", "salutation"],
-    "VILLE": ["ville", "city", "commune", "locality"],
-    "CP": ["cp", "codepostal", "code_postal", "postalcode", "zipcode", "zip", "postal"],
+    "NOM": ["nom", "lastname", "surname", "last_name", "family_name", "patronyme", "name"],
+    "PRENOM": ["prenom", "prénom", "firstname", "first_name", "given_name", "givenname"],
+    "GENRE/CIVILITE": ["genre", "civilite", "civilité", "sexe", "sex", "title", "salutation", "gender"],
+    "VILLE": ["ville", "city", "commune", "locality", "town"],
+    "CP": ["cp", "codepostal", "code_postal", "postalcode", "zipcode", "zip", "postal", "code"],
     "ADRESSE": ["adresse", "address", "rue", "street", "location"],
-    "TELEPHONE MOBILE": ["telephoneportable", "portable", "mobile", "gsm", "cell", "cellphone", "phone_mobile"],
-    "TELEPHONE FIXE": ["telephonefixe", "fixe", "phone", "homephone", "landline", "phone_fixe"],
+    "TELEPHONE MOBILE": ["telephoneportable", "portable", "mobile", "gsm", "cell", "cellphone", "phone_mobile", "tel_mobile"],
+    "TELEPHONE FIXE": ["telephonefixe", "fixe", "phone", "homephone", "landline", "phone_fixe", "telephone"],
     "EMAIL": ["email", "e-mail", "mail", "courriel", "e_mail"],
-    "DATE DE NAISSANCE": ["datedenaissance", "date_naissance", "naissance", "dob", "birthdate", "birthday", "birth_date"],
+    "DATE DE NAISSANCE": ["datedenaissance", "date_naissance", "naissance", "dob", "birthdate", "birthday"],
     "Source Data": ["source", "fichier", "file", "origin"]
 }
 
@@ -47,9 +47,12 @@ if "auto_assign_triggered" not in st.session_state:
 def normalize_text(text):
     """Normaliser un texte : minuscules, accents, espaces, caractères spéciaux"""
     text = str(text).lower().strip()
+    # Supprimer accents
     text = unicodedata.normalize('NFKD', text)
     text = ''.join([c for c in text if not unicodedata.combining(c)])
+    # Supprimer espaces, tirets, underscores, slashs
     text = re.sub(r'[\s\-_/.]', '', text)
+    # Supprimer caractères spéciaux
     text = re.sub(r'[^a-z0-9]', '', text)
     return text
 
@@ -63,10 +66,17 @@ def find_best_master_col(src_col, master_cols, already_used=None):
     if not src_norm or src_norm == "(nonassigne)":
         return None
     
-    # 1. Correspondance exacte normalisée
+    # DEBUG: afficher ce qu'on cherche
+    # st.write(f"DEBUG: cherche pour '{src_col}' (normalisé: '{src_norm}')")
+    
+    # 1. Correspondance EXACTE normalisée - PRIORITÉ ABSOLUE
     for master in master_cols:
-        if master not in already_used and normalize_text(master) == src_norm:
-            return master
+        if master not in already_used:
+            master_norm = normalize_text(master)
+            # st.write(f"  Exact check: {master} (normalisé: {master_norm}) == {src_norm}? {master_norm == src_norm}")
+            if master_norm == src_norm:
+                # st.write(f"  ✅ MATCH EXACT trouvé: {master}")
+                return master
     
     # 2. Correspondance via synonymes (priorité haute)
     for master in master_cols:
@@ -74,19 +84,26 @@ def find_best_master_col(src_col, master_cols, already_used=None):
             synonyms = SYNONYMES.get(master, [])
             for syn in synonyms:
                 if normalize_text(syn) == src_norm:
+                    # st.write(f"  ✅ MATCH SYNONYME trouvé: {master} (via synonyme {syn})")
                     return master
     
-    # 3. Fuzzy matching avec seuil strict
+    # 3. Fuzzy matching avec seuil modéré
     best_master = None
-    best_score = 0.72
+    best_score = 0.65  # Seuil baissé pour être plus permissif
     for master in master_cols:
         if master not in already_used:
-            score = SequenceMatcher(None, src_norm, normalize_text(master)).ratio()
+            master_norm = normalize_text(master)
+            score = SequenceMatcher(None, src_norm, master_norm).ratio()
+            # st.write(f"  Fuzzy: {master} score={score:.2f}")
             if score > best_score:
                 best_score = score
                 best_master = master
     
-    return best_master
+    if best_master:
+        # st.write(f"  ✅ MATCH FUZZY trouvé: {best_master} (score={best_score:.2f})")
+        return best_master
+    
+    return None
 
 def read_excel_all_sheets(file_obj):
     """Lire TOUS les onglets d'un fichier Excel"""

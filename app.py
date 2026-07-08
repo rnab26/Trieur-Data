@@ -154,38 +154,60 @@ with tab2:
         st.markdown("---")
         st.subheader("Mapping des colonnes")
 
-        if st.button("Assignation automatique"):
-            threshold_auto = 0.75
-            new_mapping = {}
-            for src_col in all_source_columns:
-                best_master = None
-                best_score = 0
-                for master_col in st.session_state.master_columns:
-                    score = similarity(src_col, master_col)
-                    if score > best_score:
-                        best_score = score
-                        best_master = master_col
-                new_mapping[src_col] = best_master if best_score >= threshold_auto else "(non assigne)"
-            st.session_state.mapping = new_mapping
-            st.success("Assignation automatique terminee. Verifiez et corrigez ci-dessous si besoin.")
-
-        st.write("Corrigez manuellement les assignations si necessaire :")
+        col_auto, col_threshold = st.columns([3, 1])
+        with col_auto:
+            if st.button("🚀 Assignation automatique"):
+                threshold_auto = 0.75
+                new_mapping = {}
+                for src_col in all_source_columns:
+                    best_master = None
+                    best_score = 0
+                    for master_col in st.session_state.master_columns:
+                        score = similarity(src_col, master_col)
+                        if score > best_score:
+                            best_score = score
+                            best_master = master_col
+                    new_mapping[src_col] = best_master if best_score >= threshold_auto else "(non assigne)"
+                st.session_state.mapping = new_mapping
+                st.success("✓ Assignation automatique terminee.")
+        
+        st.write("**Mapping horizontal par colonne source :**")
         mapping_options = ["(non assigne)"] + st.session_state.master_columns
         updated_mapping = {}
-        for src_col in all_source_columns:
-            current = st.session_state.mapping.get(src_col, "(non assigne)")
-            if current not in mapping_options:
-                current = "(non assigne)"
-            choice = st.selectbox("Colonne source: " + src_col, options=mapping_options, index=mapping_options.index(current), key="map_" + src_col)
-            updated_mapping[src_col] = choice
+        
+        cols_per_row = 3
+        num_cols = all_source_columns
+        
+        for i in range(0, len(all_source_columns), cols_per_row):
+            cols = st.columns(cols_per_row)
+            batch = list(all_source_columns)[i:i+cols_per_row]
+            
+            for idx, src_col in enumerate(batch):
+                with cols[idx]:
+                    current = st.session_state.mapping.get(src_col, "(non assigne)")
+                    if current not in mapping_options:
+                        current = "(non assigne)"
+                    choice = st.selectbox(
+                        src_col,
+                        options=mapping_options,
+                        index=mapping_options.index(current),
+                        key="map_" + src_col,
+                        label_visibility="visible"
+                    )
+                    updated_mapping[src_col] = choice
+        
         st.session_state.mapping = updated_mapping
 
         st.markdown("### Aperçu des 7 premieres lignes apres mapping")
-        for key, df in all_sheets.items():
-            st.write("**" + key + "**")
-            st.dataframe(build_mapped_preview(df, st.session_state.mapping, st.session_state.master_columns), use_container_width=True)
+        preview_tabs = st.tabs([k.split(" :: ")[0] for k in all_sheets.keys()])
+        for tab_idx, (key, df) in enumerate(all_sheets.items()):
+            with preview_tabs[tab_idx]:
+                st.dataframe(
+                    build_mapped_preview(df, st.session_state.mapping, st.session_state.master_columns),
+                    use_container_width=True
+                )
 
-        if st.button("Construire la base de travail fusionnee"):
+        if st.button("✓ Construire la base de travail fusionnee"):
             rows = []
             for key, df in all_sheets.items():
                 source_file = df["__source_file__"].iloc[0] if len(df) > 0 else key
@@ -206,7 +228,7 @@ with tab2:
             final_df = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=st.session_state.master_columns)
             final_df = final_df.dropna(how="all")
             st.session_state.final_df = final_df
-            st.success("Base de travail construite : " + str(len(final_df)) + " lignes.")
+            st.success("✓ Base de travail construite : " + str(len(final_df)) + " lignes.")
             st.dataframe(final_df.head(50), use_container_width=True)
     else:
         st.info("Importe un fichier Excel ou colle une URL Google Sheets pour continuer.")

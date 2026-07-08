@@ -14,16 +14,14 @@ DEFAULT_MASTER_COLUMNS = [
 
 if "master_columns" not in st.session_state:
     st.session_state.master_columns = DEFAULT_MASTER_COLUMNS.copy()
-if "mapping" not in st.session_state:
-    st.session_state.mapping = {}
-if "raw_data" not in st.session_state:
-    st.session_state.raw_data = None
+if "all_sheets" not in st.session_state:
+    st.session_state.all_sheets = {}
+if "sheet_mappings" not in st.session_state:
+    st.session_state.sheet_mappings = {}
 if "final_df" not in st.session_state:
     st.session_state.final_df = None
 if "filtered_df" not in st.session_state:
     st.session_state.filtered_df = None
-if "sheet_previews" not in st.session_state:
-    st.session_state.sheet_previews = {}
 
 def similarity(a, b):
     return SequenceMatcher(None, str(a).lower().strip(), str(b).lower().strip()).ratio()
@@ -142,7 +140,7 @@ with tab2:
             st.warning("URL Google Sheets non reconnue.")
 
     if all_sheets:
-        st.session_state.raw_data = all_sheets
+        st.session_state.all_sheets = all_sheets
         st.success(str(len(files)) + " fichier(s) importes, " + str(len(all_sheets)) + " onglet(s) detecte(s) au total.")
 
         with st.expander("Voir le detail des onglets detectes"):
@@ -150,81 +148,88 @@ with tab2:
                 st.write(k + " -- " + str(len(df)) + " lignes, " + str(len(df.columns)) + " colonnes")
                 st.dataframe(df.head(7), use_container_width=True)
 
-        all_source_columns = sorted({c for df in all_sheets.values() for c in df.columns if c != "__source_file__"})
         st.markdown("---")
-        st.subheader("Mapping des colonnes")
+        st.subheader("Mapping par fichier/onglet")
+        st.write("Pour chaque fichier et onglet, mappez les colonnes sources aux colonnes maitres.")
 
-        col_auto, col_threshold = st.columns([3, 1])
-        with col_auto:
-            if st.button("🚀 Assignation automatique"):
-                threshold_auto = 0.75
-                new_mapping = {}
-                for src_col in all_source_columns:
-                    best_master = None
-                    best_score = 0
-                    for master_col in st.session_state.master_columns:
-                        score = similarity(src_col, master_col)
-                        if score > best_score:
-                            best_score = score
-                            best_master = master_col
-                    new_mapping[src_col] = best_master if best_score >= threshold_auto else "(non assigne)"
-                st.session_state.mapping = new_mapping
-                st.success("✓ Assignation automatique terminee.")
-        
-        st.write("**Mapping horizontal par colonne source :**")
-        mapping_options = ["(non assigne)"] + st.session_state.master_columns
-        updated_mapping = {}
-        
-        cols_per_row = 3
-        num_cols = all_source_columns
-        
-        for i in range(0, len(all_source_columns), cols_per_row):
-            cols = st.columns(cols_per_row)
-            batch = list(all_source_columns)[i:i+cols_per_row]
+        for sheet_key, sheet_df in all_sheets.items():
+            st.markdown(f"### 📄 {sheet_key}")
             
-            for idx, src_col in enumerate(batch):
-                with cols[idx]:
-                    current = st.session_state.mapping.get(src_col, "(non assigne)")
-                    if current not in mapping_options:
-                        current = "(non assigne)"
-                    choice = st.selectbox(
-                        src_col,
-                        options=mapping_options,
-                        index=mapping_options.index(current),
-                        key="map_" + src_col,
-                        label_visibility="visible"
-                    )
-                    updated_mapping[src_col] = choice
-        
-        st.session_state.mapping = updated_mapping
-
-        st.markdown("### Aperçu des 7 premieres lignes apres mapping")
-        preview_tabs = st.tabs([k.split(" :: ")[0] for k in all_sheets.keys()])
-        for tab_idx, (key, df) in enumerate(all_sheets.items()):
-            with preview_tabs[tab_idx]:
-                st.dataframe(
-                    build_mapped_preview(df, st.session_state.mapping, st.session_state.master_columns),
-                    use_container_width=True
-                )
+            real_columns = [c for c in sheet_df.columns if c != "__source_file__"]
+            
+            st.write(f"**Colonnes detectees ({len(real_columns)}) :** {', '.join(real_columns)}")
+            st.write(f"**Aperçu des 7 premieres lignes :**")
+            st.dataframe(sheet_df.head(7), use_container_width=True)
+            
+            if sheet_key not in st.session_state.sheet_mappings:
+                st.session_state.sheet_mappings[sheet_key] = {}
+            
+            current_mapping = st.session_state.sheet_mappings[sheet_key]
+            
+            col_auto, col_space = st.columns([2, 4])
+            with col_auto:
+                if st.button(f"🚀 Auto-assign {sheet_key[:30]}...", key=f"auto_{sheet_key}"):
+                    threshold_auto = 0.75
+                    new_mapping = {}
+                    for src_col in real_columns:
+                        best_master = None
+                        best_score = 0
+                        for master_col in st.session_state.master_columns:
+                            score = similarity(src_col, master_col)
+                            if score > best_score:
+                                best_score = score
+                                best_master = master_col
+                        new_mapping[src_col] = best_master if best_score >= threshold_auto else "(non assigne)"
+                    st.session_state.sheet_mappings[sheet_key] = new_mapping
+                    st.success(f"✓ Assignation auto pour {sheet_key[:30]}...")
+            
+            st.write("**Mapping manuel (affichage horizontal) :**")
+            mapping_options = ["(non assigne)"] + st.session_state.master_columns
+            updated_mapping = {}
+            
+            cols_per_row = 3
+            for i in range(0, len(real_columns), cols_per_row):
+                cols = st.columns(cols_per_row)
+                batch = real_columns[i:i+cols_per_row]
+                
+                for idx, src_col in enumerate(batch):
+                    with cols[idx]:
+                        current = current_mapping.get(src_col, "(non assigne)")
+                        if current not in mapping_options:
+                            current = "(non assigne)"
+                        choice = st.selectbox(
+                            src_col,
+                            options=mapping_options,
+                            index=mapping_options.index(current),
+                            key=f"map_{sheet_key}_{src_col}",
+                            label_visibility="visible"
+                        )
+                        updated_mapping[src_col] = choice
+            
+            st.session_state.sheet_mappings[sheet_key] = updated_mapping
+            st.markdown("---")
 
         if st.button("✓ Construire la base de travail fusionnee"):
             rows = []
-            for key, df in all_sheets.items():
-                source_file = df["__source_file__"].iloc[0] if len(df) > 0 else key
-                sub = pd.DataFrame(index=df.index)
+            for sheet_key, sheet_df in all_sheets.items():
+                source_file = sheet_df["__source_file__"].iloc[0] if len(sheet_df) > 0 else sheet_key
+                mapping = st.session_state.sheet_mappings.get(sheet_key, {})
+                
+                sub = pd.DataFrame(index=sheet_df.index)
                 for master_col in st.session_state.master_columns:
-                    src_cols_for_master = [s for s, m in st.session_state.mapping.items() if m == master_col and s in df.columns]
+                    src_cols_for_master = [s for s, m in mapping.items() if m == master_col and s in sheet_df.columns]
                     if master_col == "Source Data":
                         sub[master_col] = source_file
                     elif not src_cols_for_master:
                         sub[master_col] = None
                     else:
-                        combined = df[src_cols_for_master[0]].copy()
+                        combined = sheet_df[src_cols_for_master[0]].copy()
                         for extra_col in src_cols_for_master[1:]:
                             is_empty = combined.isna() | (combined.astype(str).str.strip() == "")
-                            combined = combined.where(~is_empty, df[extra_col])
+                            combined = combined.where(~is_empty, sheet_df[extra_col])
                         sub[master_col] = combined
                 rows.append(sub)
+            
             final_df = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=st.session_state.master_columns)
             final_df = final_df.dropna(how="all")
             st.session_state.final_df = final_df

@@ -51,30 +51,38 @@ def normalize_text(text):
     text = re.sub(r'[^a-z0-9]', '', text)
     return text
 
-def find_best_master_col(src_col, master_cols):
+def find_best_master_col(src_col, master_cols, already_used=None):
     """Trouver la meilleure colonne maître pour une colonne source"""
+    if already_used is None:
+        already_used = []
+    
     src_norm = normalize_text(src_col)
+    
+    if not src_norm or src_norm == "(nonassigne)":
+        return None
     
     # 1. Correspondance exacte normalisée
     for master in master_cols:
-        if normalize_text(master) == src_norm:
+        if master not in already_used and normalize_text(master) == src_norm:
             return master
     
-    # 2. Correspondance via synonymes
+    # 2. Correspondance via synonymes (priorité haute)
     for master in master_cols:
-        synonyms = SYNONYMES.get(master, [])
-        for syn in synonyms:
-            if normalize_text(syn) == src_norm:
-                return master
+        if master not in already_used:
+            synonyms = SYNONYMES.get(master, [])
+            for syn in synonyms:
+                if normalize_text(syn) == src_norm:
+                    return master
     
-    # 3. Fuzzy matching avec seuil
+    # 3. Fuzzy matching avec seuil strict
     best_master = None
-    best_score = 0.65
+    best_score = 0.72
     for master in master_cols:
-        score = SequenceMatcher(None, src_norm, normalize_text(master)).ratio()
-        if score > best_score:
-            best_score = score
-            best_master = master
+        if master not in already_used:
+            score = SequenceMatcher(None, src_norm, normalize_text(master)).ratio()
+            if score > best_score:
+                best_score = score
+                best_master = master
     
     return best_master
 
@@ -114,7 +122,6 @@ def read_google_sheets_all_sheets(url):
         sheet_id = url.split("/d/")[1].split("/")[0]
         all_sheets = {}
         
-        # Essayer d'accéder directement avec gid pour tous les onglets
         for gid in range(0, 50):
             try:
                 csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
@@ -276,10 +283,21 @@ with tab2:
             with col_auto:
                 if st.button(f"🚀 Auto", key=f"auto_{sheet_key}"):
                     new_mapping = {}
+                    already_used = []
+                    matched_count = 0
+                    
+                    # Parcourir chaque colonne source et trouver la meilleure colonne maître
                     for src_col in real_columns:
-                        best_master = find_best_master_col(src_col, st.session_state.master_columns)
-                        new_mapping[src_col] = best_master if best_master else "(non assigne)"
+                        best_master = find_best_master_col(src_col, st.session_state.master_columns, already_used)
+                        if best_master:
+                            new_mapping[src_col] = best_master
+                            already_used.append(best_master)
+                            matched_count += 1
+                        else:
+                            new_mapping[src_col] = "(non assigne)"
+                    
                     st.session_state.sheet_mappings[sheet_key] = new_mapping
+                    st.success(f"✅ {matched_count}/{len(real_columns)} colonnes assignées automatiquement")
                     st.rerun()
             
             st.write("**Aperçu des 7 premières lignes avec assignation au-dessus :**")
@@ -295,14 +313,14 @@ with tab2:
             
             cols_display = st.columns(len(real_columns))
             
+            # Afficher un selectbox pour chaque colonne source
             for idx, src_col in enumerate(real_columns):
                 with cols_display[idx]:
                     current = current_mapping.get(src_col, "(non assigne)")
-                    if current not in mapping_options:
-                        current = "(non assigne)"
                     
-                    available_options = ["(non assigne)"] + [m for m in st.session_state.master_columns 
-                                                               if m not in [updated_mapping.get(c, "") for c in real_columns if c != src_col]]
+                    # Les options disponibles sont les colonnes maîtres non encore utilisées dans ce mapping
+                    already_used_in_current = [updated_mapping.get(c, "") for c in real_columns if c != src_col and updated_mapping.get(c) != "(non assigne)"]
+                    available_options = ["(non assigne)"] + [m for m in st.session_state.master_columns if m not in already_used_in_current]
                     
                     if current not in available_options:
                         current = "(non assigne)"
@@ -324,9 +342,7 @@ with tab2:
                         any_assigned = True
             
             st.session_state.sheet_mappings[sheet_key] = updated_mapping
-            
             st.dataframe(preview_df, use_container_width=True)
-            
             st.markdown("---")
 
         if not any_assigned:

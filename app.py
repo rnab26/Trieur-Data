@@ -41,6 +41,8 @@ if "export_mode" not in st.session_state:
     st.session_state.export_mode = "fusionné"
 if "export_name_base" not in st.session_state:
     st.session_state.export_name_base = ""
+if "auto_assign_triggered" not in st.session_state:
+    st.session_state.auto_assign_triggered = {}
 
 def normalize_text(text):
     """Normaliser un texte : minuscules, accents, espaces, caractères spéciaux"""
@@ -282,23 +284,27 @@ with tab2:
             col_auto, col_space = st.columns([1, 3])
             with col_auto:
                 if st.button(f"🚀 Auto", key=f"auto_{sheet_key}"):
-                    new_mapping = {}
-                    already_used = []
-                    matched_count = 0
-                    
-                    # Parcourir chaque colonne source et trouver la meilleure colonne maître
-                    for src_col in real_columns:
-                        best_master = find_best_master_col(src_col, st.session_state.master_columns, already_used)
-                        if best_master:
-                            new_mapping[src_col] = best_master
-                            already_used.append(best_master)
-                            matched_count += 1
-                        else:
-                            new_mapping[src_col] = "(non assigne)"
-                    
-                    st.session_state.sheet_mappings[sheet_key] = new_mapping
-                    st.success(f"✅ {matched_count}/{len(real_columns)} colonnes assignées automatiquement")
-                    st.rerun()
+                    st.session_state.auto_assign_triggered[sheet_key] = True
+            
+            # Appliquer l'auto-assignation SI le bouton a été cliqué
+            if st.session_state.auto_assign_triggered.get(sheet_key, False):
+                new_mapping = {}
+                already_used = []
+                matched_count = 0
+                
+                # Parcourir chaque colonne source et trouver la meilleure colonne maître
+                for src_col in real_columns:
+                    best_master = find_best_master_col(src_col, st.session_state.master_columns, already_used)
+                    if best_master:
+                        new_mapping[src_col] = best_master
+                        already_used.append(best_master)
+                        matched_count += 1
+                    else:
+                        new_mapping[src_col] = "(non assigne)"
+                
+                st.session_state.sheet_mappings[sheet_key] = new_mapping
+                st.success(f"✅ {matched_count}/{len(real_columns)} colonnes assignées automatiquement")
+                st.session_state.auto_assign_triggered[sheet_key] = False
             
             st.write("**Aperçu des 7 premières lignes avec assignation au-dessus :**")
             

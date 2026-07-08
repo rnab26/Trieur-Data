@@ -4,6 +4,7 @@ import numpy as np
 import io
 import unicodedata
 import re
+import requests
 from difflib import SequenceMatcher
 
 st.set_page_config(page_title="Trieur de Fichiers Leads", layout="wide")
@@ -63,8 +64,9 @@ def find_best_master_col(src_col, master_cols):
     # 2. Correspondance via synonymes
     for master in master_cols:
         synonyms = SYNONYMES.get(master, [])
-        if src_norm in [normalize_text(syn) for syn in synonyms]:
-            return master
+        for syn in synonyms:
+            if normalize_text(syn) == src_norm:
+                return master
     
     # 3. Fuzzy matching avec seuil
     best_master = None
@@ -83,7 +85,7 @@ def read_excel_all_sheets(file_obj):
         xls = pd.ExcelFile(file_obj, engine="openpyxl")
         sheets = {}
         for sheet_name in xls.sheet_names:
-            df = pd.read_excel(file_obj, sheet_name=sheet_name, dtype=str, engine="openpyxl")
+            df = xls.parse(sheet_name=sheet_name, dtype=str)
             if len(df) > 0:
                 sheets[sheet_name] = df
         return sheets
@@ -92,7 +94,7 @@ def read_excel_all_sheets(file_obj):
             xls = pd.ExcelFile(file_obj)
             sheets = {}
             for sheet_name in xls.sheet_names:
-                df = pd.read_excel(file_obj, sheet_name=sheet_name, dtype=str)
+                df = xls.parse(sheet_name=sheet_name, dtype=str)
                 if len(df) > 0:
                     sheets[sheet_name] = df
             return sheets
@@ -100,45 +102,48 @@ def read_excel_all_sheets(file_obj):
             st.error(f"❌ Erreur lecture Excel: {str(e)}")
             return {}
 
-def read_google_sheets_all_sheets(url):
-    """Lire Google Sheets avec tous les onglets détectés"""
+def extract_sheet_id_from_url(url):
+    """Extraire l'ID du sheet depuis l'URL Google"""
     try:
         if "/edit" in url:
             url = url.split("/edit")[0]
-        if url.endswith("/"):
-            url = url[:-1]
-        if "/d/" not in url:
-            return {}
+        if "/d/" in url:
+            sheet_id = url.split("/d/")[1].split("/")[0]
+            return sheet_id
+    except Exception:
+        pass
+    return None
+
+def get_google_sheets_all_tabs(sheet_id):
+    """Récupérer TOUS les onglets d'un Google Sheet public via export HTML"""
+    all_sheets = {}
+    try:
+        # Exporter le fichier en ODS, puis parser pour obtenir les noms des onglets
+        # Méthode alternative: essayer d'accéder aux exports CSV avec différents gid
         
-        sheet_id = url.split("/d/")[1].split("/")[0]
-        all_sheets = {}
-        
-        # Essayer d'obtenir la liste des onglets via export CSV
-        # Google Sheets exporte par défaut le premier onglet
+        # Essayer d'abord le premier onglet (par défaut)
+        csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid=0"
         try:
-            csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
             df = pd.read_csv(csv_url, dtype=str)
             if len(df) > 0:
                 all_sheets["Sheet1"] = df
         except Exception:
             pass
         
-        # Essayer d'accéder directement avec gviz pour tous les onglets
-        for i in range(20):
+        # Essayer tous les gid possibles jusqu'à 50
+        for gid in range(1, 50):
             try:
-                gid = i
                 csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
-                df = pd.read_csv(csv_url, dtype=str)
-                if len(df) > 0:
-                    sheet_name = f"Sheet{i+1}" if i > 0 else "Sheet1"
+                df = pd.read_csv(csv_url, dtype=str, timeout=5)
+                if len(df) > 0 and not df.isnull().all().all():
+                    sheet_name = f"Sheet{gid}" if gid > 0 else "Sheet1"
                     all_sheets[sheet_name] = df
             except Exception:
-                if i > 3 and len(all_sheets) > 0:
-                    break
+                continue
         
         return all_sheets
     except Exception as e:
-        st.error(f"❌ Erreur Google Sheets: {str(e)}")
+        st.error(f"❌ Erreur récupération Google Sheets: {str(e)}")
         return {}
 
 def export_csv_safe(df):
@@ -229,7 +234,6 @@ with tab2:
                     continue
                 for sheet_name, df in sheets.items():
                     if df is None or len(df) == 0:
-                        st.warning(f"⚠️ {f.name} :: {sheet_name} est vide, ignoré.")
                         continue
                     key = f"{f.name} :: {sheet_name}"
                     df = df.copy()
@@ -240,18 +244,23 @@ with tab2:
                 st.error(f"❌ Erreur lecture {f.name}: {str(e)}")
 
     if google_url.strip() and is_google_sheet_url(google_url):
-        sheets = read_google_sheets_all_sheets(google_url)
-        if sheets:
-            for sheet_name, df in sheets.items():
-                if len(df) > 0:
-                    key = f"Google Sheets :: {sheet_name}"
-                    df = df.copy()
-                    df["__source_file__"] = "Google Sheets"
-                    df["__source_sheet__"] = sheet_name
-                    all_sheets[key] = df
-            st.success(f"✅ Google Sheets importé avec {len(sheets)} onglet(s) détecté(s).")
+        sheet_id = extract_sheet_id_from_url(google_url)
+        if sheet_id:
+            with st.spinner("🔄 Récupération des onglets Google Sheets..."):
+                sheets = get_google_sheets_all_tabs(sheet_id)
+                if sheets:
+                    for sheet_name, df in sheets.items():
+                        if len(df) > 0:
+                            key = f"Google Sheets :: {sheet_name}"
+                            df = df.copy()
+                            df["__source_file__"] = "Google Sheets"
+                            df["__source_sheet__"] = sheet_name
+                            all_sheets[key] = df
+                    st.success(f"✅ Google Sheets importé avec {len(sheets)} onglet(s) détecté(s).")
+                else:
+                    st.warning("⚠️ Impossible de lire le Google Sheets.")
         else:
-            st.warning("⚠️ Impossible de lire le Google Sheets.")
+            st.warning("⚠️ URL Google Sheets invalide.")
 
     if all_sheets:
         st.session_state.all_sheets = all_sheets
@@ -289,8 +298,9 @@ with tab2:
                     for src_col in real_columns:
                         best_master = find_best_master_col(src_col, st.session_state.master_columns)
                         new_mapping[src_col] = best_master if best_master else "(non assigné)"
+                        st.write(f"✅ {src_col} → {new_mapping[src_col]}")
                     st.session_state.sheet_mappings[sheet_key] = new_mapping
-                    st.rerun()
+                    st.success("✅ Auto-assignation terminée !")
             
             st.write("**Sélectionnez les colonnes maîtres correspondantes :**")
             
@@ -298,33 +308,38 @@ with tab2:
             
             current_mapping = st.session_state.sheet_mappings[sheet_key]
             updated_mapping = {}
-            cols_display = st.columns(len(real_columns)) if len(real_columns) > 0 else [st.container()]
             
-            for idx, src_col in enumerate(real_columns):
-                with cols_display[idx % len(cols_display)]:
-                    current = current_mapping.get(src_col, "(non assigné)")
-                    
-                    available_options = ["(non assigné)"] + [m for m in st.session_state.master_columns 
-                                                               if m not in [updated_mapping.get(c, "") for c in real_columns if c != src_col]]
-                    
-                    if current not in available_options:
-                        current = "(non assigné)"
-                    
-                    try:
-                        idx_val = available_options.index(current)
-                    except ValueError:
-                        idx_val = 0
-                    
-                    choice = st.selectbox(
-                        src_col,
-                        options=available_options,
-                        index=idx_val,
-                        key=f"map_{sheet_key}_{src_col}",
-                        label_visibility="visible"
-                    )
-                    updated_mapping[src_col] = choice
-                    if choice != "(non assigné)":
-                        any_assigned = True
+            # Afficher les selectbox en colonnes égales
+            num_cols_display = len(real_columns)
+            if num_cols_display > 0:
+                cols_display = st.columns(min(num_cols_display, 5))
+                
+                for idx, src_col in enumerate(real_columns):
+                    col_idx = idx % min(num_cols_display, 5)
+                    with cols_display[col_idx]:
+                        current = current_mapping.get(src_col, "(non assigné)")
+                        
+                        available_options = ["(non assigné)"] + [m for m in st.session_state.master_columns 
+                                                                   if m not in [updated_mapping.get(c, "") for c in real_columns if c != src_col]]
+                        
+                        if current not in available_options:
+                            current = "(non assigné)"
+                        
+                        try:
+                            idx_val = available_options.index(current)
+                        except ValueError:
+                            idx_val = 0
+                        
+                        choice = st.selectbox(
+                            src_col,
+                            options=available_options,
+                            index=idx_val,
+                            key=f"map_{sheet_key}_{src_col}",
+                            label_visibility="visible"
+                        )
+                        updated_mapping[src_col] = choice
+                        if choice != "(non assigné)":
+                            any_assigned = True
             
             st.session_state.sheet_mappings[sheet_key] = updated_mapping
             st.dataframe(preview_df, use_container_width=True)
@@ -335,7 +350,6 @@ with tab2:
         else:
             if st.button("✅ Construire la base de travail fusionnée", type="primary"):
                 rows = []
-                sheet_to_data = {}
                 
                 for sheet_key, sheet_df in all_sheets.items():
                     source_file = sheet_df["__source_file__"].iloc[0] if len(sheet_df) > 0 else sheet_key
@@ -362,7 +376,6 @@ with tab2:
                             sub[master_col] = combined
                     
                     rows.append(sub)
-                    sheet_to_data[f"{source_file}::{source_sheet}"] = sub
                 
                 if not rows:
                     st.error("❌ Aucun onglet avec assignation trouvé.")
@@ -374,7 +387,6 @@ with tab2:
                         st.error("❌ La base fusionnée est vide après nettoyage.")
                     else:
                         st.session_state.final_df = final_df
-                        st.session_state.sheet_to_data = sheet_to_data
                         st.success(f"✅ Base construite : {len(final_df)} lignes fusionnées.")
                         st.dataframe(final_df.head(50), use_container_width=True)
     else:

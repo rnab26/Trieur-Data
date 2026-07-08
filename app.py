@@ -47,12 +47,9 @@ if "auto_assign_triggered" not in st.session_state:
 def normalize_text(text):
     """Normaliser un texte : minuscules, accents, espaces, caractères spéciaux"""
     text = str(text).lower().strip()
-    # Supprimer accents
     text = unicodedata.normalize('NFKD', text)
     text = ''.join([c for c in text if not unicodedata.combining(c)])
-    # Supprimer espaces, tirets, underscores, slashs
     text = re.sub(r'[\s\-_/.]', '', text)
-    # Supprimer caractères spéciaux
     text = re.sub(r'[^a-z0-9]', '', text)
     return text
 
@@ -66,16 +63,11 @@ def find_best_master_col(src_col, master_cols, already_used=None):
     if not src_norm or src_norm == "(nonassigne)":
         return None
     
-    # DEBUG: afficher ce qu'on cherche
-    # st.write(f"DEBUG: cherche pour '{src_col}' (normalisé: '{src_norm}')")
-    
     # 1. Correspondance EXACTE normalisée - PRIORITÉ ABSOLUE
     for master in master_cols:
         if master not in already_used:
             master_norm = normalize_text(master)
-            # st.write(f"  Exact check: {master} (normalisé: {master_norm}) == {src_norm}? {master_norm == src_norm}")
             if master_norm == src_norm:
-                # st.write(f"  ✅ MATCH EXACT trouvé: {master}")
                 return master
     
     # 2. Correspondance via synonymes (priorité haute)
@@ -84,49 +76,83 @@ def find_best_master_col(src_col, master_cols, already_used=None):
             synonyms = SYNONYMES.get(master, [])
             for syn in synonyms:
                 if normalize_text(syn) == src_norm:
-                    # st.write(f"  ✅ MATCH SYNONYME trouvé: {master} (via synonyme {syn})")
                     return master
     
     # 3. Fuzzy matching avec seuil modéré
     best_master = None
-    best_score = 0.65  # Seuil baissé pour être plus permissif
+    best_score = 0.65
     for master in master_cols:
         if master not in already_used:
             master_norm = normalize_text(master)
             score = SequenceMatcher(None, src_norm, master_norm).ratio()
-            # st.write(f"  Fuzzy: {master} score={score:.2f}")
             if score > best_score:
                 best_score = score
                 best_master = master
     
     if best_master:
-        # st.write(f"  ✅ MATCH FUZZY trouvé: {best_master} (score={best_score:.2f})")
         return best_master
     
     return None
 
-def read_excel_all_sheets(file_obj):
-    """Lire TOUS les onglets d'un fichier Excel"""
+def read_excel_all_sheets_from_file(file_obj, filename):
+    """
+    Lire TOUS les onglets d'un fichier Excel uploadé.
+    Retourne un dictionnaire {nom_feuille: dataframe}
+    """
+    sheets = {}
     try:
-        xls = pd.ExcelFile(file_obj, engine="openpyxl")
-        sheets = {}
-        for sheet_name in xls.sheet_names:
-            df = xls.parse(sheet_name=sheet_name, dtype=str)
-            if len(df) > 0:
-                sheets[sheet_name] = df
+        # Méthode 1 : utiliser pd.read_excel avec sheet_name=None
+        all_sheets_dict = pd.read_excel(file_obj, sheet_name=None, dtype=str, engine="openpyxl")
+        
+        if all_sheets_dict:
+            for sheet_name, df in all_sheets_dict.items():
+                if df is not None and len(df) > 0:
+                    # Nettoyer les colonnes (enlever les colonnes vides)
+                    df = df.dropna(axis=1, how='all')
+                    if len(df.columns) > 0 and len(df) > 0:
+                        sheets[sheet_name] = df
+        
         return sheets
-    except Exception:
+    
+    except Exception as e1:
         try:
-            xls = pd.ExcelFile(file_obj)
-            sheets = {}
+            # Méthode 2 : fallback avec openpyxl
+            file_obj.seek(0)
+            xls = pd.ExcelFile(file_obj, engine="openpyxl")
+            
             for sheet_name in xls.sheet_names:
-                df = xls.parse(sheet_name=sheet_name, dtype=str)
-                if len(df) > 0:
-                    sheets[sheet_name] = df
+                try:
+                    df = xls.parse(sheet_name=sheet_name, dtype=str)
+                    if df is not None and len(df) > 0:
+                        df = df.dropna(axis=1, how='all')
+                        if len(df.columns) > 0 and len(df) > 0:
+                            sheets[sheet_name] = df
+                except Exception:
+                    continue
+            
             return sheets
-        except Exception as e:
-            st.error(f"❌ Erreur lecture Excel: {str(e)}")
-            return {}
+        
+        except Exception as e2:
+            try:
+                # Méthode 3 : fallback sans moteur spécifié
+                file_obj.seek(0)
+                xls = pd.ExcelFile(file_obj)
+                
+                for sheet_name in xls.sheet_names:
+                    try:
+                        df = xls.parse(sheet_name=sheet_name, dtype=str)
+                        if df is not None and len(df) > 0:
+                            df = df.dropna(axis=1, how='all')
+                            if len(df.columns) > 0 and len(df) > 0:
+                                sheets[sheet_name] = df
+                    except Exception:
+                        continue
+                
+                return sheets
+            
+            except Exception as e3:
+                st.error(f"❌ Impossible de lire {filename}: {str(e3)}")
+                return {}
 
 def read_google_sheets_all_sheets(url):
     """Lire Google Sheets avec tous les onglets détectés"""
@@ -238,19 +264,23 @@ with tab2:
     if files:
         for f in files:
             try:
-                sheets = read_excel_all_sheets(f)
+                sheets = read_excel_all_sheets_from_file(f, f.name)
                 if not sheets:
                     st.error(f"❌ Aucun onglet lisible dans {f.name}")
                     continue
+                
+                # Ajouter chaque feuille du fichier
                 for sheet_name, df in sheets.items():
                     if df is None or len(df) == 0:
                         st.warning(f"⚠️ {f.name} :: {sheet_name} est vide, ignoré.")
                         continue
+                    
                     key = f.name + " :: " + sheet_name
                     df = df.copy()
                     df["__source_file__"] = f.name
                     df["__source_sheet__"] = sheet_name
                     all_sheets[key] = df
+                
             except Exception as e:
                 st.error(f"❌ Erreur lecture {f.name}: {str(e)}")
 
@@ -271,14 +301,24 @@ with tab2:
 
     if all_sheets:
         st.session_state.all_sheets = all_sheets
+        
+        # Afficher le résumé d'import
         total_files = len(set([k.split(" :: ")[0] for k in all_sheets.keys()]))
-        st.success(str(total_files) + " fichier(s) importes, " + str(len(all_sheets)) + " onglet(s) detecte(s) au total.")
+        total_sheets = len(all_sheets)
+        st.success(f"✅ {total_files} fichier(s) importés, {total_sheets} onglet(s) détecté(s) au total.")
 
+        # Détail des onglets importés
         with st.expander("📋 Detail des onglets importes"):
             for k, df in all_sheets.items():
-                num_dup = df.duplicated().sum()
+                parts = k.split(" :: ")
+                filename = parts[0]
+                sheetname = parts[1] if len(parts) > 1 else "Unknown"
+                num_rows = len(df)
                 real_cols = [c for c in df.columns if c not in ["__source_file__", "__source_sheet__"]]
-                st.write(f"**{k}** : {len(df)} lignes, {len(real_cols)} colonnes, {num_dup} doublons")
+                num_cols = len(real_cols)
+                num_dup = df.duplicated().sum()
+                
+                st.write(f"**{filename}** → **{sheetname}** : {num_rows} lignes, {num_cols} colonnes, {num_dup} doublons")
 
         st.markdown("---")
         st.subheader("Assignation des colonnes")

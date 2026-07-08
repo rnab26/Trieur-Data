@@ -153,13 +153,17 @@ with tab2:
                 st.write(f"**{k}** : {len(df)} lignes, {len(df.columns)} colonnes")
 
         st.markdown("---")
-        st.subheader("Mapping par fichier/onglet")
+        st.subheader("Assignation des colonnes")
 
         for sheet_key, sheet_df in all_sheets.items():
             st.markdown(f"### 📄 {sheet_key}")
             
             real_columns = [c for c in sheet_df.columns if c != "__source_file__"]
-            st.write(f"**Colonnes detectees ({len(real_columns)}) :** `{' | '.join(real_columns)}`")
+            num_rows = len(sheet_df)
+            num_cols = len(real_columns)
+            num_duplicates = sheet_df.duplicated().sum()
+            
+            st.write(f"**Résumé :** {num_rows} lignes | {num_cols} colonnes | {num_duplicates} doublons")
             
             if sheet_key not in st.session_state.sheet_mappings:
                 st.session_state.sheet_mappings[sheet_key] = {}
@@ -173,14 +177,15 @@ with tab2:
                     st.session_state.sheet_mappings[sheet_key] = new_mapping
                     st.rerun()
             
-            st.write("**Aperçu des 7 premieres lignes :**")
-            st.dataframe(sheet_df.head(7), use_container_width=True)
+            st.write("**Aperçu des 7 premières lignes avec assignation au-dessus :**")
             
-            st.write("**Mapping des colonnes (affichage horizontal compact) :**")
-            mapping_options = ["(non assigne)"] + st.session_state.master_columns
+            preview_df = sheet_df.head(7).copy()
+            
+            st.write("**Sélectionnez les colonnes maîtres correspondantes :**")
+            
+            cols_per_row = 3
             updated_mapping = {}
             
-            cols_per_row = 4
             for i in range(0, len(real_columns), cols_per_row):
                 cols = st.columns(cols_per_row)
                 batch = real_columns[i:i+cols_per_row]
@@ -188,22 +193,33 @@ with tab2:
                 for idx, src_col in enumerate(batch):
                     with cols[idx]:
                         current = current_mapping.get(src_col, "(non assigne)")
-                        if current not in mapping_options:
+                        if current not in st.session_state.master_columns + ["(non assigne)"]:
                             current = "(non assigne)"
+                        
+                        available_options = ["(non assigne)"] + [m for m in st.session_state.master_columns 
+                                                                   if m not in updated_mapping.values() or updated_mapping.get(src_col) == m]
+                        
+                        if current not in available_options:
+                            current = "(non assigne)"
+                        
                         try:
-                            idx_val = mapping_options.index(current)
+                            idx_val = available_options.index(current)
                         except ValueError:
                             idx_val = 0
+                        
                         choice = st.selectbox(
                             src_col,
-                            options=mapping_options,
+                            options=available_options,
                             index=idx_val,
                             key=f"map_{sheet_key}_{src_col}",
-                            label_visibility="collapsed"
+                            label_visibility="visible"
                         )
                         updated_mapping[src_col] = choice
             
             st.session_state.sheet_mappings[sheet_key] = updated_mapping
+            
+            st.dataframe(preview_df, use_container_width=True)
+            
             st.markdown("---")
 
         if st.button("✅ Construire la base de travail fusionnee", type="primary"):
@@ -241,9 +257,12 @@ with tab3:
         st.info("Importez et mappez des fichiers dans l'onglet precedent avant de filtrer.")
     else:
         df = st.session_state.final_df.copy()
-        st.write(f"Base actuelle : {len(df)} lignes")
+        total_lines = len(df)
+        st.write(f"Base actuelle : **{total_lines}** lignes importees")
+        
         filter_col = st.selectbox("Filtrer par colonne", options=["(aucun filtre)"] + st.session_state.master_columns)
         filtered_df = df
+        
         if filter_col == "CP":
             dep_input = st.text_input("Departements a filtrer (separes par des virgules, ex: 02,33,77)")
             if dep_input.strip():
@@ -255,12 +274,18 @@ with tab3:
             selected_vals = st.multiselect("Valeurs a conserver pour " + filter_col, options=unique_vals)
             if selected_vals:
                 filtered_df = df[df[filter_col].isin(selected_vals)]
-        st.write(f"Resultat filtre : {len(filtered_df)} lignes")
+        
+        remaining_lines = len(filtered_df)
+        remaining_duplicates = filtered_df.duplicated().sum()
+        
+        st.write(f"Resultat filtre : **{remaining_lines}** lignes | **{remaining_duplicates}** doublons conserves | **{total_lines}** lignes importees au total")
         st.dataframe(filtered_df.head(50), use_container_width=True)
+        
         dup_check_col = st.selectbox("Colonne pour detecter les doublons (ex: TELEPHONE MOBILE)", options=["(aucune)"] + st.session_state.master_columns)
         if dup_check_col != "(aucune)":
             dup_count = filtered_df[dup_check_col].duplicated(keep=False).sum()
             st.warning(f"{dup_count} lignes en doublon detectees sur la colonne '{dup_check_col}' (non supprimees automatiquement).")
+        
         st.session_state.filtered_df = filtered_df
 
 with tab4:

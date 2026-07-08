@@ -181,43 +181,45 @@ with tab2:
             
             preview_df = sheet_df.head(7).copy()
             
-            st.write("**Sélectionnez les colonnes maîtres correspondantes :**")
-            
-            cols_per_row = 3
+            mapping_options = ["(non assigne)"] + st.session_state.master_columns
             updated_mapping = {}
             
-            for i in range(0, len(real_columns), cols_per_row):
-                cols = st.columns(cols_per_row)
-                batch = real_columns[i:i+cols_per_row]
-                
-                for idx, src_col in enumerate(batch):
-                    with cols[idx]:
-                        current = current_mapping.get(src_col, "(non assigne)")
-                        if current not in st.session_state.master_columns + ["(non assigne)"]:
-                            current = "(non assigne)"
-                        
-                        available_options = ["(non assigne)"] + [m for m in st.session_state.master_columns 
-                                                                   if m not in updated_mapping.values() or updated_mapping.get(src_col) == m]
-                        
-                        if current not in available_options:
-                            current = "(non assigne)"
-                        
-                        try:
-                            idx_val = available_options.index(current)
-                        except ValueError:
-                            idx_val = 0
-                        
-                        choice = st.selectbox(
-                            src_col,
-                            options=available_options,
-                            index=idx_val,
-                            key=f"map_{sheet_key}_{src_col}",
-                            label_visibility="visible"
-                        )
-                        updated_mapping[src_col] = choice
+            st.write("**Mapping des colonnes (ligne d'en-têtes avec assignation) :**")
+            
+            num_cols_display = len(real_columns)
+            col_width = max(1, 12 // min(num_cols_display, 6))
+            
+            cols = st.columns(num_cols_display)
+            
+            for idx, src_col in enumerate(real_columns):
+                with cols[idx]:
+                    current = current_mapping.get(src_col, "(non assigne)")
+                    if current not in st.session_state.master_columns + ["(non assigne)"]:
+                        current = "(non assigne)"
+                    
+                    available_options = ["(non assigne)"] + [m for m in st.session_state.master_columns 
+                                                               if m not in updated_mapping.values() or updated_mapping.get(src_col) == m]
+                    
+                    if current not in available_options:
+                        current = "(non assigne)"
+                    
+                    try:
+                        idx_val = available_options.index(current)
+                    except ValueError:
+                        idx_val = 0
+                    
+                    choice = st.selectbox(
+                        f"**{src_col}**",
+                        options=available_options,
+                        index=idx_val,
+                        key=f"map_{sheet_key}_{src_col}",
+                        label_visibility="collapsed"
+                    )
+                    updated_mapping[src_col] = choice
             
             st.session_state.sheet_mappings[sheet_key] = updated_mapping
             
+            st.markdown("")
             st.dataframe(preview_df, use_container_width=True)
             
             st.markdown("---")

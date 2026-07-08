@@ -43,6 +43,29 @@ def cp_matches_prefix(cp_value, prefixes):
     dep = cp5[:2]
     return dep in prefixes
 
+def read_excel_any(file_obj):
+    try:
+        return pd.read_excel(file_obj, sheet_name=None, dtype=str, engine="openpyxl")
+    except Exception:
+        return pd.read_excel(file_obj, sheet_name=None, dtype=str)
+
+def export_excel_bytes(df):
+    buffer = io.BytesIO()
+    try:
+        with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+            df.to_excel(writer, index=False, sheet_name="Leads")
+            workbook = writer.book
+            worksheet = writer.sheets["Leads"]
+            if "CP" in df.columns:
+                text_format = workbook.add_format({"num_format": "@"})
+                cp_idx = df.columns.get_loc("CP")
+                worksheet.set_column(cp_idx, cp_idx, 12, text_format)
+    except Exception:
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Leads")
+    buffer.seek(0)
+    return buffer
+
 st.title("Trieur de Fichiers Leads")
 st.caption("Import multi-fichiers / multi-onglets -> mapping colonnes -> filtrage -> export CSV/Excel")
 
@@ -69,7 +92,7 @@ with tab2:
         all_sheets = {}
         for f in files:
             try:
-                sheets = pd.read_excel(f, sheet_name=None, dtype=str)
+                sheets = read_excel_any(f)
                 for sheet_name, df in sheets.items():
                     key = f.name + " :: " + sheet_name
                     df = df.copy()
@@ -216,15 +239,6 @@ with tab4:
         with col2:
             st.markdown("**Export Excel**")
             for i, chunk in enumerate(chunks):
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-                    chunk.to_excel(writer, index=False, sheet_name="Leads")
-                    workbook = writer.book
-                    worksheet = writer.sheets["Leads"]
-                    if "CP" in chunk.columns:
-                        text_format = workbook.add_format({"num_format": "@"})
-                        cp_idx = chunk.columns.get_loc("CP")
-                        worksheet.set_column(cp_idx, cp_idx, 12, text_format)
-                buffer.seek(0)
+                buffer = export_excel_bytes(chunk)
                 fname = "export_leads.xlsx" if n_chunks == 1 else "export_leads_partie" + str(i+1) + ".xlsx"
                 st.download_button("Telecharger Excel" + ("" if n_chunks==1 else " (partie " + str(i+1) + ")"), data=buffer, file_name=fname, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="xlsx_"+str(i))

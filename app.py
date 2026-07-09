@@ -94,6 +94,27 @@ def find_best_master_col(src_col, master_cols, already_used=None):
     
     return None
 
+def auto_assign_single_sheet(sheet_key, sheet_df, master_columns):
+    """
+    Auto-assigner une seule feuille.
+    Retourne un dictionnaire {src_col: master_col} et le nombre de colonnes assignées.
+    """
+    real_columns = [c for c in sheet_df.columns if c not in ["__source_file__", "__source_sheet__"]]
+    new_mapping = {}
+    already_used = []
+    matched_count = 0
+    
+    for src_col in real_columns:
+        best_master = find_best_master_col(src_col, master_columns, already_used)
+        if best_master:
+            new_mapping[src_col] = best_master
+            already_used.append(best_master)
+            matched_count += 1
+        else:
+            new_mapping[src_col] = "(non assigne)"
+    
+    return new_mapping, matched_count, len(real_columns)
+
 def read_excel_all_sheets_from_file(file_obj, filename):
     """
     Lire TOUS les onglets d'un fichier Excel uploadé.
@@ -323,6 +344,22 @@ with tab2:
         st.markdown("---")
         st.subheader("Assignation des colonnes")
 
+        # BOUTON GLOBAL POUR AUTO-ASSIGNER TOUS LES ONGLETS
+        col_global_auto, col_space = st.columns([1, 3])
+        with col_global_auto:
+            if st.button("🚀 Auto-assigner TOUS les onglets", key="auto_all_sheets", type="primary"):
+                total_sheets_count = len(all_sheets)
+                for sheet_key, sheet_df in all_sheets.items():
+                    new_mapping, matched_count, total_cols = auto_assign_single_sheet(
+                        sheet_key, sheet_df, st.session_state.master_columns
+                    )
+                    st.session_state.sheet_mappings[sheet_key] = new_mapping
+                
+                st.success(f"✅ Auto-assignation terminée pour {total_sheets_count} onglet(s).")
+                st.rerun()
+
+        st.markdown("---")
+
         any_assigned = False
 
         for sheet_key, sheet_df in all_sheets.items():
@@ -338,30 +375,16 @@ with tab2:
             if sheet_key not in st.session_state.sheet_mappings:
                 st.session_state.sheet_mappings[sheet_key] = {}
             
+            # Bouton Auto individuel par onglet
             col_auto, col_space = st.columns([1, 3])
             with col_auto:
                 if st.button(f"🚀 Auto", key=f"auto_{sheet_key}"):
-                    st.session_state.auto_assign_triggered[sheet_key] = True
-            
-            # Appliquer l'auto-assignation SI le bouton a été cliqué
-            if st.session_state.auto_assign_triggered.get(sheet_key, False):
-                new_mapping = {}
-                already_used = []
-                matched_count = 0
-                
-                # Parcourir chaque colonne source et trouver la meilleure colonne maître
-                for src_col in real_columns:
-                    best_master = find_best_master_col(src_col, st.session_state.master_columns, already_used)
-                    if best_master:
-                        new_mapping[src_col] = best_master
-                        already_used.append(best_master)
-                        matched_count += 1
-                    else:
-                        new_mapping[src_col] = "(non assigne)"
-                
-                st.session_state.sheet_mappings[sheet_key] = new_mapping
-                st.success(f"✅ {matched_count}/{len(real_columns)} colonnes assignées automatiquement")
-                st.session_state.auto_assign_triggered[sheet_key] = False
+                    new_mapping, matched_count, total_cols = auto_assign_single_sheet(
+                        sheet_key, sheet_df, st.session_state.master_columns
+                    )
+                    st.session_state.sheet_mappings[sheet_key] = new_mapping
+                    st.success(f"✅ {matched_count}/{total_cols} colonnes assignées")
+                    st.rerun()
             
             st.write("**Aperçu des 7 premières lignes avec assignation au-dessus :**")
             

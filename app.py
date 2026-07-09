@@ -281,133 +281,136 @@ with tab2:
         progress_done(import_bar, import_txt, "Import terminé")
         st.success(str(total_files) + " fichier(s) importes, " + str(len(all_sheets)) + " onglet(s) detecte(s) au total.")
 
-    with st.expander("📋 Detail des onglets importes"):
-        for k, df in all_sheets.items():
-            num_dup = df.duplicated().sum()
-            real_cols = [c for c in df.columns if c not in ["__source_file__", "__source_sheet__"]]
-            st.write(f"**{k}** : {len(df)} lignes, {len(real_cols)} colonnes, {num_dup} doublons")
-
-    st.markdown("---")
-    st.subheader("Assignation des colonnes")
-
-    any_assigned = False
-
-    for sheet_key, sheet_df in all_sheets.items():
-        st.markdown(f"### 📄 {sheet_key}")
-
-        real_columns = [c for c in sheet_df.columns if c not in ["__source_file__", "__source_sheet__"]]
-        num_rows = len(sheet_df)
-        num_cols = len(real_columns)
-        num_duplicates = sheet_df.duplicated().sum()
-
-        st.write(f"**Résumé :** {num_rows} lignes | {num_cols} colonnes | {num_duplicates} doublons")
-
-        if sheet_key not in st.session_state.sheet_mappings:
-            st.session_state.sheet_mappings[sheet_key] = {}
-
-        col_auto, col_space = st.columns([1, 3])
-        with col_auto:
-            if st.button(f"🚀 Auto", key=f"auto_{sheet_key}"):
-                new_mapping = {}
-                for src_col in real_columns:
-                    best_master = find_best_master_col(src_col, st.session_state.master_columns)
-                    new_mapping[src_col] = best_master if best_master else "(non assigne)"
-                st.session_state.sheet_mappings[sheet_key] = new_mapping
-                st.rerun()
-
-        st.write("**Aperçu des 7 premières lignes avec assignation au-dessus :**")
-
-        preview_df = sheet_df.head(7).copy()
-
-        st.write("**Sélectionnez les colonnes maîtres correspondantes :**")
-
-        current_mapping = st.session_state.sheet_mappings[sheet_key]
-        mapping_options = ["(non assigne)"] + st.session_state.master_columns
-
-        updated_mapping = {}
-
-        cols_display = st.columns(len(real_columns))
-
-        for idx, src_col in enumerate(real_columns):
-            with cols_display[idx]:
-                current = current_mapping.get(src_col, "(non assigne)")
-                if current not in mapping_options:
-                    current = "(non assigne)"
-
-                available_options = ["(non assigne)"] + [m for m in st.session_state.master_columns
-if m not in [updated_mapping.get(c, "") for c in real_columns if c != src_col]]
-
-                if current not in available_options:
-                    current = "(non assigne)"
-
-                try:
-                    idx_val = available_options.index(current)
-                except ValueError:
-                    idx_val = 0
-
-                choice = st.selectbox(
-                    src_col,
-                    options=available_options,
-                    index=idx_val,
-                    key=f"map_{sheet_key}_{src_col}",
-                    label_visibility="visible"
-                )
-
-                updated_mapping[src_col] = choice
-                if choice != "(non assigne)":
-                    any_assigned = True
-
-        st.session_state.sheet_mappings[sheet_key] = updated_mapping
-
-        st.dataframe(preview_df, use_container_width=True)
+        with st.expander("📋 Detail des onglets importes"):
+            for k, df in all_sheets.items():
+                num_dup = df.duplicated().sum()
+                real_cols = [c for c in df.columns if c not in ["__source_file__", "__source_sheet__"]]
+                st.write(f"**{k}** : {len(df)} lignes, {len(real_cols)} colonnes, {num_dup} doublons")
 
         st.markdown("---")
+        st.subheader("Assignation des colonnes")
 
-    if not any_assigned:
-        st.warning("⚠️ Veuillez assigner au moins une colonne maître avant de construire la base.")
-    else:
-        if st.button("✅ Construire la base de travail fusionnee", type="primary"):
-            rows = []
-            total_merged = 0
+        any_assigned = False
 
-            for sheet_key, sheet_df in all_sheets.items():
-                source_file = sheet_df["__source_file__"].iloc[0] if len(sheet_df) > 0 else sheet_key
-                source_sheet = sheet_df["__source_sheet__"].iloc[0] if len(sheet_df) > 0 else "Unknown"
-                mapping = st.session_state.sheet_mappings.get(sheet_key, {})
+        for sheet_key, sheet_df in all_sheets.items():
+            st.markdown(f"### 📄 {sheet_key}")
 
-                assigned_cols = [m for m in mapping.values() if m != "(non assigne)"]
-                if not assigned_cols:
-                    st.warning(f"⚠️ {sheet_key}: Aucune colonne assignée, ignoré.")
-                    continue
+            real_columns = [c for c in sheet_df.columns if c not in ["__source_file__", "__source_sheet__"]]
+            num_rows = len(sheet_df)
+            num_cols = len(real_columns)
+            num_duplicates = sheet_df.duplicated().sum()
 
-                sub = pd.DataFrame(index=sheet_df.index)
-                for master_col in st.session_state.master_columns:
-                    src_cols_for_master = [s for s, m in mapping.items() if m == master_col and s in sheet_df.columns]
-                    if master_col == "Source Data":
-                        sub[master_col] = f"{source_file} ({source_sheet})"
-                    elif not src_cols_for_master:
-                        sub[master_col] = None
-                    else:
-                        combined = sheet_df[src_cols_for_master[0]].copy()
-                        for extra_col in src_cols_for_master[1:]:
-                            is_empty = combined.isna() | (combined.astype(str).str.strip() == "")
-                            combined = combined.where(~is_empty, sheet_df[extra_col])
-                        sub[master_col] = combined
-                rows.append(sub)
-                total_merged += len(sub)
+            st.write(f"**Résumé :** {num_rows} lignes | {num_cols} colonnes | {num_duplicates} doublons")
 
-            if not rows:
-                st.error("❌ Aucun onglet avec assignation trouvé.")
-            else:
-                final_df = pd.concat(rows, ignore_index=True)
-                final_df = final_df.dropna(how="all")
+            if sheet_key not in st.session_state.sheet_mappings:
+                st.session_state.sheet_mappings[sheet_key] = {}
 
-                if len(final_df) == 0:
-                    st.error("❌ La base fusionnée est vide après nettoyage.")
+            col_auto, col_space = st.columns([1, 3])
+            with col_auto:
+                if st.button(f"🚀 Auto", key=f"auto_{sheet_key}"):
+                    new_mapping = {}
+                    for src_col in real_columns:
+                        best_master = find_best_master_col(src_col, st.session_state.master_columns)
+                        new_mapping[src_col] = best_master if best_master else "(non assigne)"
+                    st.session_state.sheet_mappings[sheet_key] = new_mapping
+                    st.rerun()
+
+            st.write("**Aperçu des 7 premières lignes avec assignation au-dessus :**")
+
+            preview_df = sheet_df.head(7).copy()
+
+            st.write("**Sélectionnez les colonnes maîtres correspondantes :**")
+
+            current_mapping = st.session_state.sheet_mappings[sheet_key]
+            mapping_options = ["(non assigne)"] + st.session_state.master_columns
+
+            updated_mapping = {}
+
+            cols_display = st.columns(len(real_columns))
+
+            for idx, src_col in enumerate(real_columns):
+                with cols_display[idx]:
+                    current = current_mapping.get(src_col, "(non assigne)")
+                    if current not in mapping_options:
+                        current = "(non assigne)"
+
+                    available_options = ["(non assigne)"] + [
+                        m for m in st.session_state.master_columns
+                        if m not in [updated_mapping.get(c, "") for c in real_columns if c != src_col]
+                    ]
+
+                    if current not in available_options:
+                        current = "(non assigne)"
+
+                    try:
+                        idx_val = available_options.index(current)
+                    except ValueError:
+                        idx_val = 0
+
+                    choice = st.selectbox(
+                        src_col,
+                        options=available_options,
+                        index=idx_val,
+                        key=f"map_{sheet_key}_{src_col}",
+                        label_visibility="visible"
+                    )
+
+                    updated_mapping[src_col] = choice
+                    if choice != "(non assigne)":
+                        any_assigned = True
+
+            st.session_state.sheet_mappings[sheet_key] = updated_mapping
+
+            st.dataframe(preview_df, use_container_width=True)
+
+            st.markdown("---")
+
+        if not any_assigned:
+            st.warning("⚠️ Veuillez assigner au moins une colonne maître avant de construire la base.")
+        else:
+            if st.button("✅ Construire la base de travail fusionnee", type="primary"):
+                rows = []
+                total_merged = 0
+
+                for sheet_key, sheet_df in all_sheets.items():
+                    source_file = sheet_df["__source_file__"].iloc[0] if len(sheet_df) > 0 else sheet_key
+                    source_sheet = sheet_df["__source_sheet__"].iloc[0] if len(sheet_df) > 0 else "Unknown"
+                    mapping = st.session_state.sheet_mappings.get(sheet_key, {})
+
+                    assigned_cols = [m for m in mapping.values() if m != "(non assigne)"]
+                    if not assigned_cols:
+                        st.warning(f"⚠️ {sheet_key}: Aucune colonne assignée, ignoré.")
+                        continue
+
+                    sub = pd.DataFrame(index=sheet_df.index)
+                    for master_col in st.session_state.master_columns:
+                        src_cols_for_master = [s for s, m in mapping.items() if m == master_col and s in sheet_df.columns]
+                        if master_col == "Source Data":
+                            sub[master_col] = f"{source_file} ({source_sheet})"
+                        elif not src_cols_for_master:
+                            sub[master_col] = None
+                        else:
+                            combined = sheet_df[src_cols_for_master[0]].copy()
+                            for extra_col in src_cols_for_master[1:]:
+                                is_empty = combined.isna() | (combined.astype(str).str.strip() == "")
+                                combined = combined.where(~is_empty, sheet_df[extra_col])
+                            sub[master_col] = combined
+                    rows.append(sub)
+                    total_merged += len(sub)
+
+                if not rows:
+                    st.error("❌ Aucun onglet avec assignation trouvé.")
                 else:
-                    st.session_state.final_df = final_df
-                    st.success(f"✅ Base construite : {len(final_df)} lignes fusionnées.")
-                    st.dataframe(final_df.head(50), use_container_width=True)
+                    final_df = pd.concat(rows, ignore_index=True)
+                    final_df = final_df.dropna(how="all")
+
+                    if len(final_df) == 0:
+                        st.error("❌ La base fusionnée est vide après nettoyage.")
+                    else:
+                        st.session_state.final_df = final_df
+                        st.success(f"✅ Base construite : {len(final_df)} lignes fusionnées.")
+                        st.dataframe(final_df.head(50), use_container_width=True)
+
     else:
         st.info("ℹ️ Importe un fichier Excel ou colle une URL Google Sheets pour continuer.")
 

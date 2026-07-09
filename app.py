@@ -93,9 +93,11 @@ def _excel_sheet_names(file_bytes: bytes, filename: str) -> List[str]:
 @st.cache_data(show_spinner=False, ttl=1800)
 def _read_excel_sheet(file_bytes: bytes, filename: str, sheet_name: str) -> pd.DataFrame:
     bio = io.BytesIO(file_bytes)
-    try: df = pd.read_excel(bio, sheet_name=sheet_name, dtype=str, engine="openpyxl")
+    try:
+        df = pd.read_excel(bio, sheet_name=sheet_name, dtype=str, engine="openpyxl")
     except Exception:
-        bio.seek(0); df = pd.read_excel(bio, sheet_name=sheet_name, dtype=str)
+        bio.seek(0)
+        df = pd.read_excel(bio, sheet_name=sheet_name, dtype=str)
     if df is None or len(df)==0: return _empty_df()
     df = df.dropna(how="all")
     if len(df)==0: return _empty_df()
@@ -105,8 +107,10 @@ def _read_excel_sheet(file_bytes: bytes, filename: str, sheet_name: str) -> pd.D
 @st.cache_data(show_spinner=False, ttl=900)
 def _read_google_sheet_gid(sheet_id: str, gid: int) -> pd.DataFrame:
     url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
-    try: df = pd.read_csv(url, dtype=str)
-    except Exception: return _empty_df()
+    try:
+        df = pd.read_csv(url, dtype=str)
+    except Exception:
+        return _empty_df()
     if df is None or len(df)==0 or df.isnull().all().all(): return _empty_df()
     df = df.dropna(how="all")
     if len(df)==0: return _empty_df()
@@ -118,8 +122,10 @@ def _extract_google_sheet_id(url: str) -> Optional[str]:
     if "/edit" in u: u = u.split("/edit")[0]
     if u.endswith("/"): u = u[:-1]
     if "/d/" not in u: return None
-    try: return u.split("/d/")[1].split("/")[0]
-    except Exception: return None
+    try:
+        return u.split("/d/")[1].split("/")[0]
+    except Exception:
+        return None
 
 def export_csv_safe(df: pd.DataFrame) -> Optional[bytes]:
     try:
@@ -127,7 +133,8 @@ def export_csv_safe(df: pd.DataFrame) -> Optional[bytes]:
         for c in d.columns: d[c] = d[c].astype(str)
         return d.to_csv(index=False, sep=",").encode("utf-8-sig")
     except Exception as e:
-        st.error(f"❌ Erreur CSV: {e}"); return None
+        st.error(f"❌ Erreur CSV: {e}")
+        return None
 
 def export_excel_safe(df: pd.DataFrame) -> Optional[io.BytesIO]:
     try:
@@ -143,24 +150,34 @@ def export_excel_safe(df: pd.DataFrame) -> Optional[io.BytesIO]:
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine="openpyxl") as w:
                 df.to_excel(w, index=False, sheet_name="Leads")
-        buf.seek(0); return buf
+        buf.seek(0)
+        return buf
     except Exception as e:
-        st.error(f"❌ Erreur Excel: {e}"); return None
+        st.error(f"❌ Erreur Excel: {e}")
+        return None
 
 @st.cache_data(show_spinner=False, ttl=1800)
 def auto_map_columns(real_columns: Tuple[str,...], master_columns: Tuple[str,...]) -> Dict[str,str]:
-    m = {}
+    # IMPORTANT: fonction pure, déterministe, renvoie un dict complet
+    out = {}
     cols = list(real_columns)[:MAX_AUTO_COLUMNS_PER_SHEET]
     for c in cols:
-        b = find_best_master_col(c, list(master_columns))
-        m[c] = b if b else "(non assigne)"
+        best = find_best_master_col(c, list(master_columns))
+        out[c] = best if best else "(non assigne)"
     for c in list(real_columns)[MAX_AUTO_COLUMNS_PER_SHEET:]:
-        m[c] = "(non assigne)"
-    return m
+        out[c] = "(non assigne)"
+    return out
 
 def _sanitize_mapping(mapping: Dict[str,str], master_cols: List[str]) -> Dict[str,str]:
     valid = set(["(non assigne)"] + master_cols)
     return {k: (v if v in valid else "(non assigne)") for k,v in mapping.items()}
+
+def _auto_assign_all_sheets():
+    # Auto global: tous les onglets / fichiers
+    for sheet_key, sheet_df in st.session_state.all_sheets.items():
+        real_cols = tuple(c for c in sheet_df.columns if not c.startswith("__"))
+        auto_map = auto_map_columns(real_cols, tuple(st.session_state.master_columns))
+        st.session_state.sheet_mappings[sheet_key] = _sanitize_mapping(auto_map, st.session_state.master_columns)
 
 @st.cache_data(show_spinner=True, ttl=1800)
 def build_final_df_cached(
@@ -177,7 +194,7 @@ def build_final_df_cached(
             try:
                 gid = int(sheet_ref)
                 m = re.search(r"Google Sheets\((.*?)\) ::", sheet_key)
-                if not m: 
+                if not m:
                     continue
                 sid = m.group(1)
                 df = _read_google_sheet_gid(sid, gid)
@@ -190,12 +207,14 @@ def build_final_df_cached(
             source_file, source_sheet = filename, sheet_ref
 
         if df is None or len(df)==0: continue
-        before = len(df); df = df.dropna(how="all")
+        before = len(df)
+        df = df.dropna(how="all")
         invalid_rows += max(0, before-len(df))
         if len(df)==0: continue
 
         mapping = mapping_dict.get(sheet_key, {})
-        if not [x for x in mapping.values() if x!="(non assigne)"]: continue
+        if not [x for x in mapping.values() if x!="(non assigne)"]:
+            continue
 
         sub = pd.DataFrame(index=df.index)
         for mc in master:
@@ -207,13 +226,15 @@ def build_final_df_cached(
             else:
                 comb = _safe_str_series(df[srcs[0]])
                 for ex in srcs[1:]:
-                    add = _safe_str_series(df[ex]); comb = comb.where(comb!="", add)
+                    add = _safe_str_series(df[ex])
+                    comb = comb.where(comb!="", add)
                 sub[mc] = comb
         rows.append(sub)
 
     if not rows: return _empty_df(), invalid_rows
     out = pd.concat(rows, ignore_index=True).dropna(how="all")
-    for c in out.columns: out[c] = out[c].astype("string").fillna("").str.strip()
+    for c in out.columns:
+        out[c] = out[c].astype("string").fillna("").str.strip()
     return out, invalid_rows
 
 st.title("Trieur de Fichiers Leads")
@@ -229,6 +250,11 @@ with tab1:
         if new_list:
             st.session_state.master_columns = new_list
             st.success(f"{len(new_list)} colonnes maîtres enregistrées.")
+            # re-sanitize mappings si colonnes maîtres changent
+            st.session_state.sheet_mappings = {
+                k: _sanitize_mapping(v, st.session_state.master_columns)
+                for k, v in st.session_state.sheet_mappings.items()
+            }
         else:
             st.error("❌ Veuillez entrer au moins une colonne maître.")
 
@@ -246,7 +272,8 @@ with tab2:
                     b = f.getvalue()
                     sheet_names = _excel_sheet_names(b, f.name)
                 except Exception as e:
-                    st.error(f"❌ Erreur lecture {f.name}: {e}"); continue
+                    st.error(f"❌ Erreur lecture {f.name}: {e}")
+                    continue
                 for sn in sheet_names:
                     df = _read_excel_sheet(b, f.name, sn)
                     if df is None or len(df)==0: continue
@@ -258,7 +285,8 @@ with tab2:
 
         if google_url.strip() and is_google_sheet_url(google_url):
             sid = _extract_google_sheet_id(google_url)
-            if not sid: st.warning("⚠️ URL Google Sheets invalide.")
+            if not sid:
+                st.warning("⚠️ URL Google Sheets invalide.")
             else:
                 found = 0
                 for gid in range(0, 50):
@@ -269,49 +297,64 @@ with tab2:
                     d["__source_file__"], d["__source_sheet__"] = "Google Sheets", sheet
                     d["__file_bytes__"], d["__sheet_ref__"] = b"", str(gid)
                     all_sheets[f"Google Sheets({sid}) :: {sheet}"] = d
-                    rows_total += len(d); found += 1
-                if found: st.success(f"✅ Google Sheets importé ({found} onglet(s)).")
-                else: st.warning("⚠️ Impossible de lire le Google Sheets.")
+                    rows_total += len(d)
+                    found += 1
+                if found:
+                    st.success(f"✅ Google Sheets importé ({found} onglet(s)).")
+                else:
+                    st.warning("⚠️ Impossible de lire le Google Sheets.")
 
         if all_sheets:
             st.session_state.all_sheets = all_sheets
-            st.session_state.sheet_mappings = {
-                k: _sanitize_mapping(v, st.session_state.master_columns)
-                for k, v in st.session_state.sheet_mappings.items()
-            }
+            # reset mapping à l'import pour éviter mappings fantômes
+            st.session_state.sheet_mappings = {}
             st.success(f"{len(set(k.split(' :: ')[0] for k in all_sheets))} fichier(s), {len(all_sheets)} onglet(s), {rows_total} lignes.")
         else:
             st.info("ℹ️ Aucune source valide chargée.")
 
     all_sheets = st.session_state.all_sheets
     if all_sheets:
+        # BOUTON GLOBAL (comme avant)
+        cA, cB = st.columns([1,2])
+        with cA:
+            if st.button("🚀 Auto (TOUT)", key="auto_all"):
+                _auto_assign_all_sheets()
+                st.success("✅ Auto-assignation appliquée à tous les onglets.")
+                st.rerun()
+        with cB:
+            st.caption("Assigne automatiquement toutes les colonnes détectées sur tous les fichiers/onglets.")
+
         for sheet_key, sheet_df in all_sheets.items():
             st.markdown(f"### 📄 {sheet_key}")
             real_cols = [c for c in sheet_df.columns if not c.startswith("__")]
             st.write(f"**Résumé :** {len(sheet_df)} lignes | {len(real_cols)} colonnes | {sheet_df[real_cols].duplicated().sum() if real_cols else 0} doublons")
 
+            # init mapping sheet si absent
             if sheet_key not in st.session_state.sheet_mappings:
-                st.session_state.sheet_mappings[sheet_key] = {}
-            st.session_state.sheet_mappings[sheet_key] = _sanitize_mapping(
-                st.session_state.sheet_mappings[sheet_key], st.session_state.master_columns
-            )
+                st.session_state.sheet_mappings[sheet_key] = {c: "(non assigne)" for c in real_cols}
 
+            # bouton auto par onglet (corrigé)
             if st.button("🚀 Auto", key=f"auto_{sheet_key}"):
-                st.session_state.sheet_mappings[sheet_key] = auto_map_columns(tuple(real_cols), tuple(st.session_state.master_columns))
+                auto_map = auto_map_columns(tuple(real_cols), tuple(st.session_state.master_columns))
+                st.session_state.sheet_mappings[sheet_key] = _sanitize_mapping(auto_map, st.session_state.master_columns)
+                st.success(f"✅ Auto-assignation appliquée à: {sheet_key}")
                 st.rerun()
 
+            # UI mapping manuel
+            current_map = _sanitize_mapping(st.session_state.sheet_mappings.get(sheet_key, {}), st.session_state.master_columns)
             updated = {}
             if real_cols:
                 cols = st.columns(min(len(real_cols), 8))
                 for i, src in enumerate(real_cols):
                     with cols[i % len(cols)]:
-                        cur = st.session_state.sheet_mappings[sheet_key].get(src, "(non assigne)")
-                        used = {updated.get(c,"") for c in real_cols if c!=src and updated.get(c,"")}
-                        opts = ["(non assigne)"] + [m for m in st.session_state.master_columns if m not in used]
+                        cur = current_map.get(src, "(non assigne)")
+                        used = {updated.get(c,"") for c in real_cols if c!=src and updated.get(c,"") and updated.get(c,"")!="(non assigne)"}
+                        opts = ["(non assigne)"] + [m for m in st.session_state.master_columns if m not in used or m == cur]
                         if cur not in opts: cur = "(non assigne)"
                         idx = opts.index(cur) if cur in opts else 0
                         updated[src] = st.selectbox(src, opts, index=idx, key=f"map_{sheet_key}_{src}")
             st.session_state.sheet_mappings[sheet_key] = updated
+
             st.dataframe(sheet_df[real_cols].head(PREVIEW_ROWS), use_container_width=True)
             st.markdown("---")
 
@@ -369,7 +412,8 @@ with tab3:
         elif col != "(aucun filtre)" and col in df.columns:
             vals = _safe_unique_values(df, col)
             sel = st.multiselect(f"Valeurs à conserver pour {col}", vals)
-            if sel: filt = df[df[col].isin(sel)]
+            if sel:
+                filt = df[df[col].isin(sel)]
 
         st.write(f"Résultat : **{len(filt)}** lignes | **{filt.duplicated().sum()}** doublons")
         st.dataframe(filt.head(DISPLAY_ROWS), use_container_width=True)
@@ -378,8 +422,8 @@ with tab3:
         dup_col = st.selectbox("Colonne de détection doublons", dup_opts, index=0)
         if dup_col != "(aucune)" and dup_col in filt.columns:
             s = filt[dup_col].astype("string").fillna("")
-            d = s[s!=""].duplicated(keep=False).sum()
-            st.warning(f"{int(d)} lignes en doublon détectées sur '{dup_col}'.")
+            dups = s[s!=""].duplicated(keep=False).sum()
+            st.warning(f"{int(dups)} lignes en doublon détectées sur '{dup_col}'.")
 
         st.session_state.filtered_df = filt
 

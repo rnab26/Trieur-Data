@@ -14,17 +14,17 @@ DEFAULT_MASTER_COLUMNS = [
 ]
 
 SYNONYMES = {
-    "NOM": ["nom", "lastname", "surname", "last_name", "family_name", "patronyme"],
-    "PRENOM": ["prenom", "prénom", "firstname", "first_name", "given_name"],
-    "GENRE/CIVILITE": ["genre", "civilite", "civilité", "sexe", "sex", "title", "salutation"],
-    "VILLE": ["ville", "city", "commune", "locality"],
-    "CP": ["cp", "codepostal", "code_postal", "postalcode", "zipcode", "zip", "postal"],
-    "ADRESSE": ["adresse", "address", "rue", "street", "location"],
-    "TELEPHONE MOBILE": ["telephoneportable", "portable", "mobile", "gsm", "cell", "cellphone", "phone_mobile"],
-    "TELEPHONE FIXE": ["telephonefixe", "fixe", "phone", "homephone", "landline", "phone_fixe"],
-    "EMAIL": ["email", "e-mail", "mail", "courriel", "e_mail"],
-    "DATE DE NAISSANCE": ["datedenaissance", "date_naissance", "naissance", "dob", "birthdate", "birthday", "birth_date"],
-    "Source Data": ["source", "fichier", "file", "origin"]
+    "NOM": ["nom", "lastname", "surname", "last_name", "family_name", "patronyme", "name", "nomclient", "clientname"],
+    "PRENOM": ["prenom", "prénom", "firstname", "first_name", "given_name", "givenname", "prenomclient"],
+    "GENRE/CIVILITE": ["genre", "civilite", "civilité", "sexe", "sex", "title", "salutation", "gender", "civ", "civil"],
+    "VILLE": ["ville", "city", "commune", "locality", "town"],
+    "CP": ["cp", "codepostal", "code_postal", "postalcode", "zipcode", "zip", "postal", "code", "postcode"],
+    "ADRESSE": ["adresse", "address", "rue", "street", "location", "libellevoie", "voie", "numvoie", "numerovoie"],
+    "TELEPHONE MOBILE": ["telephoneportable", "portable", "mobile", "gsm", "cell", "cellphone", "phone_mobile", "tel_mobile", "mobilephone", "phonenumbermobile"],
+    "TELEPHONE FIXE": ["telephonefixe", "fixe", "phone", "homephone", "landline", "phone_fixe", "telephone", "telephonedomicile", "tel"],
+    "EMAIL": ["email", "e-mail", "mail", "courriel", "e_mail", "mailcontact"],
+    "DATE DE NAISSANCE": ["datedenaissance", "date_naissance", "naissance", "dob", "birthdate", "birthday", "datenaissance"],
+    "Source Data": ["source", "fichier", "file", "origin", "sourcedata"]
 }
 
 if "master_columns" not in st.session_state:
@@ -41,6 +41,8 @@ if "export_mode" not in st.session_state:
     st.session_state.export_mode = "fusionné"
 if "export_name_base" not in st.session_state:
     st.session_state.export_name_base = ""
+if "auto_assign_triggered" not in st.session_state:
+    st.session_state.auto_assign_triggered = {}
 
 def normalize_text(text):
     """Normaliser un texte : minuscules, accents, espaces, caractères spéciaux"""
@@ -51,55 +53,234 @@ def normalize_text(text):
     text = re.sub(r'[^a-z0-9]', '', text)
     return text
 
-def find_best_master_col(src_col, master_cols):
+def normalize_column_name(text):
+    """Normalisation stricte des noms de colonnes pour le matching robuste."""
+    return normalize_text(text)
+
+def _build_normalized_synonyms(master_columns):
+    """Construit les synonymes normalisés par colonne maître (inclut le nom maître)."""
+    normalized = {}
+    for master in master_columns:
+        items = [master] + SYNONYMES.get(master, [])
+        normalized[master] = [normalize_column_name(x) for x in items if normalize_column_name(x)]
+    return normalized
+
+def auto_assign_columns_fast(real_columns, master_columns):
+    """
+    Auto-assignation robuste des colonnes avec priorités:
+    1) correspondance exacte normalisée
+    2) inclusion d'un synonyme dans la colonne source
+    3) fuzzy matching en dernier recours
+
+    Respecte l'unicité des colonnes maîtres dans l'onglet.
+    Retourne: mapping {src_col: master_col | '(non assigne)'}
+    """
+    mapping = {}
+    already_used = set()
+
+    normalized_masters = {m: normalize_column_name(m) for m in master_columns}
+    normalized_synonyms = _build_normalized_synonyms(master_columns)
+
+    # Pré-normalisation des colonnes source
+    src_norm_map = {src: normalize_column_name(src) for src in real_columns}
+
+    # 1) Exact match normalisé (master ou synonyme exactement égal)
+    for src in real_columns:
+        src_norm = src_norm_map.get(src, "")
+        if not src_norm:
+            mapping[src] = "(non assigne)"
+            continue
+
+        assigned = None
+        for master in master_columns:
+            if master in already_used:
+                continue
+            if src_norm == normalized_masters.get(master, ""):
+                assigned = master
+                break
+            if src_norm in normalized_synonyms.get(master, []):
+                assigned = master
+                break
+
+        if assigned:
+            mapping[src] = assigned
+            already_used.add(assigned)
+        else:
+            mapping[src] = "(non assigne)"
+
+    # 2) Inclusion de synonymes dans le nom de colonne source
+    for src in real_columns:
+        if mapping.get(src) != "(non assigne)":
+            continue
+        src_norm = src_norm_map.get(src, "")
+        if not src_norm:
+            continue
+
+        best_master = None
+        best_len = 0
+        for master in master_columns:
+            if master in already_used:
+                continue
+            for syn in normalized_synonyms.get(master, []):
+                if not syn:
+                    continue
+                if syn in src_norm:
+                    # garder le synonyme le plus spécifique (plus long)
+                    if len(syn) > best_len:
+                        best_len = len(syn)
+                        best_master = master
+
+        if best_master:
+            mapping[src] = best_master
+            already_used.add(best_master)
+
+    # 3) Fuzzy matching en dernier recours
+    fuzzy_threshold = 0.72
+    for src in real_columns:
+        if mapping.get(src) != "(non assigne)":
+            continue
+
+        src_norm = src_norm_map.get(src, "")
+        if not src_norm:
+            continue
+
+        best_master = None
+        best_score = fuzzy_threshold
+
+        for master in master_columns:
+            if master in already_used:
+                continue
+
+            # score contre nom maître
+            score_master = SequenceMatcher(None, src_norm, normalized_masters.get(master, "")).ratio()
+            if score_master > best_score:
+                best_score = score_master
+                best_master = master
+
+            # score contre synonymes
+            for syn in normalized_synonyms.get(master, []):
+                score_syn = SequenceMatcher(None, src_norm, syn).ratio()
+                if score_syn > best_score:
+                    best_score = score_syn
+                    best_master = master
+
+        if best_master:
+            mapping[src] = best_master
+            already_used.add(best_master)
+
+    return mapping
+
+def find_best_master_col(src_col, master_cols, already_used=None):
     """Trouver la meilleure colonne maître pour une colonne source"""
+    if already_used is None:
+        already_used = []
+    
     src_norm = normalize_text(src_col)
     
-    # 1. Correspondance exacte normalisée
-    for master in master_cols:
-        if normalize_text(master) == src_norm:
-            return master
+    if not src_norm or src_norm == "(nonassigne)":
+        return None
     
-    # 2. Correspondance via synonymes
+    # 1. Correspondance EXACTE normalisée - PRIORITÉ ABSOLUE
     for master in master_cols:
-        synonyms = SYNONYMES.get(master, [])
-        for syn in synonyms:
-            if normalize_text(syn) == src_norm:
+        if master not in already_used:
+            master_norm = normalize_text(master)
+            if master_norm == src_norm:
                 return master
     
-    # 3. Fuzzy matching avec seuil
+    # 2. Correspondance via synonymes (priorité haute)
+    for master in master_cols:
+        if master not in already_used:
+            synonyms = SYNONYMES.get(master, [])
+            for syn in synonyms:
+                if normalize_text(syn) == src_norm:
+                    return master
+    
+    # 3. Fuzzy matching avec seuil modéré
     best_master = None
     best_score = 0.65
     for master in master_cols:
-        score = SequenceMatcher(None, src_norm, normalize_text(master)).ratio()
-        if score > best_score:
-            best_score = score
-            best_master = master
+        if master not in already_used:
+            master_norm = normalize_text(master)
+            score = SequenceMatcher(None, src_norm, master_norm).ratio()
+            if score > best_score:
+                best_score = score
+                best_master = master
     
-    return best_master
+    if best_master:
+        return best_master
+    
+    return None
 
-def read_excel_all_sheets(file_obj):
-    """Lire TOUS les onglets d'un fichier Excel"""
+def auto_assign_single_sheet(sheet_key, sheet_df, master_columns):
+    """
+    Auto-assigner une seule feuille.
+    Retourne un dictionnaire {src_col: master_col} et le nombre de colonnes assignées.
+    """
+    real_columns = [c for c in sheet_df.columns if c not in ["__source_file__", "__source_sheet__"]]
+    new_mapping = auto_assign_columns_fast(real_columns, master_columns)
+    matched_count = sum(1 for v in new_mapping.values() if v != "(non assigne)")
+    
+    return new_mapping, matched_count, len(real_columns)
+
+def read_excel_all_sheets_from_file(file_obj, filename):
+    """
+    Lire TOUS les onglets d'un fichier Excel uploadé.
+    Retourne un dictionnaire {nom_feuille: dataframe}
+    """
+    sheets = {}
     try:
-        xls = pd.ExcelFile(file_obj, engine="openpyxl")
-        sheets = {}
-        for sheet_name in xls.sheet_names:
-            df = xls.parse(sheet_name=sheet_name, dtype=str)
-            if len(df) > 0:
-                sheets[sheet_name] = df
+        # Méthode 1 : utiliser pd.read_excel avec sheet_name=None
+        all_sheets_dict = pd.read_excel(file_obj, sheet_name=None, dtype=str, engine="openpyxl")
+        
+        if all_sheets_dict:
+            for sheet_name, df in all_sheets_dict.items():
+                if df is not None and len(df) > 0:
+                    # Nettoyer les colonnes (enlever les colonnes vides)
+                    df = df.dropna(axis=1, how='all')
+                    if len(df.columns) > 0 and len(df) > 0:
+                        sheets[sheet_name] = df
+        
         return sheets
-    except Exception:
+    
+    except Exception as e1:
         try:
-            xls = pd.ExcelFile(file_obj)
-            sheets = {}
+            # Méthode 2 : fallback avec openpyxl
+            file_obj.seek(0)
+            xls = pd.ExcelFile(file_obj, engine="openpyxl")
+            
             for sheet_name in xls.sheet_names:
-                df = xls.parse(sheet_name=sheet_name, dtype=str)
-                if len(df) > 0:
-                    sheets[sheet_name] = df
+                try:
+                    df = xls.parse(sheet_name=sheet_name, dtype=str)
+                    if df is not None and len(df) > 0:
+                        df = df.dropna(axis=1, how='all')
+                        if len(df.columns) > 0 and len(df) > 0:
+                            sheets[sheet_name] = df
+                except Exception:
+                    continue
+            
             return sheets
-        except Exception as e:
-            st.error(f"❌ Erreur lecture Excel: {str(e)}")
-            return {}
+        
+        except Exception as e2:
+            try:
+                # Méthode 3 : fallback sans moteur spécifié
+                file_obj.seek(0)
+                xls = pd.ExcelFile(file_obj)
+                
+                for sheet_name in xls.sheet_names:
+                    try:
+                        df = xls.parse(sheet_name=sheet_name, dtype=str)
+                        if df is not None and len(df) > 0:
+                            df = df.dropna(axis=1, how='all')
+                            if len(df.columns) > 0 and len(df) > 0:
+                                sheets[sheet_name] = df
+                    except Exception:
+                        continue
+                
+                return sheets
+            
+            except Exception as e3:
+                st.error(f"❌ Impossible de lire {filename}: {str(e3)}")
+                return {}
 
 def read_google_sheets_all_sheets(url):
     """Lire Google Sheets avec tous les onglets détectés"""
@@ -114,7 +295,6 @@ def read_google_sheets_all_sheets(url):
         sheet_id = url.split("/d/")[1].split("/")[0]
         all_sheets = {}
         
-        # Essayer d'accéder directement avec gid pour tous les onglets
         for gid in range(0, 50):
             try:
                 csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
@@ -208,54 +388,139 @@ with tab2:
     google_url = st.text_input("Ou collez une URL Google Sheets publique (optionnel)")
 
     all_sheets = {}
+
+    progress_placeholder = st.empty()
+    progress_label = st.empty()
+    progress_bar = None
+
+    def start_progress(message):
+        bar = progress_placeholder.progress(0)
+        progress_label.info(message)
+        return bar
+
+    def update_progress(bar, pct, message=None):
+        bar.progress(max(0, min(100, int(pct))))
+        if message:
+            progress_label.info(message)
+
+    def end_progress(bar, message=None):
+        bar.progress(100)
+        if message:
+            progress_label.success(message)
+        progress_placeholder.empty()
+        progress_label.empty()
     
     if files:
-        for f in files:
+        progress_bar = start_progress("Chargement des fichiers Excel... 0%")
+        total_files = len(files)
+        for f_idx, f in enumerate(files):
+            base_pct = int((f_idx / max(total_files, 1)) * 80)
+            update_progress(progress_bar, base_pct, f"Lecture du fichier {f_idx+1}/{total_files} : {f.name}")
             try:
-                sheets = read_excel_all_sheets(f)
+                sheets = read_excel_all_sheets_from_file(f, f.name)
                 if not sheets:
                     st.error(f"❌ Aucun onglet lisible dans {f.name}")
                     continue
-                for sheet_name, df in sheets.items():
+
+                sheet_items = list(sheets.items())
+                total_sheet_items = len(sheet_items)
+
+                # Ajouter chaque feuille du fichier
+                for s_idx, (sheet_name, df) in enumerate(sheet_items):
+                    if total_sheet_items > 0:
+                        step_within_file = int(((s_idx + 1) / total_sheet_items) * (80 / max(total_files, 1)))
+                    else:
+                        step_within_file = 0
+                    update_progress(
+                        progress_bar,
+                        base_pct + step_within_file,
+                        f"Traitement de l'onglet {s_idx+1}/{total_sheet_items} de {f.name}"
+                    )
+
                     if df is None or len(df) == 0:
                         st.warning(f"⚠️ {f.name} :: {sheet_name} est vide, ignoré.")
                         continue
+                    
                     key = f.name + " :: " + sheet_name
                     df = df.copy()
                     df["__source_file__"] = f.name
                     df["__source_sheet__"] = sheet_name
                     all_sheets[key] = df
+                
             except Exception as e:
                 st.error(f"❌ Erreur lecture {f.name}: {str(e)}")
 
+        update_progress(progress_bar, 80, "Lecture Excel terminée. Finalisation...")
+
     if google_url.strip() and is_google_sheet_url(google_url):
-        with st.spinner("🔄 Récupération des onglets Google Sheets..."):
-            sheets = read_google_sheets_all_sheets(google_url)
-            if sheets:
-                for sheet_name, df in sheets.items():
-                    if len(df) > 0:
-                        key = "Google Sheets :: " + sheet_name
-                        df = df.copy()
-                        df["__source_file__"] = "Google Sheets"
-                        df["__source_sheet__"] = sheet_name
-                        all_sheets[key] = df
-                st.success(f"✅ Google Sheets importé avec {len(sheets)} onglet(s) détecté(s).")
-            else:
-                st.warning("⚠️ Impossible de lire le Google Sheets.")
+        if progress_bar is None:
+            progress_bar = start_progress("Chargement Google Sheets... 0%")
+
+        update_progress(progress_bar, 85 if files else 10, "Récupération des onglets Google Sheets...")
+        sheets = read_google_sheets_all_sheets(google_url)
+        if sheets:
+            sheet_items = list(sheets.items())
+            total_sheet_items = len(sheet_items)
+            for s_idx, (sheet_name, df) in enumerate(sheet_items):
+                start_pct = 85 if files else 10
+                end_pct = 98
+                pct = start_pct + int(((s_idx + 1) / max(total_sheet_items, 1)) * (end_pct - start_pct))
+                update_progress(progress_bar, pct, f"Traitement Google Sheet {s_idx+1}/{total_sheet_items}")
+                if len(df) > 0:
+                    key = "Google Sheets :: " + sheet_name
+                    df = df.copy()
+                    df["__source_file__"] = "Google Sheets"
+                    df["__source_sheet__"] = sheet_name
+                    all_sheets[key] = df
+            st.success(f"✅ Google Sheets importé avec {len(sheets)} onglet(s) détecté(s).")
+        else:
+            st.warning("⚠️ Impossible de lire le Google Sheets.")
+
+    if progress_bar is not None:
+        end_progress(progress_bar, "Chargement terminé à 100%")
 
     if all_sheets:
         st.session_state.all_sheets = all_sheets
+        
+        # Afficher le résumé d'import
         total_files = len(set([k.split(" :: ")[0] for k in all_sheets.keys()]))
-        st.success(str(total_files) + " fichier(s) importes, " + str(len(all_sheets)) + " onglet(s) detecte(s) au total.")
+        total_sheets = len(all_sheets)
+        st.success(f"✅ {total_files} fichier(s) importés, {total_sheets} onglet(s) détecté(s) au total.")
 
+        # Détail des onglets importés
         with st.expander("📋 Detail des onglets importes"):
             for k, df in all_sheets.items():
-                num_dup = df.duplicated().sum()
+                parts = k.split(" :: ")
+                filename = parts[0]
+                sheetname = parts[1] if len(parts) > 1 else "Unknown"
+                num_rows = len(df)
                 real_cols = [c for c in df.columns if c not in ["__source_file__", "__source_sheet__"]]
-                st.write(f"**{k}** : {len(df)} lignes, {len(real_cols)} colonnes, {num_dup} doublons")
+                num_cols = len(real_cols)
+                num_dup = df.duplicated().sum()
+                
+                st.write(f"**{filename}** → **{sheetname}** : {num_rows} lignes, {num_cols} colonnes, {num_dup} doublons")
 
         st.markdown("---")
         st.subheader("Assignation des colonnes")
+
+        # BOUTON GLOBAL POUR AUTO-ASSIGNER TOUS LES ONGLETS
+        col_global_auto, col_space = st.columns([1, 3])
+        with col_global_auto:
+            if st.button("🚀 Auto-assigner TOUS les onglets", key="auto_all_sheets", type="primary"):
+                total_sheets_count = len(all_sheets)
+                for sheet_key, sheet_df in all_sheets.items():
+                    new_mapping, matched_count, total_cols = auto_assign_single_sheet(
+                        sheet_key, sheet_df, st.session_state.master_columns
+                    )
+                    st.session_state.sheet_mappings[sheet_key] = new_mapping
+                    for src_col, master_col in new_mapping.items():
+                        widget_key = f"map_{sheet_key}_{src_col}"
+                        st.session_state[widget_key] = master_col
+                
+                st.success(f"✅ Auto-assignation terminée pour {total_sheets_count} onglet(s).")
+                st.rerun()
+
+        st.markdown("---")
 
         any_assigned = False
 
@@ -272,14 +537,18 @@ with tab2:
             if sheet_key not in st.session_state.sheet_mappings:
                 st.session_state.sheet_mappings[sheet_key] = {}
             
+            # Bouton Auto individuel par onglet
             col_auto, col_space = st.columns([1, 3])
             with col_auto:
                 if st.button(f"🚀 Auto", key=f"auto_{sheet_key}"):
-                    new_mapping = {}
-                    for src_col in real_columns:
-                        best_master = find_best_master_col(src_col, st.session_state.master_columns)
-                        new_mapping[src_col] = best_master if best_master else "(non assigne)"
+                    new_mapping, matched_count, total_cols = auto_assign_single_sheet(
+                        sheet_key, sheet_df, st.session_state.master_columns
+                    )
                     st.session_state.sheet_mappings[sheet_key] = new_mapping
+                    for src_col, master_col in new_mapping.items():
+                        widget_key = f"map_{sheet_key}_{src_col}"
+                        st.session_state[widget_key] = master_col
+                    st.success(f"✅ {matched_count}/{total_cols} colonnes assignées")
                     st.rerun()
             
             st.write("**Aperçu des 7 premières lignes avec assignation au-dessus :**")
@@ -295,17 +564,25 @@ with tab2:
             
             cols_display = st.columns(len(real_columns))
             
+            # Afficher un selectbox pour chaque colonne source
             for idx, src_col in enumerate(real_columns):
                 with cols_display[idx]:
                     current = current_mapping.get(src_col, "(non assigne)")
-                    if current not in mapping_options:
-                        current = "(non assigne)"
+                    widget_key = f"map_{sheet_key}_{src_col}"
+
+                    # Synchroniser la valeur du widget avec le mapping calculé
+                    if widget_key in st.session_state:
+                        current = st.session_state[widget_key]
+                    else:
+                        st.session_state[widget_key] = current
                     
-                    available_options = ["(non assigne)"] + [m for m in st.session_state.master_columns 
-                                                               if m not in [updated_mapping.get(c, "") for c in real_columns if c != src_col]]
+                    # Les options disponibles sont les colonnes maîtres non encore utilisées dans ce mapping
+                    already_used_in_current = [updated_mapping.get(c, "") for c in real_columns if c != src_col and updated_mapping.get(c) != "(non assigne)"]
+                    available_options = ["(non assigne)"] + [m for m in st.session_state.master_columns if m not in already_used_in_current]
                     
                     if current not in available_options:
                         current = "(non assigne)"
+                        st.session_state[widget_key] = current
                     
                     try:
                         idx_val = available_options.index(current)
@@ -316,7 +593,7 @@ with tab2:
                         src_col,
                         options=available_options,
                         index=idx_val,
-                        key=f"map_{sheet_key}_{src_col}",
+                        key=widget_key,
                         label_visibility="visible"
                     )
                     updated_mapping[src_col] = choice
@@ -324,9 +601,7 @@ with tab2:
                         any_assigned = True
             
             st.session_state.sheet_mappings[sheet_key] = updated_mapping
-            
             st.dataframe(preview_df, use_container_width=True)
-            
             st.markdown("---")
 
         if not any_assigned:

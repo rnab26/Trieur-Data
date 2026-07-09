@@ -14,17 +14,17 @@ DEFAULT_MASTER_COLUMNS = [
 ]
 
 SYNONYMES = {
-    "NOM": ["nom", "lastname", "surname", "last_name", "family_name", "patronyme", "name"],
-    "PRENOM": ["prenom", "prénom", "firstname", "first_name", "given_name", "givenname"],
-    "GENRE/CIVILITE": ["genre", "civilite", "civilité", "sexe", "sex", "title", "salutation", "gender"],
+    "NOM": ["nom", "lastname", "surname", "last_name", "family_name", "patronyme", "name", "nomclient", "clientname"],
+    "PRENOM": ["prenom", "prénom", "firstname", "first_name", "given_name", "givenname", "prenomclient"],
+    "GENRE/CIVILITE": ["genre", "civilite", "civilité", "sexe", "sex", "title", "salutation", "gender", "civ", "civil"],
     "VILLE": ["ville", "city", "commune", "locality", "town"],
-    "CP": ["cp", "codepostal", "code_postal", "postalcode", "zipcode", "zip", "postal", "code"],
-    "ADRESSE": ["adresse", "address", "rue", "street", "location"],
-    "TELEPHONE MOBILE": ["telephoneportable", "portable", "mobile", "gsm", "cell", "cellphone", "phone_mobile", "tel_mobile"],
-    "TELEPHONE FIXE": ["telephonefixe", "fixe", "phone", "homephone", "landline", "phone_fixe", "telephone"],
-    "EMAIL": ["email", "e-mail", "mail", "courriel", "e_mail"],
-    "DATE DE NAISSANCE": ["datedenaissance", "date_naissance", "naissance", "dob", "birthdate", "birthday"],
-    "Source Data": ["source", "fichier", "file", "origin"]
+    "CP": ["cp", "codepostal", "code_postal", "postalcode", "zipcode", "zip", "postal", "code", "postcode"],
+    "ADRESSE": ["adresse", "address", "rue", "street", "location", "libellevoie", "voie", "numvoie", "numerovoie"],
+    "TELEPHONE MOBILE": ["telephoneportable", "portable", "mobile", "gsm", "cell", "cellphone", "phone_mobile", "tel_mobile", "mobilephone", "phonenumbermobile"],
+    "TELEPHONE FIXE": ["telephonefixe", "fixe", "phone", "homephone", "landline", "phone_fixe", "telephone", "telephonedomicile", "tel"],
+    "EMAIL": ["email", "e-mail", "mail", "courriel", "e_mail", "mailcontact"],
+    "DATE DE NAISSANCE": ["datedenaissance", "date_naissance", "naissance", "dob", "birthdate", "birthday", "datenaissance"],
+    "Source Data": ["source", "fichier", "file", "origin", "sourcedata"]
 }
 
 if "master_columns" not in st.session_state:
@@ -52,6 +52,123 @@ def normalize_text(text):
     text = re.sub(r'[\s\-_/.]', '', text)
     text = re.sub(r'[^a-z0-9]', '', text)
     return text
+
+def normalize_column_name(text):
+    """Normalisation stricte des noms de colonnes pour le matching robuste."""
+    return normalize_text(text)
+
+def _build_normalized_synonyms(master_columns):
+    """Construit les synonymes normalisés par colonne maître (inclut le nom maître)."""
+    normalized = {}
+    for master in master_columns:
+        items = [master] + SYNONYMES.get(master, [])
+        normalized[master] = [normalize_column_name(x) for x in items if normalize_column_name(x)]
+    return normalized
+
+def auto_assign_columns_fast(real_columns, master_columns):
+    """
+    Auto-assignation robuste des colonnes avec priorités:
+    1) correspondance exacte normalisée
+    2) inclusion d'un synonyme dans la colonne source
+    3) fuzzy matching en dernier recours
+
+    Respecte l'unicité des colonnes maîtres dans l'onglet.
+    Retourne: mapping {src_col: master_col | '(non assigne)'}
+    """
+    mapping = {}
+    already_used = set()
+
+    normalized_masters = {m: normalize_column_name(m) for m in master_columns}
+    normalized_synonyms = _build_normalized_synonyms(master_columns)
+
+    # Pré-normalisation des colonnes source
+    src_norm_map = {src: normalize_column_name(src) for src in real_columns}
+
+    # 1) Exact match normalisé (master ou synonyme exactement égal)
+    for src in real_columns:
+        src_norm = src_norm_map.get(src, "")
+        if not src_norm:
+            mapping[src] = "(non assigne)"
+            continue
+
+        assigned = None
+        for master in master_columns:
+            if master in already_used:
+                continue
+            if src_norm == normalized_masters.get(master, ""):
+                assigned = master
+                break
+            if src_norm in normalized_synonyms.get(master, []):
+                assigned = master
+                break
+
+        if assigned:
+            mapping[src] = assigned
+            already_used.add(assigned)
+        else:
+            mapping[src] = "(non assigne)"
+
+    # 2) Inclusion de synonymes dans le nom de colonne source
+    for src in real_columns:
+        if mapping.get(src) != "(non assigne)":
+            continue
+        src_norm = src_norm_map.get(src, "")
+        if not src_norm:
+            continue
+
+        best_master = None
+        best_len = 0
+        for master in master_columns:
+            if master in already_used:
+                continue
+            for syn in normalized_synonyms.get(master, []):
+                if not syn:
+                    continue
+                if syn in src_norm:
+                    # garder le synonyme le plus spécifique (plus long)
+                    if len(syn) > best_len:
+                        best_len = len(syn)
+                        best_master = master
+
+        if best_master:
+            mapping[src] = best_master
+            already_used.add(best_master)
+
+    # 3) Fuzzy matching en dernier recours
+    fuzzy_threshold = 0.72
+    for src in real_columns:
+        if mapping.get(src) != "(non assigne)":
+            continue
+
+        src_norm = src_norm_map.get(src, "")
+        if not src_norm:
+            continue
+
+        best_master = None
+        best_score = fuzzy_threshold
+
+        for master in master_columns:
+            if master in already_used:
+                continue
+
+            # score contre nom maître
+            score_master = SequenceMatcher(None, src_norm, normalized_masters.get(master, "")).ratio()
+            if score_master > best_score:
+                best_score = score_master
+                best_master = master
+
+            # score contre synonymes
+            for syn in normalized_synonyms.get(master, []):
+                score_syn = SequenceMatcher(None, src_norm, syn).ratio()
+                if score_syn > best_score:
+                    best_score = score_syn
+                    best_master = master
+
+        if best_master:
+            mapping[src] = best_master
+            already_used.add(best_master)
+
+    return mapping
 
 def find_best_master_col(src_col, master_cols, already_used=None):
     """Trouver la meilleure colonne maître pour une colonne source"""
@@ -100,18 +217,8 @@ def auto_assign_single_sheet(sheet_key, sheet_df, master_columns):
     Retourne un dictionnaire {src_col: master_col} et le nombre de colonnes assignées.
     """
     real_columns = [c for c in sheet_df.columns if c not in ["__source_file__", "__source_sheet__"]]
-    new_mapping = {}
-    already_used = []
-    matched_count = 0
-    
-    for src_col in real_columns:
-        best_master = find_best_master_col(src_col, master_columns, already_used)
-        if best_master:
-            new_mapping[src_col] = best_master
-            already_used.append(best_master)
-            matched_count += 1
-        else:
-            new_mapping[src_col] = "(non assigne)"
+    new_mapping = auto_assign_columns_fast(real_columns, master_columns)
+    matched_count = sum(1 for v in new_mapping.values() if v != "(non assigne)")
     
     return new_mapping, matched_count, len(real_columns)
 
@@ -354,6 +461,9 @@ with tab2:
                         sheet_key, sheet_df, st.session_state.master_columns
                     )
                     st.session_state.sheet_mappings[sheet_key] = new_mapping
+                    for src_col, master_col in new_mapping.items():
+                        widget_key = f"map_{sheet_key}_{src_col}"
+                        st.session_state[widget_key] = master_col
                 
                 st.success(f"✅ Auto-assignation terminée pour {total_sheets_count} onglet(s).")
                 st.rerun()
@@ -383,6 +493,9 @@ with tab2:
                         sheet_key, sheet_df, st.session_state.master_columns
                     )
                     st.session_state.sheet_mappings[sheet_key] = new_mapping
+                    for src_col, master_col in new_mapping.items():
+                        widget_key = f"map_{sheet_key}_{src_col}"
+                        st.session_state[widget_key] = master_col
                     st.success(f"✅ {matched_count}/{total_cols} colonnes assignées")
                     st.rerun()
             
@@ -403,6 +516,13 @@ with tab2:
             for idx, src_col in enumerate(real_columns):
                 with cols_display[idx]:
                     current = current_mapping.get(src_col, "(non assigne)")
+                    widget_key = f"map_{sheet_key}_{src_col}"
+
+                    # Synchroniser la valeur du widget avec le mapping calculé
+                    if widget_key in st.session_state:
+                        current = st.session_state[widget_key]
+                    else:
+                        st.session_state[widget_key] = current
                     
                     # Les options disponibles sont les colonnes maîtres non encore utilisées dans ce mapping
                     already_used_in_current = [updated_mapping.get(c, "") for c in real_columns if c != src_col and updated_mapping.get(c) != "(non assigne)"]
@@ -410,6 +530,7 @@ with tab2:
                     
                     if current not in available_options:
                         current = "(non assigne)"
+                        st.session_state[widget_key] = current
                     
                     try:
                         idx_val = available_options.index(current)
@@ -420,7 +541,7 @@ with tab2:
                         src_col,
                         options=available_options,
                         index=idx_val,
-                        key=f"map_{sheet_key}_{src_col}",
+                        key=widget_key,
                         label_visibility="visible"
                     )
                     updated_mapping[src_col] = choice

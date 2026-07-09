@@ -388,17 +388,55 @@ with tab2:
     google_url = st.text_input("Ou collez une URL Google Sheets publique (optionnel)")
 
     all_sheets = {}
+
+    progress_placeholder = st.empty()
+    progress_label = st.empty()
+    progress_bar = None
+
+    def start_progress(message):
+        bar = progress_placeholder.progress(0)
+        progress_label.info(message)
+        return bar
+
+    def update_progress(bar, pct, message=None):
+        bar.progress(max(0, min(100, int(pct))))
+        if message:
+            progress_label.info(message)
+
+    def end_progress(bar, message=None):
+        bar.progress(100)
+        if message:
+            progress_label.success(message)
+        progress_placeholder.empty()
+        progress_label.empty()
     
     if files:
-        for f in files:
+        progress_bar = start_progress("Chargement des fichiers Excel... 0%")
+        total_files = len(files)
+        for f_idx, f in enumerate(files):
+            base_pct = int((f_idx / max(total_files, 1)) * 80)
+            update_progress(progress_bar, base_pct, f"Lecture du fichier {f_idx+1}/{total_files} : {f.name}")
             try:
                 sheets = read_excel_all_sheets_from_file(f, f.name)
                 if not sheets:
                     st.error(f"❌ Aucun onglet lisible dans {f.name}")
                     continue
-                
+
+                sheet_items = list(sheets.items())
+                total_sheet_items = len(sheet_items)
+
                 # Ajouter chaque feuille du fichier
-                for sheet_name, df in sheets.items():
+                for s_idx, (sheet_name, df) in enumerate(sheet_items):
+                    if total_sheet_items > 0:
+                        step_within_file = int(((s_idx + 1) / total_sheet_items) * (80 / max(total_files, 1)))
+                    else:
+                        step_within_file = 0
+                    update_progress(
+                        progress_bar,
+                        base_pct + step_within_file,
+                        f"Traitement de l'onglet {s_idx+1}/{total_sheet_items} de {f.name}"
+                    )
+
                     if df is None or len(df) == 0:
                         st.warning(f"⚠️ {f.name} :: {sheet_name} est vide, ignoré.")
                         continue
@@ -412,20 +450,34 @@ with tab2:
             except Exception as e:
                 st.error(f"❌ Erreur lecture {f.name}: {str(e)}")
 
+        update_progress(progress_bar, 80, "Lecture Excel terminée. Finalisation...")
+
     if google_url.strip() and is_google_sheet_url(google_url):
-        with st.spinner("🔄 Récupération des onglets Google Sheets..."):
-            sheets = read_google_sheets_all_sheets(google_url)
-            if sheets:
-                for sheet_name, df in sheets.items():
-                    if len(df) > 0:
-                        key = "Google Sheets :: " + sheet_name
-                        df = df.copy()
-                        df["__source_file__"] = "Google Sheets"
-                        df["__source_sheet__"] = sheet_name
-                        all_sheets[key] = df
-                st.success(f"✅ Google Sheets importé avec {len(sheets)} onglet(s) détecté(s).")
-            else:
-                st.warning("⚠️ Impossible de lire le Google Sheets.")
+        if progress_bar is None:
+            progress_bar = start_progress("Chargement Google Sheets... 0%")
+
+        update_progress(progress_bar, 85 if files else 10, "Récupération des onglets Google Sheets...")
+        sheets = read_google_sheets_all_sheets(google_url)
+        if sheets:
+            sheet_items = list(sheets.items())
+            total_sheet_items = len(sheet_items)
+            for s_idx, (sheet_name, df) in enumerate(sheet_items):
+                start_pct = 85 if files else 10
+                end_pct = 98
+                pct = start_pct + int(((s_idx + 1) / max(total_sheet_items, 1)) * (end_pct - start_pct))
+                update_progress(progress_bar, pct, f"Traitement Google Sheet {s_idx+1}/{total_sheet_items}")
+                if len(df) > 0:
+                    key = "Google Sheets :: " + sheet_name
+                    df = df.copy()
+                    df["__source_file__"] = "Google Sheets"
+                    df["__source_sheet__"] = sheet_name
+                    all_sheets[key] = df
+            st.success(f"✅ Google Sheets importé avec {len(sheets)} onglet(s) détecté(s).")
+        else:
+            st.warning("⚠️ Impossible de lire le Google Sheets.")
+
+    if progress_bar is not None:
+        end_progress(progress_bar, "Chargement terminé à 100%")
 
     if all_sheets:
         st.session_state.all_sheets = all_sheets

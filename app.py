@@ -1,11 +1,22 @@
 # =============================================================
 # Trieur de Fichiers Leads
-# VERSION 1.0
+# VERSION 1.2
 # Changements par rapport a la version precedente :
 #   [1] Detection telephone MOBILE / FIXE par le CONTENU (prefixes FR)
 #   [6] Colonnes maitres PERSISTANTES (survivent au rechargement)
 #   [8] Limite d'upload portee a 500 Mo (voir .streamlit/config.toml)
 #   [9] Nom du fichier final personnalisable avant export (CSV / Excel)
+#   [PERF 1.1] Correction de la lenteur d'auto-assignation :
+#       - la detection telephone echantillonne AVANT traitement
+#         (cout constant meme sur des colonnes de 1M lignes)
+#       - le scan telephone ne se declenche que si une colonne maitre
+#         telephone existe
+#   [PERF 1.2] Fin des rechargements inutiles :
+#       - les fichiers ne sont lus/parses qu'UNE fois (mise en cache par
+#         signature nom+taille). Les assignations manuelles ne relancent
+#         plus aucun chargement ni barre de progression.
+#       - auto-assignation automatique de TOUS les onglets des l'import
+#         (corrige le cas ou seul l'onglet 1 etait assigne).
 # Aucune logique existante n'a ete supprimee.
 # =============================================================
 
@@ -21,7 +32,7 @@ from difflib import SequenceMatcher
 
 st.set_page_config(page_title="Trieur de Fichiers Leads", layout="wide")
 
-APP_VERSION = "1.0"
+APP_VERSION = "1.2"
 
 DEFAULT_MASTER_COLUMNS = [
     "NOM", "PRENOM", "GENRE/CIVILITE", "VILLE", "CP", "ADRESSE",
@@ -167,14 +178,21 @@ def phone_kind(value):
         return "fixe"
     return None
 
-def detect_phone_column_kind(series, sample=300):
+def detect_phone_column_kind(series, sample=200):
     """
-    Analyse un echantillon d'une colonne et renvoie :
+    Analyse un ECHANTILLON d'une colonne et renvoie :
       'mobile', 'fixe', 'mixte'  si la colonne ressemble a des telephones,
        None sinon.
+
+    IMPORTANT PERFORMANCE : on decoupe d'abord les premieres lignes
+    (series.head), PUIS on nettoie. Ainsi le cout reste constant meme
+    sur une colonne de plusieurs centaines de milliers de lignes.
     """
     try:
-        vals = series.dropna().astype(str)
+        # On prend une marge (x5) pour compenser les cases vides, mais on
+        # ne touche jamais toute la colonne.
+        head = series.head(sample * 5)
+        vals = head.dropna().astype(str)
     except Exception:
         return None
     vals = vals[vals.str.strip() != ""]
@@ -240,8 +258,14 @@ def auto_assign_columns_fast(real_columns, master_columns, sheet_df=None):
     # Pré-normalisation des colonnes source
     src_norm_map = {src: normalize_column_name(src) for src in real_columns}
 
-    # [1] Detection telephone par contenu (une seule passe, mise en cache locale)
-    phone_kinds = _phone_kinds_for_sheet(real_columns, sheet_df)
+    # [1] Detection telephone par contenu (une seule passe).
+    # On ne la declenche QUE si une colonne maitre telephone existe,
+    # pour ne pas ralentir inutilement les fichiers sans telephone.
+    _needs_phone_scan = ("TELEPHONE MOBILE" in master_columns) or ("TELEPHONE FIXE" in master_columns)
+    if sheet_df is not None and _needs_phone_scan:
+        phone_kinds = _phone_kinds_for_sheet(real_columns, sheet_df)
+    else:
+        phone_kinds = {}
 
     # 1) Exact match normalisé (master ou synonyme exactement égal)
     for src in real_columns:
@@ -664,7 +688,31 @@ with tab2:
         progress_placeholder.empty()
         progress_label.empty()
 
-    if files:
+    def _files_signature(_files, _gurl):
+        """Empreinte de l'ensemble importe (nom+taille des fichiers + URL)."""
+        sig = []
+        for _f in _files or []:
+            try:
+                sig.append((_f.name, int(_f.size)))
+            except Exception:
+                sig.append((getattr(_f, "name", "?"), None))
+        sig.append(("__google__", _gurl.strip() if _gurl else ""))
+        return tuple(sig)
+
+    has_input = bool(files) or bool(google_url.strip() and is_google_sheet_url(google_url))
+    current_sig = _files_signature(files, google_url)
+
+    # [PERF] On ne (re)lit les fichiers QUE si l'ensemble importe a change.
+    # Sinon on reutilise ce qui est deja en memoire : plus aucun rechargement
+    # (ni barre de progression) lors des assignations manuelles.
+    need_reload = has_input and (
+        st.session_state.get("loaded_signature") != current_sig
+        or not st.session_state.get("all_sheets")
+    )
+    if not need_reload:
+        all_sheets = st.session_state.get("all_sheets", {})
+
+    if need_reload and files:
         progress_bar = start_progress("Chargement des fichiers Excel... 0%")
         total_files = len(files)
         for f_idx, f in enumerate(files):
@@ -705,7 +753,7 @@ with tab2:
 
         update_progress(progress_bar, 80, "Lecture Excel terminée. Finalisation...")
 
-    if google_url.strip() and is_google_sheet_url(google_url):
+    if need_reload and google_url.strip() and is_google_sheet_url(google_url):
         if progress_bar is None:
             progress_bar = start_progress("Chargement Google Sheets... 0%")
 
@@ -732,9 +780,26 @@ with tab2:
     if progress_bar is not None:
         end_progress(progress_bar, "Chargement terminé à 100%")
 
-    if all_sheets:
+    if need_reload:
+        # Memoriser le resultat pour ne plus reparser aux prochains reruns
         st.session_state.all_sheets = all_sheets
+        st.session_state.loaded_signature = current_sig
 
+        # Repartir sur des mappings propres pour ce nouvel ensemble
+        st.session_state.sheet_mappings = {}
+        for _k in list(st.session_state.keys()):
+            if isinstance(_k, str) and _k.startswith("map_"):
+                del st.session_state[_k]
+
+        # [FIX 3 onglets] Auto-assignation de TOUS les onglets des l'import,
+        # pour qu'aucun onglet ne reste vide et sans avoir a cliquer.
+        for _sk, _sdf in all_sheets.items():
+            _new_map, _, _ = auto_assign_single_sheet(_sk, _sdf, st.session_state.master_columns)
+            st.session_state.sheet_mappings[_sk] = _new_map
+            for _src, _master in _new_map.items():
+                st.session_state[f"map_{_sk}_{_src}"] = _master
+
+    if all_sheets:
         total_files = len(set([k.split(" :: ")[0] for k in all_sheets.keys()]))
         total_sheets = len(all_sheets)
         st.success(f"✅ {total_files} fichier(s) importés, {total_sheets} onglet(s) détecté(s) au total.")

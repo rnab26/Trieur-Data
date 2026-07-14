@@ -43,6 +43,8 @@ if "export_name_base" not in st.session_state:
     st.session_state.export_name_base = ""
 if "auto_assign_triggered" not in st.session_state:
     st.session_state.auto_assign_triggered = {}
+if "dup_counts" not in st.session_state:
+    st.session_state.dup_counts = {}
 
 def normalize_text(text):
     """Normaliser un texte : minuscules, accents, espaces, caractères spéciaux"""
@@ -282,6 +284,17 @@ def read_excel_all_sheets_from_file(file_obj, filename):
                 st.error(f"❌ Impossible de lire {filename}: {str(e3)}")
                 return {}
 
+@st.cache_data(show_spinner=False)
+def read_excel_all_sheets_cached(file_bytes, filename):
+    """
+    Version mise en cache de la lecture Excel.
+    Tant que le contenu du fichier (file_bytes) ne change pas, cette fonction
+    n'est PAS réexécutée lors des reruns Streamlit déclenchés par les selectbox
+    de mapping, les boutons d'auto-assignation, etc.
+    """
+    file_obj = io.BytesIO(file_bytes)
+    return read_excel_all_sheets_from_file(file_obj, filename)
+
 def read_google_sheets_all_sheets(url):
     """Lire Google Sheets avec tous les onglets détectés"""
     try:
@@ -294,6 +307,7 @@ def read_google_sheets_all_sheets(url):
         
         sheet_id = url.split("/d/")[1].split("/")[0]
         all_sheets = {}
+        consecutive_failures = 0
         
         for gid in range(0, 50):
             try:
@@ -302,13 +316,31 @@ def read_google_sheets_all_sheets(url):
                 if len(df) > 0 and not df.isnull().all().all():
                     sheet_name = f"Sheet{gid+1}" if gid > 0 else "Sheet1"
                     all_sheets[sheet_name] = df
+                    consecutive_failures = 0
+                else:
+                    consecutive_failures += 1
             except Exception:
-                continue
+                consecutive_failures += 1
+            
+            # Arrête d'essayer les gid suivants après 3 échecs consécutifs :
+            # évite de faire jusqu'à 50 requêtes HTTP à chaque rerun pour rien.
+            if consecutive_failures >= 3 and all_sheets:
+                break
+            if consecutive_failures >= 5 and not all_sheets:
+                break
         
         return all_sheets if all_sheets else {}
     except Exception as e:
         st.error(f"❌ Erreur Google Sheets: {str(e)}")
         return {}
+
+@st.cache_data(show_spinner=False, ttl=600)
+def read_google_sheets_all_sheets_cached(url):
+    """
+    Version mise en cache de la lecture Google Sheets (TTL 10 min pour
+    permettre de récupérer d'éventuelles mises à jour de la feuille source).
+    """
+    return read_google_sheets_all_sheets(url)
 
 def export_csv_safe(df):
     """Export CSV sécurisé"""
@@ -417,7 +449,7 @@ with tab2:
             base_pct = int((f_idx / max(total_files, 1)) * 80)
             update_progress(progress_bar, base_pct, f"Lecture du fichier {f_idx+1}/{total_files} : {f.name}")
             try:
-                sheets = read_excel_all_sheets_from_file(f, f.name)
+                sheets = read_excel_all_sheets_cached(f.getvalue(), f.name)
                 if not sheets:
                     st.error(f"❌ Aucun onglet lisible dans {f.name}")
                     continue
@@ -457,7 +489,7 @@ with tab2:
             progress_bar = start_progress("Chargement Google Sheets... 0%")
 
         update_progress(progress_bar, 85 if files else 10, "Récupération des onglets Google Sheets...")
-        sheets = read_google_sheets_all_sheets(google_url)
+        sheets = read_google_sheets_all_sheets_cached(google_url)
         if sheets:
             sheet_items = list(sheets.items())
             total_sheet_items = len(sheet_items)
@@ -496,7 +528,10 @@ with tab2:
                 num_rows = len(df)
                 real_cols = [c for c in df.columns if c not in ["__source_file__", "__source_sheet__"]]
                 num_cols = len(real_cols)
-                num_dup = df.duplicated().sum()
+                dup_cache_key = f"{k}::{num_rows}"
+                if dup_cache_key not in st.session_state.dup_counts:
+                    st.session_state.dup_counts[dup_cache_key] = df.duplicated().sum()
+                num_dup = st.session_state.dup_counts[dup_cache_key]
                 
                 st.write(f"**{filename}** → **{sheetname}** : {num_rows} lignes, {num_cols} colonnes, {num_dup} doublons")
 
@@ -530,7 +565,10 @@ with tab2:
             real_columns = [c for c in sheet_df.columns if c not in ["__source_file__", "__source_sheet__"]]
             num_rows = len(sheet_df)
             num_cols = len(real_columns)
-            num_duplicates = sheet_df.duplicated().sum()
+            dup_cache_key = f"{sheet_key}::{num_rows}"
+            if dup_cache_key not in st.session_state.dup_counts:
+                st.session_state.dup_counts[dup_cache_key] = sheet_df.duplicated().sum()
+            num_duplicates = st.session_state.dup_counts[dup_cache_key]
             
             st.write(f"**Résumé :** {num_rows} lignes | {num_cols} colonnes | {num_duplicates} doublons")
             

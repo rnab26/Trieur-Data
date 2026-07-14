@@ -1,0 +1,9 @@
+# Fichiers generes a l'execution (ne pas committer)
+user_master_columns.json
+saved_filters.json
+
+__pycache__/
+*.pyc
+
+# Outils locaux
+.claude/

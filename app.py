@@ -1,7 +1,25 @@
 # =============================================================
 # Trieur de Fichiers Leads
-# VERSION 1.2
+# VERSION 2.0
 # Changements par rapport a la version precedente :
+#   [2] Deduction des noms de colonnes quand la ligne d'en-tete est ABSENTE :
+#       - looks_like_header() repere une "en-tete" qui est en fait une ligne
+#         de donnees (emails, telephones, CP, nombres purs, motif "Unnamed:")
+#       - dans ce cas l'onglet est relu SANS en-tete (aucune ligne perdue) et
+#         les colonnes sont nommees d'apres leur CONTENU (EMAIL, TELEPHONE
+#         MOBILE/FIXE, CP, DATE DE NAISSANCE, sinon COLONNE_1, COLONNE_2...)
+#       - les noms deduits reprennent ceux des colonnes maitres, donc
+#         l'auto-assignation les reconnait directement
+#       - un avertissement liste les onglets concernes
+#       - un fichier AVEC en-tete n'est pas touche (relecture uniquement si
+#         l'en-tete est jugee absente)
+#   [3] Exclusion de fichiers / onglets a l'import :
+#       - cases "Inclure" par onglet, + une case par fichier qui bascule
+#         tous ses onglets
+#       - les onglets decoches sont retires du mapping ET de la base finale
+#       - cocher/decocher ne relit AUCUN fichier (choix gardes en session)
+#
+# Rappel des versions precedentes :
 #   [1] Detection telephone MOBILE / FIXE par le CONTENU (prefixes FR)
 #   [6] Colonnes maitres PERSISTANTES (survivent au rechargement)
 #   [8] Limite d'upload portee a 500 Mo (voir .streamlit/config.toml)
@@ -32,7 +50,7 @@ from difflib import SequenceMatcher
 
 st.set_page_config(page_title="Trieur de Fichiers Leads", layout="wide")
 
-APP_VERSION = "1.2"
+APP_VERSION = "2.0"
 
 DEFAULT_MASTER_COLUMNS = [
     "NOM", "PRENOM", "GENRE/CIVILITE", "VILLE", "CP", "ADRESSE",
@@ -105,6 +123,12 @@ if "export_name_base" not in st.session_state:
     st.session_state.export_name_base = ""
 if "auto_assign_triggered" not in st.session_state:
     st.session_state.auto_assign_triggered = {}
+# [3] Onglets exclus par l'utilisateur (cles "fichier :: onglet")
+if "excluded_sheets" not in st.session_state:
+    st.session_state.excluded_sheets = set()
+# [2] Onglets dont l'en-tete a ete deduite (pour prevenir l'utilisateur)
+if "inferred_header_sheets" not in st.session_state:
+    st.session_state.inferred_header_sheets = []
 
 
 def normalize_text(text):
@@ -228,6 +252,198 @@ def _phone_kinds_for_sheet(real_columns, sheet_df):
         else:
             result[src] = None
     return result
+
+
+# =============================================================
+# [2] DEDUCTION DES NOMS DE COLONNES QUAND L'EN-TETE EST ABSENTE
+#
+# Probleme : si un fichier n'a pas de ligne d'en-tete, pandas prend la
+# PREMIERE LIGNE DE DONNEES comme nom de colonnes (ou met "Unnamed: 0").
+# Resultat : le mapping ne reconnait rien, et un lead est perdu.
+#
+# Solution : reperer ce cas (looks_like_header), puis relire l'onglet SANS
+# en-tete et nommer les colonnes d'apres leur CONTENU (infer_column_names).
+# =============================================================
+EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+DATE_RE = re.compile(r"^\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}")
+UNNAMED_RE = re.compile(r"^unnamed:\s*\d+$", re.IGNORECASE)
+NUMERIC_ONLY_RE = re.compile(r"^[\d\s.,\-/+]+$")
+
+
+def _sample_values(series, sample=200):
+    """
+    Renvoie un ECHANTILLON de valeurs non vides d'une colonne.
+    Meme precaution memoire que detect_phone_column_kind : on decoupe les
+    premieres lignes AVANT toute conversion, jamais la colonne entiere.
+    """
+    try:
+        head = series.head(sample * 5)
+        vals = head.dropna().astype(str)
+    except Exception:
+        return []
+    vals = vals[vals.str.strip() != ""]
+    return [v for v in vals.head(sample)]
+
+
+def _ratio(values, predicate):
+    if not values:
+        return 0.0
+    return sum(1 for v in values if predicate(v)) / len(values)
+
+
+def _is_email_value(v):
+    return bool(EMAIL_RE.search(str(v).strip()))
+
+
+def _is_cp_value(v):
+    return normalize_cp(v) is not None
+
+
+def _is_date_value(v):
+    return bool(DATE_RE.match(str(v).strip()))
+
+
+def _is_numeric_value(v):
+    s = str(v).strip()
+    return bool(s) and bool(NUMERIC_ONLY_RE.fullmatch(s))
+
+
+def looks_like_header(df):
+    """
+    True si les noms de colonnes ressemblent a une VRAIE en-tete.
+
+    Une vraie en-tete = surtout du texte court non numerique.
+    A l'inverse, un nom de colonne qui est un email, un telephone, un code
+    postal, un nombre pur, une date, un "Unnamed: N" ou un texte tres long
+    est en realite une DONNEE : le fichier n'a pas d'en-tete.
+
+    On decide a la majorite : si la moitie ou plus des noms ressemblent a des
+    donnees, on considere l'en-tete absente. Un fichier normal (NOM, PRENOM,
+    EMAIL, CP...) obtient 0 signal de donnee et reste donc intact.
+
+    Cout : O(nombre de colonnes). Ne lit aucune donnee.
+    """
+    cols = list(df.columns)
+    if not cols:
+        return True
+
+    data_like = 0
+    for c in cols:
+        s = str(c).strip()
+        if not s or s.lower() in ("nan", "none"):
+            data_like += 1
+        elif UNNAMED_RE.match(s):
+            data_like += 1
+        elif _is_email_value(s):
+            data_like += 1
+        elif phone_kind(s) is not None:
+            data_like += 1
+        elif _is_date_value(s):
+            data_like += 1
+        elif _is_numeric_value(s):
+            # couvre aussi les codes postaux et les nombres purs
+            data_like += 1
+        elif len(s) > 40:
+            # une en-tete est courte ; un texte long est une donnee (adresse...)
+            data_like += 1
+
+    return data_like < max(1, (len(cols) + 1) // 2)
+
+
+def _guess_column_name(series):
+    """
+    Devine le nom d'une colonne d'apres son CONTENU (sur un echantillon).
+    Renvoie un nom de colonne maitre connu, ou None si indetermine.
+    """
+    kind = detect_phone_column_kind(series)
+    if kind == "mobile":
+        return "TELEPHONE MOBILE"
+    if kind == "fixe":
+        return "TELEPHONE FIXE"
+    if kind == "mixte":
+        return "TELEPHONE MOBILE"
+
+    vals = _sample_values(series)
+    if not vals:
+        return None
+
+    if _ratio(vals, _is_email_value) >= 0.5:
+        return "EMAIL"
+    if _ratio(vals, _is_cp_value) >= 0.6:
+        return "CP"
+    if _ratio(vals, _is_date_value) >= 0.6:
+        return "DATE DE NAISSANCE"
+
+    return None
+
+
+def infer_column_names(df):
+    """
+    Renvoie la liste des noms de colonnes deduits du contenu.
+    Les noms reprennent ceux des colonnes maitres (EMAIL, TELEPHONE MOBILE,
+    CP, DATE DE NAISSANCE) pour que l'auto-assignation les reconnaisse ;
+    les colonnes indeterminees deviennent COLONNE_1, COLONNE_2...
+    Les noms sont garantis uniques.
+    """
+    names = []
+    used = set()
+    for idx, col in enumerate(df.columns):
+        guess = _guess_column_name(df[col])
+        if not guess:
+            guess = f"COLONNE_{idx + 1}"
+
+        base = guess
+        suffix = 2
+        while guess in used:
+            guess = f"{base}_{suffix}"
+            suffix += 1
+
+        used.add(guess)
+        names.append(guess)
+    return names
+
+
+def _reread_sheet_without_header(file_obj, sheet_name):
+    """Relit un onglet Excel en considerant qu'il n'a PAS d'en-tete."""
+    for engine in ("openpyxl", None):
+        try:
+            file_obj.seek(0)
+            if engine:
+                df = pd.read_excel(file_obj, sheet_name=sheet_name, dtype=str,
+                                   header=None, engine=engine)
+            else:
+                df = pd.read_excel(file_obj, sheet_name=sheet_name, dtype=str,
+                                   header=None)
+            if df is not None and len(df) > 0:
+                return df
+        except Exception:
+            continue
+    return None
+
+
+def apply_header_inference_excel(sheets, file_obj):
+    """
+    Corrige les onglets dont l'en-tete est absente.
+    Ne relit QUE les onglets suspects (les fichiers normaux ne coutent rien).
+    Retourne (sheets, [noms des onglets corriges]).
+    """
+    suspects = [name for name, df in sheets.items() if not looks_like_header(df)]
+    if not suspects:
+        return sheets, []
+
+    inferred = []
+    for name in suspects:
+        raw = _reread_sheet_without_header(file_obj, name)
+        if raw is None:
+            continue
+        raw = raw.dropna(axis=1, how="all")
+        if len(raw.columns) == 0 or len(raw) == 0:
+            continue
+        raw.columns = infer_column_names(raw)
+        sheets[name] = raw
+        inferred.append(name)
+
+    return sheets, inferred
 
 
 def _build_normalized_synonyms(master_columns):
@@ -515,14 +731,18 @@ def read_excel_all_sheets_from_file(file_obj, filename):
                 return {}
 
 def read_google_sheets_all_sheets(url):
-    """Lire Google Sheets avec tous les onglets détectés"""
+    """
+    Lire Google Sheets avec tous les onglets détectés.
+    Retourne (onglets, [noms des onglets dont l'en-tete a ete deduite]).
+    """
+    inferred = []
     try:
         if "/edit" in url:
             url = url.split("/edit")[0]
         if url.endswith("/"):
             url = url[:-1]
         if "/d/" not in url:
-            return {}
+            return {}, []
 
         sheet_id = url.split("/d/")[1].split("/")[0]
         all_sheets = {}
@@ -533,14 +753,28 @@ def read_google_sheets_all_sheets(url):
                 df = pd.read_csv(csv_url, dtype=str)
                 if len(df) > 0 and not df.isnull().all().all():
                     sheet_name = f"Sheet{gid+1}" if gid > 0 else "Sheet1"
+
+                    # [2] En-tete absente : on relit l'onglet sans en-tete pour
+                    # ne perdre aucune ligne, puis on nomme d'apres le contenu.
+                    if not looks_like_header(df):
+                        try:
+                            raw = pd.read_csv(csv_url, dtype=str, header=None)
+                            raw = raw.dropna(axis=1, how="all")
+                            if len(raw) > 0 and len(raw.columns) > 0:
+                                raw.columns = infer_column_names(raw)
+                                df = raw
+                                inferred.append(sheet_name)
+                        except Exception:
+                            pass
+
                     all_sheets[sheet_name] = df
             except Exception:
                 continue
 
-        return all_sheets if all_sheets else {}
+        return all_sheets, inferred
     except Exception as e:
         st.error(f"❌ Erreur Google Sheets: {str(e)}")
-        return {}
+        return {}, []
 
 def export_csv_safe(df):
     """Export CSV sécurisé"""
@@ -712,6 +946,9 @@ with tab2:
     if not need_reload:
         all_sheets = st.session_state.get("all_sheets", {})
 
+    # [2] Onglets dont l'en-tete a du etre deduite pendant CE chargement
+    inferred_this_load = []
+
     if need_reload and files:
         progress_bar = start_progress("Chargement des fichiers Excel... 0%")
         total_files = len(files)
@@ -723,6 +960,10 @@ with tab2:
                 if not sheets:
                     st.error(f"❌ Aucun onglet lisible dans {f.name}")
                     continue
+
+                # [2] Onglets sans ligne d'en-tete : relecture + noms deduits
+                sheets, inferred = apply_header_inference_excel(sheets, f)
+                inferred_this_load.extend(f"{f.name} :: {n}" for n in inferred)
 
                 sheet_items = list(sheets.items())
                 total_sheet_items = len(sheet_items)
@@ -758,7 +999,8 @@ with tab2:
             progress_bar = start_progress("Chargement Google Sheets... 0%")
 
         update_progress(progress_bar, 85 if files else 10, "Récupération des onglets Google Sheets...")
-        sheets = read_google_sheets_all_sheets(google_url)
+        sheets, inferred = read_google_sheets_all_sheets(google_url)
+        inferred_this_load.extend(f"Google Sheets :: {n}" for n in inferred)
         if sheets:
             sheet_items = list(sheets.items())
             total_sheet_items = len(sheet_items)
@@ -785,10 +1027,18 @@ with tab2:
         st.session_state.all_sheets = all_sheets
         st.session_state.loaded_signature = current_sig
 
+        # [2] Garder la liste des onglets corriges pour l'afficher a chaque rerun
+        st.session_state.inferred_header_sheets = inferred_this_load
+
+        # [3] Nouvel import = on repart avec tous les onglets inclus
+        st.session_state.excluded_sheets = set()
+
         # Repartir sur des mappings propres pour ce nouvel ensemble
         st.session_state.sheet_mappings = {}
         for _k in list(st.session_state.keys()):
-            if isinstance(_k, str) and _k.startswith("map_"):
+            if isinstance(_k, str) and (
+                _k.startswith("map_") or _k.startswith("inc_sheet_") or _k.startswith("inc_file_")
+            ):
                 del st.session_state[_k]
 
         # [FIX 3 onglets] Auto-assignation de TOUS les onglets des l'import,
@@ -800,9 +1050,75 @@ with tab2:
                 st.session_state[f"map_{_sk}_{_src}"] = _master
 
     if all_sheets:
-        total_files = len(set([k.split(" :: ")[0] for k in all_sheets.keys()]))
+        # [2] Prevenir que des en-tetes ont ete deduites (persiste entre les reruns)
+        if st.session_state.inferred_header_sheets:
+            st.warning(
+                "⚠️ En-tetes absentes detectees et deduites pour : "
+                + ", ".join(f"**{n}**" for n in st.session_state.inferred_header_sheets)
+                + ". Les colonnes ont ete nommees d'apres leur contenu et aucune ligne "
+                  "n'a ete perdue. Verifiez l'assignation ci-dessous."
+            )
+
+        # [3] Selection des fichiers / onglets a inclure
+        with st.expander("🗂️ Choisir les fichiers et onglets a inclure", expanded=False):
+            st.caption("Decochez ce que vous ne voulez pas traiter. "
+                       "Aucun fichier n'est relu : le changement est immediat.")
+
+            sheets_by_file = {}
+            for k in all_sheets.keys():
+                fname = k.split(" :: ")[0]
+                sheets_by_file.setdefault(fname, []).append(k)
+
+            for fname, keys in sheets_by_file.items():
+                file_included = all(k not in st.session_state.excluded_sheets for k in keys)
+                file_key = f"inc_file_{fname}"
+                prev_key = f"inc_file_prev_{fname}"
+
+                inc_file = st.checkbox(f"**{fname}** ({len(keys)} onglet(s))",
+                                       value=file_included, key=file_key)
+
+                # Bascule au niveau FICHIER : on propage a tous ses onglets.
+                # On ne le fait qu'au moment ou l'utilisateur change la case,
+                # sinon on ecraserait ses choix onglet par onglet.
+                prev = st.session_state.get(prev_key)
+                if prev is not None and prev != inc_file:
+                    for k in keys:
+                        if inc_file:
+                            st.session_state.excluded_sheets.discard(k)
+                        else:
+                            st.session_state.excluded_sheets.add(k)
+                        st.session_state[f"inc_sheet_{k}"] = inc_file
+                    st.session_state[prev_key] = inc_file
+                    st.rerun()
+                st.session_state[prev_key] = inc_file
+
+                for k in keys:
+                    sheet_name = k.split(" :: ", 1)[1] if " :: " in k else k
+                    n_rows = len(all_sheets[k])
+                    inc_sheet = st.checkbox(
+                        f"　└ {sheet_name} — {n_rows} lignes",
+                        value=(k not in st.session_state.excluded_sheets),
+                        key=f"inc_sheet_{k}"
+                    )
+                    if inc_sheet:
+                        st.session_state.excluded_sheets.discard(k)
+                    else:
+                        st.session_state.excluded_sheets.add(k)
+
+        # Seuls les onglets coches sont mappes puis fusionnes
+        active_sheets = {k: v for k, v in all_sheets.items()
+                         if k not in st.session_state.excluded_sheets}
+
+        total_files = len(set([k.split(" :: ")[0] for k in active_sheets.keys()]))
         total_sheets = len(all_sheets)
-        st.success(f"✅ {total_files} fichier(s) importés, {total_sheets} onglet(s) détecté(s) au total.")
+        n_active = len(active_sheets)
+        n_excluded = total_sheets - n_active
+
+        if n_excluded:
+            st.success(f"✅ {total_sheets} onglet(s) détecté(s) — **{n_active} inclus**, "
+                       f"{n_excluded} exclu(s) · {total_files} fichier(s) traité(s).")
+        else:
+            st.success(f"✅ {total_files} fichier(s) importés, {total_sheets} onglet(s) détecté(s) au total.")
 
         with st.expander("📋 Detail des onglets importes"):
             for k, df in all_sheets.items():
@@ -813,8 +1129,12 @@ with tab2:
                 real_cols = [c for c in df.columns if c not in ["__source_file__", "__source_sheet__"]]
                 num_cols = len(real_cols)
                 num_dup = df.duplicated().sum()
+                flag = "" if k in active_sheets else " · ⛔ exclu"
 
-                st.write(f"**{filename}** → **{sheetname}** : {num_rows} lignes, {num_cols} colonnes, {num_dup} doublons")
+                st.write(f"**{filename}** → **{sheetname}** : {num_rows} lignes, {num_cols} colonnes, {num_dup} doublons{flag}")
+
+        if not active_sheets:
+            st.warning("⚠️ Tous les onglets sont exclus. Cochez-en au moins un pour continuer.")
 
         st.markdown("---")
         st.subheader("Assignation des colonnes")
@@ -822,8 +1142,8 @@ with tab2:
         col_global_auto, col_space = st.columns([1, 3])
         with col_global_auto:
             if st.button("🚀 Auto-assigner TOUS les onglets", key="auto_all_sheets", type="primary"):
-                total_sheets_count = len(all_sheets)
-                for sheet_key, sheet_df in all_sheets.items():
+                total_sheets_count = len(active_sheets)
+                for sheet_key, sheet_df in active_sheets.items():
                     new_mapping, matched_count, total_cols = auto_assign_single_sheet(
                         sheet_key, sheet_df, st.session_state.master_columns
                     )
@@ -839,7 +1159,7 @@ with tab2:
 
         any_assigned = False
 
-        for sheet_key, sheet_df in all_sheets.items():
+        for sheet_key, sheet_df in active_sheets.items():
             st.markdown(f"### 📄 {sheet_key}")
 
             real_columns = [c for c in sheet_df.columns if c not in ["__source_file__", "__source_sheet__"]]
@@ -922,7 +1242,8 @@ with tab2:
                 rows = []
                 total_merged = 0
 
-                for sheet_key, sheet_df in all_sheets.items():
+                # [3] on ne fusionne QUE les onglets coches
+                for sheet_key, sheet_df in active_sheets.items():
                     source_file = sheet_df["__source_file__"].iloc[0] if len(sheet_df) > 0 else sheet_key
                     source_sheet = sheet_df["__source_sheet__"].iloc[0] if len(sheet_df) > 0 else "Unknown"
                     mapping = st.session_state.sheet_mappings.get(sheet_key, {})

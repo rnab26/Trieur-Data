@@ -72,6 +72,81 @@ def read_excel_all_sheets_from_file(file_obj, filename):
     st.error(f"❌ Impossible de lire {filename}: format non reconnu.")
     return {}
 
+def read_csv_file(file_obj, filename):
+    """
+    [GROS FICHIERS] Lit un fichier CSV importe (un seul 'onglet').
+
+    Lire un CSV est bien plus rapide et econome en memoire qu'un .xlsx : c'est
+    la voie recommandee pour les tres gros volumes (plusieurs millions de
+    lignes). On :
+      - detecte le separateur ( , ; ou tabulation ) sur la 1re ligne
+      - detecte l'encodage (utf-8 puis latin-1, jamais d'echec)
+      - lit tout en texte (dtype=str) pour garder les zeros initiaux (CP, tel)
+      - deduit les noms de colonnes si la 1re ligne est en fait des donnees
+
+    Retourne (sheets, inferred) : meme forme que la lecture Excel, pour que la
+    suite du pipeline (mapping, construction) soit identique.
+    """
+    sheet_name = re.sub(r"\.csv$", "", filename, flags=re.IGNORECASE) or filename
+
+    # Separateur : deduit d'un echantillon decode en latin-1 (ne plante jamais)
+    file_obj.seek(0)
+    head = file_obj.read(65536)
+    file_obj.seek(0)
+    sample = head.decode("latin-1", "replace") if isinstance(head, bytes) else str(head)
+    first_line = next((ln for ln in sample.splitlines() if ln.strip()), "")
+    counts = {",": first_line.count(","), ";": first_line.count(";"), "\t": first_line.count("\t")}
+    sep = max(counts, key=counts.get) if max(counts.values()) > 0 else ","
+
+    def _read(header, encoding):
+        file_obj.seek(0)
+        return pd.read_csv(
+            file_obj, dtype=str, sep=sep, encoding=encoding,
+            header=header, on_bad_lines="skip", low_memory=False,
+        )
+
+    df = None
+    used_enc = "utf-8-sig"
+    for enc in ("utf-8-sig", "latin-1"):
+        try:
+            df = _read("infer", enc)
+            used_enc = enc
+            break
+        except UnicodeDecodeError:
+            continue
+        except Exception:
+            # Dernier recours : laisser pandas sniffer le separateur (plus lent)
+            try:
+                file_obj.seek(0)
+                df = pd.read_csv(file_obj, dtype=str, sep=None, engine="python",
+                                 encoding=enc, on_bad_lines="skip")
+                used_enc = enc
+                break
+            except Exception:
+                continue
+
+    if df is None:
+        st.error(f"❌ Impossible de lire le CSV {filename}.")
+        return {}, []
+
+    df = df.dropna(axis=1, how="all")
+    if len(df) == 0 or len(df.columns) == 0:
+        return {}, []
+
+    inferred = []
+    if not looks_like_header(df):
+        try:
+            raw = _read(None, used_enc).dropna(axis=1, how="all")
+            if len(raw) > 0 and len(raw.columns) > 0:
+                raw.columns = infer_column_names(raw)
+                df = raw
+                inferred.append(sheet_name)
+        except Exception:
+            pass
+
+    return {sheet_name: df}, inferred
+
+
 def _extract_sheet_id(url):
     """Extrait l'identifiant du classeur depuis une URL Google Sheets."""
     if "/edit" in url:

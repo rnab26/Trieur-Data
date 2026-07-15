@@ -1,8 +1,25 @@
 # =============================================================
 # Trieur de Fichiers Leads
-# VERSION 4.7
+# VERSION 5.0  (GROS FICHIERS : plusieurs millions de lignes sans lenteur)
 #
-# Changements de cette version (repart du visuel v4.3, plus 3 corrections) :
+#   [CSV] Import direct de fichiers CSV (bien plus rapide/leger que le .xlsx) :
+#         separateur et encodage auto-detectes, deduction d'en-tete comme pour
+#         Excel. C'est la voie recommandee pour les tres gros volumes.
+#   [FILTRE] Onglet Filtrage fluide meme sur des millions de lignes :
+#         - plus de recopie de toute la base a chaque clic (grosse lenteur)
+#         - filtre par departement (CP) VECTORISE (plus de boucle Python/ligne)
+#         - au-dela de 1000 valeurs distinctes, filtre par TEXTE au lieu d'un
+#           menu geant qui fige le navigateur
+#         - comptage des doublons uniquement a la demande (bouton)
+#   [BUILD] Construction plus legere : colonnes a faible cardinalite (Source
+#         Data, ville, civilite) stockees en "category" (Source Data : ~29 Mo
+#         -> ~1 Mo par million de lignes), moins de copies au pic memoire.
+#   [EXPORT] Genere le fichier UNIQUEMENT au clic (avant, le CSV ET l'Excel
+#         etaient regeneres a chaque affichage de l'onglet -> l'Excel de
+#         plusieurs millions de lignes prenait des minutes pour rien). Excel
+#         desactive au-dela de sa limite (~1,05 M lignes/onglet) ; CSV conseille.
+#
+# Version 4.7 (repart du visuel v4.3, plus 3 corrections) :
 #   [DEFILEMENT] Les menus des colonnes maitres ne se TASSENT plus quand un
 #       fichier/onglet a beaucoup de colonnes : chaque colonne a une largeur
 #       fixe et TOUT le tableau (menus + apercu) defile horizontalement d'un
@@ -90,6 +107,7 @@ from trieur.matching import (
 from trieur.filters import normalize_cp, cp_matches_prefix
 from trieur.io_excel import (
     read_excel_all_sheets_from_file,
+    read_csv_file,
     read_google_sheets_all_sheets,
     is_google_sheet_url,
 )
@@ -111,7 +129,7 @@ import pandas as pd
 
 st.set_page_config(page_title="Trieur de Fichiers Leads", layout="wide")
 
-APP_VERSION = "4.7"
+APP_VERSION = "5.0"
 
 # -------------------------------------------------------------
 # [10] DESIGN EPURE FACON APPLE (CSS global, purement cosmetique)
@@ -313,8 +331,13 @@ with tab1:
                "01-05/08/09 = fixe), meme si l'en-tete est absente ou trompeuse.")
 
 with tab2:
-    st.subheader("Importer vos fichiers Excel ou Google Sheets")
-    files = st.file_uploader("Deposez un ou plusieurs fichiers Excel", type=["xlsx", "xls"], accept_multiple_files=True)
+    st.subheader("Importer vos fichiers Excel, CSV ou Google Sheets")
+    files = st.file_uploader(
+        "Deposez un ou plusieurs fichiers Excel ou CSV",
+        type=["xlsx", "xls", "csv"], accept_multiple_files=True,
+    )
+    st.caption("💡 Pour de tres gros volumes (plusieurs millions de lignes), le "
+               "**CSV** est bien plus rapide et leger que le .xlsx.")
     google_url = st.text_input("Ou collez une URL Google Sheets publique (optionnel)")
 
     all_sheets = {}
@@ -374,13 +397,18 @@ with tab2:
             base_pct = int((f_idx / max(total_files, 1)) * 80)
             update_progress(progress_bar, base_pct, f"Lecture du fichier {f_idx+1}/{total_files} : {f.name}")
             try:
-                sheets = read_excel_all_sheets_from_file(f, f.name)
+                # [GROS FICHIERS] CSV lu directement (rapide/leger) ; sinon Excel.
+                if f.name.lower().endswith(".csv"):
+                    sheets, inferred = read_csv_file(f, f.name)
+                else:
+                    sheets = read_excel_all_sheets_from_file(f, f.name)
+                    # [2] Onglets sans ligne d'en-tete : relecture + noms deduits
+                    sheets, inferred = apply_header_inference_excel(sheets, f)
+
                 if not sheets:
                     st.error(f"❌ Aucun onglet lisible dans {f.name}")
                     continue
 
-                # [2] Onglets sans ligne d'en-tete : relecture + noms deduits
-                sheets, inferred = apply_header_inference_excel(sheets, f)
                 inferred_this_load.extend(f"{f.name} :: {n}" for n in inferred)
 
                 sheet_items = list(sheets.items())
@@ -708,6 +736,9 @@ with tab2:
                             sub[master_col] = f"{source_file} ({source_sheet})"
                         elif not src_cols_for_master:
                             sub[master_col] = None
+                        elif len(src_cols_for_master) == 1:
+                            # [MEM] source unique : pas de .copy() (concat copiera)
+                            sub[master_col] = sheet_df[src_cols_for_master[0]]
                         else:
                             combined = sheet_df[src_cols_for_master[0]].copy()
                             for extra_col in src_cols_for_master[1:]:
@@ -727,10 +758,23 @@ with tab2:
                     del rows
                     gc.collect()
 
+                    # [MEM] colonnes a faible cardinalite -> "category" : enorme
+                    # economie sur des millions de lignes (ex: Source Data, qui
+                    # repete le meme libelle, passe de ~29 Mo a ~1 Mo/million).
+                    for _c in ("Source Data", "GENRE/CIVILITE", "VILLE"):
+                        if _c in final_df.columns:
+                            try:
+                                final_df[_c] = final_df[_c].astype("category")
+                            except Exception:
+                                pass
+
                     if len(final_df) == 0:
                         st.error("❌ La base fusionnée est vide après nettoyage.")
                     else:
                         st.session_state.final_df = final_df
+                        # invalider un eventuel export mis en cache (base changee)
+                        for _k in ("_export_csv", "_export_xlsx"):
+                            st.session_state.pop(_k, None)
                         st.success(f"✅ Base construite : {len(final_df)} lignes fusionnées.")
                         st.dataframe(final_df.head(50), width="stretch")
     else:
@@ -741,7 +785,10 @@ with tab3:
     if st.session_state.final_df is None:
         st.info("ℹ️ Importez et mappez des fichiers dans l'onglet precedent avant de filtrer.")
     else:
-        df = st.session_state.final_df.copy()
+        # [PERF] PAS de .copy() ici : sur des millions de lignes, recopier la
+        # base entiere a chaque clic est le principal facteur de lenteur. On
+        # lit la base telle quelle ; le filtrage cree une nouvelle vue.
+        df = st.session_state.final_df
         total_lines = len(df)
         st.write(f"Base actuelle : **{total_lines}** lignes importees")
 
@@ -776,36 +823,52 @@ with tab3:
                 "Departements a filtrer (separes par des virgules, ex: 02,33,77)",
                 key="tab3_dep_input",
             )
-            if dep_input.strip():
+            if dep_input.strip() and "CP" in df.columns:
                 prefixes = set(p.strip().zfill(2) for p in dep_input.split(",") if p.strip())
                 mask = df["CP"].apply(lambda v: cp_matches_prefix(v, prefixes) if pd.notna(v) else False)
                 filtered_df = df[mask]
         elif filter_col != "(aucun filtre)":
-            unique_vals = sorted([v for v in df[filter_col].dropna().unique()])
-            # Securite : ne garder en memoire que des valeurs qui existent
-            # encore pour cette colonne (evite un plantage du multiselect).
-            if "tab3_selected_vals" in st.session_state:
-                st.session_state["tab3_selected_vals"] = [
-                    v for v in st.session_state["tab3_selected_vals"] if v in unique_vals
-                ]
-            selected_vals = st.multiselect(
-                "Valeurs a conserver pour " + filter_col,
-                options=unique_vals,
-                key="tab3_selected_vals",
-            )
-            if selected_vals:
-                filtered_df = df[df[filter_col].isin(selected_vals)]
+            # [PERF] Une colonne a des milliers de valeurs distinctes (NOM, EMAIL...)
+            # -> un menu deroulant deviendrait ingerable et lent. Au-dela d'un
+            # seuil, on bascule sur un filtre TEXTE.
+            n_unique = int(df[filter_col].nunique(dropna=True))
+            if n_unique > 1000:
+                st.caption(f"ℹ️ {n_unique} valeurs distinctes : trop pour une liste. "
+                           "Saisis la ou les valeurs exactes a conserver (separees par ;).")
+                txt = st.text_input(
+                    f"Valeur(s) exacte(s) pour {filter_col}",
+                    key="tab3_text_vals",
+                )
+                if txt.strip():
+                    selected_vals = [v.strip() for v in txt.split(";") if v.strip()]
+                    filtered_df = df[df[filter_col].isin(selected_vals)]
+            else:
+                unique_vals = sorted([v for v in df[filter_col].dropna().unique()])
+                # Securite : ne garder que des valeurs encore presentes (evite un
+                # plantage du multiselect).
+                if "tab3_selected_vals" in st.session_state:
+                    st.session_state["tab3_selected_vals"] = [
+                        v for v in st.session_state["tab3_selected_vals"] if v in unique_vals
+                    ]
+                selected_vals = st.multiselect(
+                    "Valeurs a conserver pour " + filter_col,
+                    options=unique_vals,
+                    key="tab3_selected_vals",
+                )
+                if selected_vals:
+                    filtered_df = df[df[filter_col].isin(selected_vals)]
 
         remaining_lines = len(filtered_df)
-        remaining_duplicates = filtered_df.duplicated().sum()
-
-        st.write(f"Resultat filtre : **{remaining_lines}** lignes | **{remaining_duplicates}** doublons conserves | **{total_lines}** lignes importees au total")
+        st.write(f"Resultat filtre : **{remaining_lines}** lignes conservees sur **{total_lines}** au total")
         st.dataframe(filtered_df.head(50), width="stretch")
 
+        # [PERF] Le comptage des doublons scanne toute la base : on ne le fait
+        # QUE sur demande (sinon il ralentirait chaque interaction).
         dup_check_col = st.selectbox("Colonne pour detecter les doublons (ex: TELEPHONE MOBILE)", options=["(aucune)"] + st.session_state.master_columns)
-        if dup_check_col != "(aucune)":
-            dup_count = filtered_df[dup_check_col].duplicated(keep=False).sum()
-            st.warning(f"{dup_count} lignes en doublon detectees sur la colonne '{dup_check_col}' (non supprimees automatiquement).")
+        if dup_check_col != "(aucune)" and dup_check_col in filtered_df.columns:
+            if st.button(f"🔎 Compter les doublons sur '{dup_check_col}'", key="tab3_count_dupes"):
+                dup_count = int(filtered_df[dup_check_col].duplicated(keep=False).sum())
+                st.warning(f"{dup_count} lignes en doublon detectees sur la colonne '{dup_check_col}' (non supprimees automatiquement).")
 
         st.session_state.filtered_df = filtered_df
 
@@ -933,31 +996,55 @@ with tab4:
             clean_name = sanitize_filename(raw_name)
             st.caption(f"Fichiers generes : **{clean_name}.csv** / **{clean_name}.xlsx**")
 
+            # [PERF] On ne genere PLUS l'export a chaque affichage (l'Excel de
+            # plusieurs millions de lignes prend des minutes). On genere
+            # UNIQUEMENT au clic, et on garde le resultat en cache tant que la
+            # base filtree n'a pas change (signature = nb lignes + colonnes).
+            EXCEL_MAX_ROWS = 1_048_576
+            n_rows = len(export_df)
+            export_sig = (n_rows, tuple(map(str, export_df.columns)))
+
             col1, col2 = st.columns(2)
 
             with col1:
-                st.markdown("**Export CSV**")
-                csv_bytes = export_csv_safe(export_df)
-                if csv_bytes:
+                st.markdown("**Export CSV** — recommandé (rapide, sans limite)")
+                if st.button("⚙️ Préparer le CSV", key="gen_csv", type="primary"):
+                    with st.spinner("Génération du CSV..."):
+                        st.session_state["_export_csv"] = (export_sig, export_csv_safe(export_df))
+                cached = st.session_state.get("_export_csv")
+                if cached and cached[0] == export_sig and cached[1]:
                     st.download_button(
                         label="💾 Telecharger CSV",
-                        data=csv_bytes,
+                        data=cached[1],
                         file_name=f"{clean_name}.csv",
                         mime="text/csv",
-                        key="dl_csv"
+                        key="dl_csv",
                     )
 
             with col2:
                 st.markdown("**Export Excel**")
-                buffer = export_excel_safe(export_df)
-                if buffer:
-                    st.download_button(
-                        label="💾 Telecharger Excel",
-                        data=buffer,
-                        file_name=f"{clean_name}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="dl_xlsx"
-                    )
+                if n_rows > EXCEL_MAX_ROWS:
+                    st.info(f"ℹ️ {n_rows:,} lignes : au-delà de la limite d'Excel "
+                            f"(~{EXCEL_MAX_ROWS:,} par onglet). Utilise l'export CSV.")
+                else:
+                    if n_rows > 100_000:
+                        st.caption("⚠️ Excel est lent au-delà de ~100 000 lignes "
+                                   "(~1 min/million). Le CSV est conseillé.")
+                    if st.button("⚙️ Préparer l'Excel", key="gen_xlsx"):
+                        with st.spinner("Génération de l'Excel (peut être long)..."):
+                            buf = export_excel_safe(export_df)
+                            st.session_state["_export_xlsx"] = (
+                                export_sig, buf.getvalue() if buf else None
+                            )
+                    cachedx = st.session_state.get("_export_xlsx")
+                    if cachedx and cachedx[0] == export_sig and cachedx[1]:
+                        st.download_button(
+                            label="💾 Telecharger Excel",
+                            data=cachedx[1],
+                            file_name=f"{clean_name}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="dl_xlsx",
+                        )
 
             st.markdown("---")
-            st.info("ℹ️ Les fichiers sont encodés en UTF-8.")
+            st.info("ℹ️ Les fichiers sont encodés en UTF-8. Pour les très gros volumes, préfère le CSV.")

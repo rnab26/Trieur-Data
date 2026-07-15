@@ -134,3 +134,35 @@ def test_google_sheets_repli_si_pas_un_xlsx(monkeypatch):
     )
     assert sheets == {}
     assert inferred == []
+
+
+def test_read_csv_file_separateur_pointvirgule():
+    from trieur.io_excel import read_csv_file
+    data = "NOM;EMAIL;CP\r\nDupont;a@x.fr;75001\r\nMartin;b@x.fr;33000\r\n".encode("utf-8")
+    sheets, inferred = read_csv_file(FakeUpload(data, "clients.csv"), "clients.csv")
+    assert "clients" in sheets
+    df = sheets["clients"]
+    assert list(df.columns) == ["NOM", "EMAIL", "CP"]
+    assert len(df) == 2
+    assert df["CP"].tolist() == ["75001", "33000"]   # zeros initiaux preserves
+    assert inferred == []
+
+
+def test_read_csv_file_sans_entete_deduit_les_colonnes():
+    from trieur.io_excel import read_csv_file
+    # pas de ligne d'en-tete : emails + CP en 1re ligne
+    data = "Dupont,a@x.fr,75001\nMartin,b@x.fr,33000\nDurand,c@x.fr,06000\n".encode("utf-8")
+    sheets, inferred = read_csv_file(FakeUpload(data, "prospects.csv"), "prospects.csv")
+    df = sheets["prospects"]
+    assert inferred == ["prospects"]
+    assert "EMAIL" in df.columns and "CP" in df.columns
+    assert len(df) == 3                      # 1re ligne (Dupont) recuperee
+    assert "Dupont" in df.iloc[:, 0].tolist()
+
+
+def test_read_csv_file_encodage_latin1():
+    from trieur.io_excel import read_csv_file
+    data = "NOM,VILLE\nDupré,Nîmes\n".encode("latin-1")
+    sheets, inferred = read_csv_file(FakeUpload(data, "accents.csv"), "accents.csv")
+    df = sheets["accents"]
+    assert df["VILLE"].tolist() == ["Nîmes"]

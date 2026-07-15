@@ -347,12 +347,50 @@ def apply_header_inference_excel(sheets, file_obj):
     return sheets, inferred
 
 
+# --- Reconnaissance SEMANTIQUE du role telephone ---------------------
+# On identifie quelle colonne maitre joue le role "mobile" et laquelle joue
+# le role "fixe" d'apres le SENS de son nom (mots-cles), et non d'apres un
+# libelle fige. Ainsi, si l'utilisateur renomme "TELEPHONE MOBILE" en
+# "phone mobile" (ou "portable", "GSM"...), la detection continue de marcher.
+_MOBILE_HINTS = ("mobile", "portable", "gsm", "cell", "cellulaire")
+_FIXE_HINTS = ("fixe", "landline", "domicile", "geographique")
+
+
+def identify_phone_masters(master_columns):
+    """Retourne (colonne_maitre_mobile, colonne_maitre_fixe) reperees par le
+    SENS de leur nom, ou None si absente. Logique humaine simple : un nom qui
+    parle de 'mobile/portable/gsm' est le tel mobile ; 'fixe/landline' le fixe."""
+    mobile_master = None
+    fixe_master = None
+    for master in master_columns:
+        n = normalize_column_name(master)
+        if mobile_master is None and any(h in n for h in _MOBILE_HINTS):
+            mobile_master = master
+        elif fixe_master is None and any(h in n for h in _FIXE_HINTS):
+            fixe_master = master
+    return mobile_master, fixe_master
+
+
 def _build_normalized_synonyms(master_columns):
-    """Construit les synonymes normalisés par colonne maître (inclut le nom maître)."""
+    """Construit les synonymes normalisés par colonne maître (inclut le nom maître).
+
+    Les colonnes telephone heritent des synonymes selon leur ROLE (detecte par
+    le sens du nom), pas seulement selon leur libelle exact : une colonne maitre
+    renommee "phone mobile" recupere quand meme les synonymes du tel mobile."""
+    mobile_master, fixe_master = identify_phone_masters(master_columns)
     normalized = {}
     for master in master_columns:
         items = [master] + SYNONYMES.get(master, [])
-        normalized[master] = [normalize_column_name(x) for x in items if normalize_column_name(x)]
+        if master == mobile_master:
+            items += SYNONYMES.get("TELEPHONE MOBILE", [])
+        if master == fixe_master:
+            items += SYNONYMES.get("TELEPHONE FIXE", [])
+        seen = []
+        for x in items:
+            nx = normalize_column_name(x)
+            if nx and nx not in seen:
+                seen.append(nx)
+        normalized[master] = seen
     return normalized
 
 def auto_assign_columns_fast(real_columns, master_columns, sheet_df=None):
@@ -375,10 +413,13 @@ def auto_assign_columns_fast(real_columns, master_columns, sheet_df=None):
     # Pré-normalisation des colonnes source
     src_norm_map = {src: normalize_column_name(src) for src in real_columns}
 
+    # Reperage semantique des colonnes telephone (marche meme si renommees).
+    mobile_master, fixe_master = identify_phone_masters(master_columns)
+
     # [1] Detection telephone par contenu (une seule passe).
     # On ne la declenche QUE si une colonne maitre telephone existe,
     # pour ne pas ralentir inutilement les fichiers sans telephone.
-    _needs_phone_scan = ("TELEPHONE MOBILE" in master_columns) or ("TELEPHONE FIXE" in master_columns)
+    _needs_phone_scan = (mobile_master is not None) or (fixe_master is not None)
     if sheet_df is not None and _needs_phone_scan:
         phone_kinds = _phone_kinds_for_sheet(real_columns, sheet_df)
     else:
@@ -436,19 +477,19 @@ def auto_assign_columns_fast(real_columns, master_columns, sheet_df=None):
     # 2bis) [1] CORRECTION des telephones mal etiquetes par leur en-tete.
     # Si une colonne a ete mappee sur MOBILE mais son contenu est clairement
     # du fixe (et inversement), on corrige quand la cible est libre.
-    has_mobile_master = "TELEPHONE MOBILE" in master_columns
-    has_fixe_master = "TELEPHONE FIXE" in master_columns
+    has_mobile_master = mobile_master is not None
+    has_fixe_master = fixe_master is not None
 
     # 2bis-a) INVERSION : une colonne sur MOBILE avec contenu fixe ET une colonne
     # sur FIXE avec contenu mobile -> on echange les deux (cas "et inversement").
     if has_mobile_master and has_fixe_master:
         mislabeled_as_mobile = [s for s in real_columns
-                                if mapping.get(s) == "TELEPHONE MOBILE" and phone_kinds.get(s) == "fixe"]
+                                if mapping.get(s) == mobile_master and phone_kinds.get(s) == "fixe"]
         mislabeled_as_fixe = [s for s in real_columns
-                              if mapping.get(s) == "TELEPHONE FIXE" and phone_kinds.get(s) == "mobile"]
+                              if mapping.get(s) == fixe_master and phone_kinds.get(s) == "mobile"]
         for a, b in zip(mislabeled_as_mobile, mislabeled_as_fixe):
-            mapping[a] = "TELEPHONE FIXE"
-            mapping[b] = "TELEPHONE MOBILE"
+            mapping[a] = fixe_master
+            mapping[b] = mobile_master
 
     if has_mobile_master or has_fixe_master:
         for src in real_columns:
@@ -456,14 +497,14 @@ def auto_assign_columns_fast(real_columns, master_columns, sheet_df=None):
             if not k:
                 continue
             cur = mapping.get(src)
-            if cur == "TELEPHONE MOBILE" and k == "fixe" and has_fixe_master and "TELEPHONE FIXE" not in already_used:
-                already_used.discard("TELEPHONE MOBILE")
-                mapping[src] = "TELEPHONE FIXE"
-                already_used.add("TELEPHONE FIXE")
-            elif cur == "TELEPHONE FIXE" and k == "mobile" and has_mobile_master and "TELEPHONE MOBILE" not in already_used:
-                already_used.discard("TELEPHONE FIXE")
-                mapping[src] = "TELEPHONE MOBILE"
-                already_used.add("TELEPHONE MOBILE")
+            if cur == mobile_master and k == "fixe" and has_fixe_master and fixe_master not in already_used:
+                already_used.discard(mobile_master)
+                mapping[src] = fixe_master
+                already_used.add(fixe_master)
+            elif cur == fixe_master and k == "mobile" and has_mobile_master and mobile_master not in already_used:
+                already_used.discard(fixe_master)
+                mapping[src] = mobile_master
+                already_used.add(mobile_master)
 
     # 2ter) [1] Colonnes telephone NON etiquetees -> route d'apres le contenu.
     # Utile quand l'en-tete est absente/muette (ex: colonne 'Tel1' bourree de 06).
@@ -474,19 +515,19 @@ def auto_assign_columns_fast(real_columns, master_columns, sheet_df=None):
             k = phone_kinds.get(src)
             if not k:
                 continue
-            if k == "mobile" and has_mobile_master and "TELEPHONE MOBILE" not in already_used:
-                mapping[src] = "TELEPHONE MOBILE"
-                already_used.add("TELEPHONE MOBILE")
-            elif k == "fixe" and has_fixe_master and "TELEPHONE FIXE" not in already_used:
-                mapping[src] = "TELEPHONE FIXE"
-                already_used.add("TELEPHONE FIXE")
+            if k == "mobile" and has_mobile_master and mobile_master not in already_used:
+                mapping[src] = mobile_master
+                already_used.add(mobile_master)
+            elif k == "fixe" and has_fixe_master and fixe_master not in already_used:
+                mapping[src] = fixe_master
+                already_used.add(fixe_master)
             elif k == "mixte":
-                if has_mobile_master and "TELEPHONE MOBILE" not in already_used:
-                    mapping[src] = "TELEPHONE MOBILE"
-                    already_used.add("TELEPHONE MOBILE")
-                elif has_fixe_master and "TELEPHONE FIXE" not in already_used:
-                    mapping[src] = "TELEPHONE FIXE"
-                    already_used.add("TELEPHONE FIXE")
+                if has_mobile_master and mobile_master not in already_used:
+                    mapping[src] = mobile_master
+                    already_used.add(mobile_master)
+                elif has_fixe_master and fixe_master not in already_used:
+                    mapping[src] = fixe_master
+                    already_used.add(fixe_master)
 
     # 3) Fuzzy matching en dernier recours
     fuzzy_threshold = 0.72

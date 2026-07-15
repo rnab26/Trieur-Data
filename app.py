@@ -1,20 +1,28 @@
 # =============================================================
 # Trieur de Fichiers Leads
-# VERSION 4.6
+# VERSION 4.7
 #
-# Changements de cette version (STABILITE + simplicite) :
-#   [FIX CRASH] st.selectbox plantait sur Streamlit Cloud (recent) quand un
-#       en-tete de colonne etait numerique (ex 2024 lu comme un entier) : le
-#       label n'etait pas une chaine. Corrige avec str(src_col).
-#   [SIMPLIFICATION] Le tableau de mapping HTML "fait main" (fragile, cause de
-#       troncature et de crash) est remplace par : une rangee de menus EN HAUT
-#       + un apercu via le tableau natif st.dataframe (gere seul l'affichage et
-#       le retour a la ligne). Les colonnes d'origine "Fichier source" / "Onglet"
-#       apparaissent dans l'apercu.
-#   [SOURCE] La colonne "Source Data" (= "NomFichier (Onglet)") est desormais
-#       TOUJOURS creee a la construction de la base, meme si elle n'est pas dans
-#       la liste des colonnes maitres. Le vrai nom du classeur Google (en-tete
-#       Content-Disposition) est utilise (v4.5).
+# Changements de cette version (repart du visuel v4.3, plus 3 corrections) :
+#   [DEFILEMENT] Les menus des colonnes maitres ne se TASSENT plus quand un
+#       fichier/onglet a beaucoup de colonnes : chaque colonne a une largeur
+#       fixe et TOUT le tableau (menus + apercu) defile horizontalement d'un
+#       seul bloc, comme on fait defiler les colonnes d'un fichier importe.
+#       Les valeurs passent a la ligne au lieu d'etre tronquees.
+#   [TEL] Detection telephone mobile/fixe par le SENS du nom de la colonne
+#       maitre, et non par un libelle fige : renommer "TELEPHONE MOBILE" en
+#       "phone mobile" (ou "portable", "GSM"...) — et "TELEPHONE FIXE" en
+#       "phone fixe" — n'empeche plus la detection ni le routage par contenu.
+#   [FIX] Plus de crash Cloud si un en-tete de colonne est un nombre
+#       (str() sur le libelle du menu).
+#   [SOURCE] La colonne source affiche le VRAI nom du classeur Google (lu
+#       dans l'en-tete du telechargement) au lieu de "Google Sheets".
+#
+# Version 4.3 :
+#   [7 - tableau aligne] Le mapping et l'apercu ne forment plus qu'UN SEUL
+#       tableau : la ligne de menus (colonnes maitres) et les lignes de donnees
+#       partagent la meme grille de colonnes -> memes largeurs, alignement
+#       parfait, comme des cellules empilees. La ligne des menus a un fond
+#       bleute pour la distinguer ; les cellules de donnees sont compactes.
 #
 # Version 4.2 :
 #   [7 - retour visuel] Presentation compacte facon tableau (rangee de menus +
@@ -103,7 +111,7 @@ import pandas as pd
 
 st.set_page_config(page_title="Trieur de Fichiers Leads", layout="wide")
 
-APP_VERSION = "4.6"
+APP_VERSION = "4.7"
 
 # -------------------------------------------------------------
 # [10] DESIGN EPURE FACON APPLE (CSS global, purement cosmetique)
@@ -177,21 +185,46 @@ st.markdown(
 
       /* [7] TABLEAU DE MAPPING : menus + apercu = un seul tableau aligne.
          Cible le conteneur st.container(key="maptbl-N") -> classe st-key-maptbl-N. */
+
+      /* [DEFILEMENT] Quand un fichier/onglet a beaucoup de colonnes, les menus
+         des colonnes maitres ne se TASSENT plus : chaque colonne garde une
+         largeur fixe et TOUT le tableau (menus + apercu) defile horizontalement
+         d'un seul bloc -> les menus restent alignes au-dessus de leur colonne,
+         exactement comme on fait defiler les colonnes d'un fichier importe. */
+      [class*="st-key-maptbl-"] {
+          overflow-x: auto;
+      }
       [class*="st-key-maptbl-"] [data-testid="stHorizontalBlock"] {
+          flex-wrap: nowrap !important;     /* pas de retour a la ligne */
+          width: max-content;
+          min-width: 100%;
           gap: 0.25rem !important;          /* colonnes serrees */
+      }
+      [class*="st-key-maptbl-"] [data-testid="stColumn"] {
+          flex: 0 0 160px !important;       /* largeur fixe -> jamais tasse */
+          width: 160px !important;
+          min-width: 160px !important;
       }
       [class*="st-key-maptbl-"] [data-testid="stVerticalBlock"] {
           gap: 0.15rem !important;          /* lignes serrees (compact) */
       }
-      /* Ligne des menus : fond bleute + bordure = distinction "colonne maitre".
-         (Cible les classes NATIVES de Streamlit, conservees -> s'applique bien ;
-         le style des cellules de donnees, lui, est mis EN LIGNE car Streamlit
-         retire les classes personnalisees du HTML injecte.) */
+      /* Ligne des menus : fond bleute + bordure = distinction "colonne maitre" */
       [class*="st-key-maptbl-"] .stSelectbox div[data-baseweb="select"] > div {
           background: #eef4ff;
           border: 1px solid #bcd4ff;
           border-radius: 8px;
           min-height: 34px;
+      }
+      /* Cellules de donnees : aspect tableau compact. La largeur des colonnes
+         etant fixe, les valeurs passent A LA LIGNE au lieu d'etre tronquees. */
+      [class*="st-key-maptbl-"] .mapcell {
+          font-size: 0.8rem;
+          padding: 3px 6px;
+          border-bottom: 1px solid #ececec;
+          white-space: normal;
+          overflow-wrap: anywhere;
+          word-break: break-word;
+          color: #333;
       }
     </style>
     """,
@@ -386,8 +419,9 @@ with tab2:
             progress_bar = start_progress("Chargement Google Sheets... 0%")
 
         update_progress(progress_bar, 85 if files else 10, "Récupération des onglets Google Sheets...")
-        # [SOURCE] gs_name = vrai nom du classeur Google (ex: "AZ"), pas un
-        # generique -> la colonne source affichera le bon nom de fichier.
+        # read_google_sheets_all_sheets renvoie aussi le VRAI nom du classeur
+        # Google (lu dans l'en-tete du telechargement) -> la colonne source
+        # affiche le vrai nom du fichier, pas "Google Sheets".
         sheets, inferred, gs_name = read_google_sheets_all_sheets(google_url)
         inferred_this_load.extend(f"{gs_name} :: {n}" for n in inferred)
         if sheets:
@@ -404,7 +438,7 @@ with tab2:
                     df["__source_file__"] = gs_name
                     df["__source_sheet__"] = sheet_name
                     all_sheets[key] = df
-            st.success(f"✅ « {gs_name} » importé avec {len(sheets)} onglet(s) détecté(s).")
+            st.success(f"✅ Google Sheets importé avec {len(sheets)} onglet(s) détecté(s).")
         else:
             st.warning("⚠️ Impossible de lire le Google Sheets.")
 
@@ -588,62 +622,65 @@ with tab2:
                     st.success(f"✅ {matched_count}/{total_cols} colonnes assignées")
                     st.rerun()
 
-            # Provenance de l'onglet (affichee en clair : fichier + onglet)
-            source_file = sheet_df["__source_file__"].iloc[0] if ("__source_file__" in sheet_df.columns and len(sheet_df)) else sheet_key
-            source_sheet = sheet_df["__source_sheet__"].iloc[0] if ("__source_sheet__" in sheet_df.columns and len(sheet_df)) else ""
-            st.caption(f"📁 Fichier : **{source_file}**  ·  📄 Onglet : **{source_sheet}**")
-            st.write("**Choisissez la colonne maître au-dessus de chaque colonne, puis vérifiez l'aperçu.**")
+            st.write("**Colonne maître (menu) et aperçu des données forment un même tableau : chaque menu est aligné, à la même largeur, au-dessus de sa colonne.**")
+
+            preview_df = sheet_df.head(6).copy()
 
             current_mapping = st.session_state.sheet_mappings[sheet_key]
+
             updated_mapping = {}
 
-            # Rangee de menus (un par colonne source) — menus EN HAUT du tableau.
-            menu_cols = st.columns(len(real_columns))
-            for idx, src_col in enumerate(real_columns):
-                with menu_cols[idx]:
-                    current = current_mapping.get(src_col, "(non assigne)")
-                    widget_key = f"map_{sheet_key}_{src_col}"
+            # [7 - tableau aligne] Menus (ligne du haut) + apercu des donnees
+            # rendus dans la MEME grille st.columns(n) -> memes largeurs, parfait
+            # alignement vertical, comme des cellules empilees d'un seul tableau.
+            # Le conteneur porte une cle pour cibler le CSS (fond accentue sur la
+            # ligne des menus, cellules compactes en dessous).
+            with st.container(key=f"maptbl-{sheet_idx}"):
+                # Ligne 1 : les menus des colonnes maitres (visuellement distincts)
+                menu_cols = st.columns(len(real_columns))
+                for idx, src_col in enumerate(real_columns):
+                    with menu_cols[idx]:
+                        current = current_mapping.get(src_col, "(non assigne)")
+                        widget_key = f"map_{sheet_key}_{src_col}"
 
-                    if widget_key in st.session_state:
-                        current = st.session_state[widget_key]
-                    else:
-                        st.session_state[widget_key] = current
+                        if widget_key in st.session_state:
+                            current = st.session_state[widget_key]
+                        else:
+                            st.session_state[widget_key] = current
 
-                    already_used_in_current = [updated_mapping.get(c, "") for c in real_columns if c != src_col and updated_mapping.get(c) != "(non assigne)"]
-                    available_options = ["(non assigne)"] + [m for m in st.session_state.master_columns if m not in already_used_in_current]
+                        already_used_in_current = [updated_mapping.get(c, "") for c in real_columns if c != src_col and updated_mapping.get(c) != "(non assigne)"]
+                        available_options = ["(non assigne)"] + [m for m in st.session_state.master_columns if m not in already_used_in_current]
 
-                    if current not in available_options:
-                        current = "(non assigne)"
-                        st.session_state[widget_key] = current
+                        if current not in available_options:
+                            current = "(non assigne)"
+                            st.session_state[widget_key] = current
 
-                    try:
-                        idx_val = available_options.index(current)
-                    except ValueError:
-                        idx_val = 0
+                        try:
+                            idx_val = available_options.index(current)
+                        except ValueError:
+                            idx_val = 0
 
-                    # str(src_col) : un en-tete numerique (ex "2024") est lu comme
-                    # un entier -> Streamlit recent plante si le label n'est pas
-                    # une chaine. On force donc le type.
-                    choice = st.selectbox(
-                        str(src_col),
-                        options=available_options,
-                        index=idx_val,
-                        key=widget_key,
-                        label_visibility="visible",
-                    )
-                    updated_mapping[src_col] = choice
-                    if choice != "(non assigne)":
-                        any_assigned = True
+                        choice = st.selectbox(
+                            str(src_col),  # str() : evite le crash Cloud si l'en-tete est un nombre
+                            options=available_options,
+                            index=idx_val,
+                            key=widget_key,
+                            label_visibility="visible",
+                        )
+                        updated_mapping[src_col] = choice
+                        if choice != "(non assigne)":
+                            any_assigned = True
+
+                # Lignes suivantes : apercu des donnees, memes colonnes -> aligne
+                for _, prow in preview_df.iterrows():
+                    data_cols = st.columns(len(real_columns))
+                    for idx, src_col in enumerate(real_columns):
+                        with data_cols[idx]:
+                            v = prow[src_col]
+                            txt = "" if pd.isna(v) else html.escape(str(v))
+                            st.markdown(f"<div class='mapcell'>{txt}</div>", unsafe_allow_html=True)
 
             st.session_state.sheet_mappings[sheet_key] = updated_mapping
-
-            # Apercu (tableau natif Streamlit) : gere seul l'affichage et le
-            # retour a la ligne. On renomme les colonnes d'origine pour qu'elles
-            # soient lisibles (au lieu de __source_file__ / __source_sheet__).
-            preview_df = sheet_df.head(7).rename(
-                columns={"__source_file__": "Fichier source", "__source_sheet__": "Onglet"}
-            )
-            st.dataframe(preview_df, width="stretch")
             st.markdown("---")
 
         if not any_assigned:
@@ -677,11 +714,6 @@ with tab2:
                                 is_empty = combined.isna() | (combined.astype(str).str.strip() == "")
                                 combined = combined.where(~is_empty, sheet_df[extra_col])
                             sub[master_col] = combined
-                    # [SOURCE] Garantir la colonne d'origine meme si "Source Data"
-                    # n'est pas dans la liste des colonnes maitres : chaque ligne
-                    # doit toujours savoir de quel fichier/onglet elle vient.
-                    if "Source Data" not in sub.columns:
-                        sub["Source Data"] = f"{source_file} ({source_sheet})"
                     rows.append(sub)
                     total_merged += len(sub)
 

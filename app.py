@@ -1,15 +1,20 @@
 # =============================================================
 # Trieur de Fichiers Leads
-# VERSION 4.2
+# VERSION 4.3
 #
 # Changements de cette version :
-#   [7 - retour visuel] Le mapping revient a une presentation COMPACTE facon
-#       tableau : une seule rangee de menus (un par colonne), dans le meme
-#       ordre que le tableau d'apercu affiche juste en dessous. Plus lisible
-#       et beaucoup moins haut que la grille "menu + apercu par colonne" de la
-#       v4.0. Le CSS empeche la troncature des noms de colonnes.
-#   [ALERTE] Seuil d'avertissement volume releve a 600 000 lignes et texte
-#       corrige (le compte dispose de 2,7 Go de RAM, pas 1 Go).
+#   [7 - tableau aligne] Le mapping et l'apercu ne forment plus qu'UN SEUL
+#       tableau : la ligne de menus (colonnes maitres) et les lignes de donnees
+#       partagent la meme grille de colonnes -> memes largeurs, alignement
+#       parfait, comme des cellules empilees. La ligne des menus a un fond
+#       bleute pour la distinguer ; les cellules de donnees sont compactes.
+#       Remplace le tableau st.dataframe de la v4.2 (qui ne s'alignait pas sur
+#       les menus).
+#
+# Version 4.2 :
+#   [7 - retour visuel] Presentation compacte facon tableau (rangee de menus +
+#       apercu), en remplacement de la grille "menu + apercu par colonne" v4.0.
+#   [ALERTE] Seuil volume a 600 000 lignes ; texte corrige (2,7 Go de RAM).
 #
 # Version 4.1 (PERFORMANCE gros fichiers) :
 #   [PERF] Lecture Excel/Google Sheets avec le moteur "calamine" (~3x plus
@@ -88,11 +93,12 @@ from trieur.persistence import (
 # de la base fusionnee dans l'interface ci-dessous).
 import io
 import gc
+import html
 import pandas as pd
 
 st.set_page_config(page_title="Trieur de Fichiers Leads", layout="wide")
 
-APP_VERSION = "4.2"
+APP_VERSION = "4.3"
 
 # -------------------------------------------------------------
 # [10] DESIGN EPURE FACON APPLE (CSS global, purement cosmetique)
@@ -162,6 +168,32 @@ st.markdown(
           overflow-wrap: anywhere;
           word-break: break-word;
           line-height: 1.15;
+      }
+
+      /* [7] TABLEAU DE MAPPING : menus + apercu = un seul tableau aligne.
+         Cible le conteneur st.container(key="maptbl-N") -> classe st-key-maptbl-N. */
+      [class*="st-key-maptbl-"] [data-testid="stHorizontalBlock"] {
+          gap: 0.25rem !important;          /* colonnes serrees */
+      }
+      [class*="st-key-maptbl-"] [data-testid="stVerticalBlock"] {
+          gap: 0.15rem !important;          /* lignes serrees (compact) */
+      }
+      /* Ligne des menus : fond bleute + bordure = distinction "colonne maitre" */
+      [class*="st-key-maptbl-"] .stSelectbox div[data-baseweb="select"] > div {
+          background: #eef4ff;
+          border: 1px solid #bcd4ff;
+          border-radius: 8px;
+          min-height: 34px;
+      }
+      /* Cellules de donnees : aspect tableau compact, une ligne par valeur */
+      [class*="st-key-maptbl-"] .mapcell {
+          font-size: 0.8rem;
+          padding: 3px 6px;
+          border-bottom: 1px solid #ececec;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          color: #333;
       }
     </style>
     """,
@@ -530,7 +562,7 @@ with tab2:
 
         any_assigned = False
 
-        for sheet_key, sheet_df in active_sheets.items():
+        for sheet_idx, (sheet_key, sheet_df) in enumerate(active_sheets.items()):
             st.markdown(f"### 📄 {sheet_key}")
 
             real_columns = [c for c in sheet_df.columns if c not in ["__source_file__", "__source_sheet__"]]
@@ -556,55 +588,65 @@ with tab2:
                     st.success(f"✅ {matched_count}/{total_cols} colonnes assignées")
                     st.rerun()
 
-            st.write("**Choisissez la colonne maître pour chaque colonne (une rangée de menus, alignée sur le tableau ci-dessous) :**")
+            st.write("**Colonne maître (menu) et aperçu des données forment un même tableau : chaque menu est aligné, à la même largeur, au-dessus de sa colonne.**")
 
-            preview_df = sheet_df.head(7).copy()
+            preview_df = sheet_df.head(6).copy()
 
             current_mapping = st.session_state.sheet_mappings[sheet_key]
 
             updated_mapping = {}
 
-            # [7 - compact] Une seule rangee de menus (un par colonne source),
-            # dans le MEME ordre que le tableau d'apercu affiche juste dessous.
-            # Presentation "tableau" : compacte, tout sur une ligne. Le CSS
-            # empeche la troncature du nom de colonne dans le libelle du menu.
-            cols_display = st.columns(len(real_columns))
-            for idx, src_col in enumerate(real_columns):
-                with cols_display[idx]:
-                    current = current_mapping.get(src_col, "(non assigne)")
-                    widget_key = f"map_{sheet_key}_{src_col}"
+            # [7 - tableau aligne] Menus (ligne du haut) + apercu des donnees
+            # rendus dans la MEME grille st.columns(n) -> memes largeurs, parfait
+            # alignement vertical, comme des cellules empilees d'un seul tableau.
+            # Le conteneur porte une cle pour cibler le CSS (fond accentue sur la
+            # ligne des menus, cellules compactes en dessous).
+            with st.container(key=f"maptbl-{sheet_idx}"):
+                # Ligne 1 : les menus des colonnes maitres (visuellement distincts)
+                menu_cols = st.columns(len(real_columns))
+                for idx, src_col in enumerate(real_columns):
+                    with menu_cols[idx]:
+                        current = current_mapping.get(src_col, "(non assigne)")
+                        widget_key = f"map_{sheet_key}_{src_col}"
 
-                    if widget_key in st.session_state:
-                        current = st.session_state[widget_key]
-                    else:
-                        st.session_state[widget_key] = current
+                        if widget_key in st.session_state:
+                            current = st.session_state[widget_key]
+                        else:
+                            st.session_state[widget_key] = current
 
-                    already_used_in_current = [updated_mapping.get(c, "") for c in real_columns if c != src_col and updated_mapping.get(c) != "(non assigne)"]
-                    available_options = ["(non assigne)"] + [m for m in st.session_state.master_columns if m not in already_used_in_current]
+                        already_used_in_current = [updated_mapping.get(c, "") for c in real_columns if c != src_col and updated_mapping.get(c) != "(non assigne)"]
+                        available_options = ["(non assigne)"] + [m for m in st.session_state.master_columns if m not in already_used_in_current]
 
-                    if current not in available_options:
-                        current = "(non assigne)"
-                        st.session_state[widget_key] = current
+                        if current not in available_options:
+                            current = "(non assigne)"
+                            st.session_state[widget_key] = current
 
-                    try:
-                        idx_val = available_options.index(current)
-                    except ValueError:
-                        idx_val = 0
+                        try:
+                            idx_val = available_options.index(current)
+                        except ValueError:
+                            idx_val = 0
 
-                    choice = st.selectbox(
-                        src_col,
-                        options=available_options,
-                        index=idx_val,
-                        key=widget_key,
-                        label_visibility="visible",
-                    )
-                    updated_mapping[src_col] = choice
-                    if choice != "(non assigne)":
-                        any_assigned = True
+                        choice = st.selectbox(
+                            src_col,
+                            options=available_options,
+                            index=idx_val,
+                            key=widget_key,
+                            label_visibility="visible",
+                        )
+                        updated_mapping[src_col] = choice
+                        if choice != "(non assigne)":
+                            any_assigned = True
+
+                # Lignes suivantes : apercu des donnees, memes colonnes -> aligne
+                for _, prow in preview_df.iterrows():
+                    data_cols = st.columns(len(real_columns))
+                    for idx, src_col in enumerate(real_columns):
+                        with data_cols[idx]:
+                            v = prow[src_col]
+                            txt = "" if pd.isna(v) else html.escape(str(v))
+                            st.markdown(f"<div class='mapcell'>{txt}</div>", unsafe_allow_html=True)
 
             st.session_state.sheet_mappings[sheet_key] = updated_mapping
-            # Tableau d'apercu complet (toutes les colonnes sur une meme grille)
-            st.dataframe(preview_df, width="stretch")
             st.markdown("---")
 
         if not any_assigned:

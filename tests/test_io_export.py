@@ -1,12 +1,16 @@
 import io
+from contextlib import contextmanager
 
 import pandas as pd
 
+import trieur.io_excel as IOE
 from trieur.export import sanitize_filename
 from trieur.io_excel import (
     apply_header_inference_excel,
     is_google_sheet_url,
     read_excel_all_sheets_from_file,
+    read_google_sheets_all_sheets,
+    _extract_sheet_id,
 )
 
 
@@ -23,6 +27,13 @@ def test_is_google_sheet_url():
     assert is_google_sheet_url("https://docs.google.com/spreadsheets/d/abc/edit") is True
     assert is_google_sheet_url("https://example.com/x.xlsx") is False
     assert is_google_sheet_url("") is False
+
+
+def test_extract_sheet_id():
+    assert _extract_sheet_id("https://docs.google.com/spreadsheets/d/1AbCdEf/edit#gid=0") == "1AbCdEf"
+    assert _extract_sheet_id("https://docs.google.com/spreadsheets/d/1AbCdEf") == "1AbCdEf"
+    assert _extract_sheet_id("https://docs.google.com/spreadsheets/d/1AbCdEf/") == "1AbCdEf"
+    assert _extract_sheet_id("https://docs.google.com/spreadsheets/") is None
 
 
 def test_sanitize_filename():
@@ -69,3 +80,44 @@ def test_lecture_excel_sans_entete_recupere_la_premiere_ligne():
     assert len(df) == 3 and len(df) > n_avant               # le lead Dupont est recupere
     assert "Dupont" in df.iloc[:, 0].tolist()
     assert "EMAIL" in df.columns and "TELEPHONE MOBILE" in df.columns and "CP" in df.columns
+
+
+def _fake_urlopen_returning(payload):
+    """Fabrique un remplacant de urllib.request.urlopen qui renvoie payload."""
+    @contextmanager
+    def _fake(url, timeout=None):
+        class R:
+            def read(self):
+                return payload
+        yield R()
+    return _fake
+
+
+def test_google_sheets_via_xlsx_une_seule_requete(monkeypatch):
+    # Vrai classeur xlsx en memoire (2 onglets)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as w:
+        pd.DataFrame({"NOM": ["a"], "EMAIL": ["a@x.fr"]}).to_excel(w, index=False, sheet_name="Contacts")
+        pd.DataFrame({"VILLE": ["Paris"]}).to_excel(w, index=False, sheet_name="Villes")
+    payload = buf.getvalue()
+
+    monkeypatch.setattr(IOE.urllib.request, "urlopen", _fake_urlopen_returning(payload))
+    sheets, inferred = read_google_sheets_all_sheets(
+        "https://docs.google.com/spreadsheets/d/ABC123/edit"
+    )
+    assert set(sheets.keys()) == {"Contacts", "Villes"}   # vrais noms d'onglets
+    assert "NOM" in sheets["Contacts"].columns
+
+
+def test_google_sheets_repli_si_pas_un_xlsx(monkeypatch):
+    # Google renvoie une page HTML (acces refuse) -> pas de 'PK' -> repli CSV.
+    monkeypatch.setattr(IOE.urllib.request, "urlopen",
+                        _fake_urlopen_returning(b"<html>error</html>"))
+    # Le repli CSV echoue hors-ligne : on verifie surtout qu'il n'y a pas de crash.
+    monkeypatch.setattr(IOE.pd, "read_csv",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("offline")))
+    sheets, inferred = read_google_sheets_all_sheets(
+        "https://docs.google.com/spreadsheets/d/ABC123/edit"
+    )
+    assert sheets == {}
+    assert inferred == []

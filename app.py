@@ -1,16 +1,20 @@
 # =============================================================
 # Trieur de Fichiers Leads
-# VERSION 3.0
+# VERSION 4.0
 #
 # Changements de cette version :
-#   [5] Filtres PRE-ENREGISTRES : dans l'onglet Filtrage, on peut nommer et
-#       enregistrer un filtre (colonne + valeurs choisies), puis le
-#       reappliquer / renommer / supprimer. Persistance dans saved_filters.json.
-#   [4] Google Sheets ACCELERE : le classeur entier est telecharge en UNE
-#       seule requete (export xlsx) au lieu d'essayer jusqu'a 50 gid. Repli
-#       automatique sur l'ancienne methode CSV si l'export xlsx echoue.
-#       + bouton "Vider le cache" qui libere les fichiers importes en memoire
-#       SANS effacer la base construite ni le resultat filtre.
+#   [7] Menus de mapping ALIGNES au-dessus de chaque colonne + texte toujours
+#       lisible en entier : l'assignation est affichee en grille (lots de
+#       colonnes), chaque menu ayant directement en dessous l'apercu de SA
+#       colonne. Plus de menus ecrases quand il y a beaucoup de colonnes.
+#   [10] Design epure facon Apple : CSS global sobre (typographie systeme,
+#       coins arrondis, ombres discretes, accent bleu, plus d'air).
+#
+# Versions precedentes :
+#   [5] Filtres PRE-ENREGISTRES (onglet Filtrage) : nommer / appliquer /
+#       renommer / supprimer, persistance dans saved_filters.json.
+#   [4] Google Sheets ACCELERE : classeur entier en UNE requete (export xlsx),
+#       repli CSV si echec. + bouton "Vider le cache" (garde la base).
 #
 # [REORG] Le code est reparti en modules (aucun changement de comportement) :
 #           trieur/matching.py     -> normalisation, detection telephone,
@@ -72,7 +76,85 @@ import pandas as pd
 
 st.set_page_config(page_title="Trieur de Fichiers Leads", layout="wide")
 
-APP_VERSION = "3.0"
+APP_VERSION = "4.0"
+
+# -------------------------------------------------------------
+# [10] DESIGN EPURE FACON APPLE (CSS global, purement cosmetique)
+# N'affecte aucun comportement ; se contente d'affiner l'apparence.
+# -------------------------------------------------------------
+st.markdown(
+    """
+    <style>
+      :root { --accent: #0071e3; }
+
+      html, body, [class*="css"], .stApp {
+          font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+                       "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+          -webkit-font-smoothing: antialiased;
+      }
+
+      /* Titres : plus fins, mieux espaces */
+      h1, h2, h3 { letter-spacing: -0.02em; font-weight: 600; }
+      .block-container { padding-top: 2.2rem; max-width: 1300px; }
+
+      /* Boutons : coins arrondis, transition douce */
+      .stButton > button, .stDownloadButton > button {
+          border-radius: 10px;
+          border: 1px solid rgba(0,0,0,0.08);
+          padding: 0.45rem 1.0rem;
+          font-weight: 500;
+          transition: all 0.15s ease;
+      }
+      .stButton > button:hover, .stDownloadButton > button:hover {
+          border-color: var(--accent);
+          color: var(--accent);
+      }
+      /* Bouton principal : bleu plein facon Apple */
+      .stButton > button[kind="primary"] {
+          background: var(--accent);
+          border: none;
+          box-shadow: 0 1px 3px rgba(0,113,227,0.30);
+      }
+
+      /* Champs et menus : coins arrondis */
+      .stSelectbox div[data-baseweb="select"] > div,
+      .stTextInput input, .stTextArea textarea {
+          border-radius: 10px;
+      }
+
+      /* Onglets : plus d'air, soulignement accent */
+      .stTabs [data-baseweb="tab-list"] { gap: 0.4rem; }
+      .stTabs [data-baseweb="tab"] {
+          border-radius: 10px 10px 0 0;
+          padding: 0.4rem 1rem;
+      }
+
+      /* Tableaux et cartes : coins arrondis, ombre discrete */
+      [data-testid="stDataFrame"] {
+          border-radius: 12px;
+          box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+      }
+      [data-testid="stExpander"] {
+          border-radius: 12px;
+          border: 1px solid rgba(0,0,0,0.07);
+      }
+
+      /* [7] Nom de colonne source : toujours affiche en ENTIER, jamais tronque */
+      .src-col-name {
+          font-weight: 600;
+          font-size: 0.86rem;
+          line-height: 1.2;
+          white-space: normal;
+          overflow-wrap: anywhere;
+          word-break: break-word;
+          min-height: 2.4em;
+          margin-bottom: 0.25rem;
+          color: #1d1d1f;
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 # -------------------------------------------------------------
@@ -446,54 +528,67 @@ with tab2:
                     st.success(f"✅ {matched_count}/{total_cols} colonnes assignées")
                     st.rerun()
 
-            st.write("**Aperçu des 7 premières lignes avec assignation au-dessus :**")
+            st.write("**Assignez chaque colonne : le menu est directement au-dessus de l'apercu de sa colonne.**")
 
-            preview_df = sheet_df.head(7).copy()
-
-            st.write("**Sélectionnez les colonnes maîtres correspondantes :**")
+            preview_df = sheet_df.head(5).copy()
 
             current_mapping = st.session_state.sheet_mappings[sheet_key]
-            mapping_options = ["(non assigne)"] + st.session_state.master_columns
 
             updated_mapping = {}
 
-            cols_display = st.columns(len(real_columns))
+            # [7] Grille par lots : menu + apercu de CHAQUE colonne alignes.
+            # On limite a 4 colonnes par rangee pour que le nom de colonne et
+            # l'option choisie restent lisibles en entier meme sur des fichiers
+            # a beaucoup de colonnes.
+            PER_ROW = 4
+            for start in range(0, len(real_columns), PER_ROW):
+                chunk = real_columns[start:start + PER_ROW]
+                cells = st.columns(len(chunk))
+                for i, src_col in enumerate(chunk):
+                    with cells[i]:
+                        current = current_mapping.get(src_col, "(non assigne)")
+                        widget_key = f"map_{sheet_key}_{src_col}"
 
-            for idx, src_col in enumerate(real_columns):
-                with cols_display[idx]:
-                    current = current_mapping.get(src_col, "(non assigne)")
-                    widget_key = f"map_{sheet_key}_{src_col}"
+                        if widget_key in st.session_state:
+                            current = st.session_state[widget_key]
+                        else:
+                            st.session_state[widget_key] = current
 
-                    if widget_key in st.session_state:
-                        current = st.session_state[widget_key]
-                    else:
-                        st.session_state[widget_key] = current
+                        already_used_in_current = [updated_mapping.get(c, "") for c in real_columns if c != src_col and updated_mapping.get(c) != "(non assigne)"]
+                        available_options = ["(non assigne)"] + [m for m in st.session_state.master_columns if m not in already_used_in_current]
 
-                    already_used_in_current = [updated_mapping.get(c, "") for c in real_columns if c != src_col and updated_mapping.get(c) != "(non assigne)"]
-                    available_options = ["(non assigne)"] + [m for m in st.session_state.master_columns if m not in already_used_in_current]
+                        if current not in available_options:
+                            current = "(non assigne)"
+                            st.session_state[widget_key] = current
 
-                    if current not in available_options:
-                        current = "(non assigne)"
-                        st.session_state[widget_key] = current
+                        try:
+                            idx_val = available_options.index(current)
+                        except ValueError:
+                            idx_val = 0
 
-                    try:
-                        idx_val = available_options.index(current)
-                    except ValueError:
-                        idx_val = 0
+                        # Nom de la colonne source, affiche EN ENTIER (CSS anti-troncature)
+                        st.markdown(f"<div class='src-col-name'>{src_col}</div>", unsafe_allow_html=True)
 
-                    choice = st.selectbox(
-                        src_col,
-                        options=available_options,
-                        index=idx_val,
-                        key=widget_key,
-                        label_visibility="visible"
-                    )
-                    updated_mapping[src_col] = choice
-                    if choice != "(non assigne)":
-                        any_assigned = True
+                        choice = st.selectbox(
+                            src_col,
+                            options=available_options,
+                            index=idx_val,
+                            key=widget_key,
+                            label_visibility="collapsed",
+                        )
+                        updated_mapping[src_col] = choice
+                        if choice != "(non assigne)":
+                            any_assigned = True
+
+                        # Apercu de CETTE colonne, aligne juste en dessous du menu
+                        st.dataframe(
+                            preview_df[[src_col]],
+                            width="stretch",
+                            height=180,
+                            hide_index=True,
+                        )
 
             st.session_state.sheet_mappings[sheet_key] = updated_mapping
-            st.dataframe(preview_df, use_container_width=True)
             st.markdown("---")
 
         if not any_assigned:
@@ -541,7 +636,7 @@ with tab2:
                     else:
                         st.session_state.final_df = final_df
                         st.success(f"✅ Base construite : {len(final_df)} lignes fusionnées.")
-                        st.dataframe(final_df.head(50), use_container_width=True)
+                        st.dataframe(final_df.head(50), width="stretch")
     else:
         st.info("ℹ️ Importe un fichier Excel ou colle une URL Google Sheets pour continuer.")
 
@@ -609,7 +704,7 @@ with tab3:
         remaining_duplicates = filtered_df.duplicated().sum()
 
         st.write(f"Resultat filtre : **{remaining_lines}** lignes | **{remaining_duplicates}** doublons conserves | **{total_lines}** lignes importees au total")
-        st.dataframe(filtered_df.head(50), use_container_width=True)
+        st.dataframe(filtered_df.head(50), width="stretch")
 
         dup_check_col = st.selectbox("Colonne pour detecter les doublons (ex: TELEPHONE MOBILE)", options=["(aucune)"] + st.session_state.master_columns)
         if dup_check_col != "(aucune)":
@@ -646,7 +741,7 @@ with tab3:
                     placeholder="Nom du filtre (ex: Sud-Ouest)",
                 )
             with col_btn:
-                if st.button("💾 Enregistrer", key="tab3_save_filter", use_container_width=True):
+                if st.button("💾 Enregistrer", key="tab3_save_filter", width="stretch"):
                     nm = new_filter_name.strip()
                     if not current_kind:
                         st.warning("⚠️ Aucun filtre a enregistrer (choisissez colonne + valeurs).")
@@ -680,17 +775,17 @@ with tab3:
                         "nom", value=f["name"], key=f"tab3_rn_{i}", label_visibility="collapsed",
                     )
                 with c2:
-                    if st.button("Appliquer", key=f"tab3_apply_{i}", use_container_width=True):
+                    if st.button("Appliquer", key=f"tab3_apply_{i}", width="stretch"):
                         st.session_state["_apply_filter"] = f
                         st.rerun()
                 with c3:
-                    if st.button("Renommer", key=f"tab3_ren_{i}", use_container_width=True):
+                    if st.button("Renommer", key=f"tab3_ren_{i}", width="stretch"):
                         if rn.strip():
                             st.session_state.saved_filters[i]["name"] = rn.strip()
                             save_saved_filters(st.session_state.saved_filters)
                             st.rerun()
                 with c4:
-                    if st.button("Supprimer", key=f"tab3_del_{i}", use_container_width=True):
+                    if st.button("Supprimer", key=f"tab3_del_{i}", width="stretch"):
                         st.session_state.saved_filters.pop(i)
                         save_saved_filters(st.session_state.saved_filters)
                         st.rerun()

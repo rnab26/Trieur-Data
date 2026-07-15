@@ -4,6 +4,7 @@ saved_filters.json
 
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # Outils locaux
 .claude/

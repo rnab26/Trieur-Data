@@ -82,11 +82,13 @@ def test_lecture_excel_sans_entete_recupere_la_premiere_ligne():
     assert "EMAIL" in df.columns and "TELEPHONE MOBILE" in df.columns and "CP" in df.columns
 
 
-def _fake_urlopen_returning(payload):
+def _fake_urlopen_returning(payload, content_disposition=""):
     """Fabrique un remplacant de urllib.request.urlopen qui renvoie payload."""
     @contextmanager
     def _fake(url, timeout=None):
         class R:
+            headers = {"Content-Disposition": content_disposition}
+
             def read(self):
                 return payload
         yield R()
@@ -101,12 +103,23 @@ def test_google_sheets_via_xlsx_une_seule_requete(monkeypatch):
         pd.DataFrame({"VILLE": ["Paris"]}).to_excel(w, index=False, sheet_name="Villes")
     payload = buf.getvalue()
 
-    monkeypatch.setattr(IOE.urllib.request, "urlopen", _fake_urlopen_returning(payload))
-    sheets, inferred = read_google_sheets_all_sheets(
+    monkeypatch.setattr(
+        IOE.urllib.request, "urlopen",
+        _fake_urlopen_returning(payload, content_disposition='attachment; filename="AZ.xlsx"'),
+    )
+    sheets, inferred, name = read_google_sheets_all_sheets(
         "https://docs.google.com/spreadsheets/d/ABC123/edit"
     )
     assert set(sheets.keys()) == {"Contacts", "Villes"}   # vrais noms d'onglets
     assert "NOM" in sheets["Contacts"].columns
+    assert name == "AZ"                                    # vrai nom du classeur
+
+
+def test_name_from_content_disposition():
+    f = IOE._name_from_content_disposition
+    assert f('attachment; filename="AZ.xlsx"; filename*=UTF-8\'\'AZ.xlsx') == "AZ"
+    assert f('attachment; filename="Mes Leads 2026.xlsx"') == "Mes Leads 2026"
+    assert f("") is None
 
 
 def test_google_sheets_repli_si_pas_un_xlsx(monkeypatch):
@@ -116,7 +129,7 @@ def test_google_sheets_repli_si_pas_un_xlsx(monkeypatch):
     # Le repli CSV echoue hors-ligne : on verifie surtout qu'il n'y a pas de crash.
     monkeypatch.setattr(IOE.pd, "read_csv",
                         lambda *a, **k: (_ for _ in ()).throw(OSError("offline")))
-    sheets, inferred = read_google_sheets_all_sheets(
+    sheets, inferred, _name = read_google_sheets_all_sheets(
         "https://docs.google.com/spreadsheets/d/ABC123/edit"
     )
     assert sheets == {}

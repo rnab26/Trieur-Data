@@ -1,5 +1,7 @@
 """Lecture des fichiers Excel et Google Sheets (multi-onglets)."""
 import io
+import re
+import urllib.parse
 import urllib.request
 
 import pandas as pd
@@ -81,6 +83,22 @@ def _extract_sheet_id(url):
     return url.split("/d/")[1].split("/")[0]
 
 
+def _name_from_content_disposition(header_value):
+    """Extrait le vrai nom du classeur depuis l'en-tete Content-Disposition.
+    Ex: 'attachment; filename="AZ.xlsx"; filename*=UTF-8''AZ.xlsx' -> 'AZ'."""
+    if not header_value:
+        return None
+    # filename*=UTF-8''... (RFC 5987) prioritaire car gere l'unicode
+    m = re.search(r"filename\*=(?:UTF-8'')?([^;]+)", header_value, re.IGNORECASE)
+    if not m:
+        m = re.search(r'filename="?([^";]+)"?', header_value, re.IGNORECASE)
+    if not m:
+        return None
+    name = urllib.parse.unquote(m.group(1)).strip().strip('"')
+    name = re.sub(r"\.(xlsx|xls|csv)$", "", name, flags=re.IGNORECASE)
+    return name or None
+
+
 def _read_google_via_xlsx(sheet_id):
     """
     [PERF point 4] Telecharge TOUT le classeur en UNE seule requete (export
@@ -88,12 +106,16 @@ def _read_google_via_xlsx(sheet_id):
     leurs gid (les gid Google ne sont pas sequentiels des qu'un onglet a ete
     supprime/reordonne : l'ancienne boucle 0..50 les ratait).
 
-    Retourne (sheets, inferred) ou None si le telechargement echoue / n'est
-    pas un vrai xlsx (feuille non publique -> on retombe sur la methode CSV).
+    Retourne (sheets, inferred, nom_du_classeur) ou None si le telechargement
+    echoue / n'est pas un vrai xlsx (feuille non publique -> repli CSV).
     """
     xlsx_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
     try:
         with urllib.request.urlopen(xlsx_url, timeout=20) as resp:
+            # Le vrai nom du classeur Google est dans l'en-tete Content-Disposition.
+            source_name = _name_from_content_disposition(
+                resp.headers.get("Content-Disposition", "")
+            )
             content = resp.read()
     except Exception:
         return None
@@ -109,7 +131,7 @@ def _read_google_via_xlsx(sheet_id):
     if not sheets:
         return None
     sheets, inferred = apply_header_inference_excel(sheets, bio)
-    return sheets, inferred
+    return sheets, inferred, (source_name or "Google Sheets")
 
 
 def _read_google_via_gid_csv(sheet_id):
@@ -148,7 +170,7 @@ def _read_google_via_gid_csv(sheet_id):
 def read_google_sheets_all_sheets(url):
     """
     Lire Google Sheets avec tous les onglets détectés.
-    Retourne (onglets, [noms des onglets dont l'en-tete a ete deduite]).
+    Retourne (onglets, [onglets a en-tete deduite], nom_du_classeur).
 
     Strategie : 1 seule requete (export xlsx complet) ; repli sur l'ancienne
     methode CSV onglet par onglet si l'export xlsx echoue.
@@ -156,16 +178,17 @@ def read_google_sheets_all_sheets(url):
     try:
         sheet_id = _extract_sheet_id(url)
         if not sheet_id:
-            return {}, []
+            return {}, [], "Google Sheets"
 
         primary = _read_google_via_xlsx(sheet_id)
         if primary is not None and primary[0]:
-            return primary
+            return primary  # (sheets, inferred, source_name)
 
-        return _read_google_via_gid_csv(sheet_id)
+        sheets, inferred = _read_google_via_gid_csv(sheet_id)
+        return sheets, inferred, "Google Sheets"
     except Exception as e:
         st.error(f"❌ Erreur Google Sheets: {str(e)}")
-        return {}, []
+        return {}, [], "Google Sheets"
 
 
 def is_google_sheet_url(text):

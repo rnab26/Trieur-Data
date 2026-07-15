@@ -1,19 +1,22 @@
 # =============================================================
 # Trieur de Fichiers Leads
-# VERSION 4.4
+# VERSION 4.5
 #
-# Changements de cette version :
-#   [7] Tableau de mapping a 3 zones alignees : ligne d'EN-TETES (nom de la
-#       colonne d'origine) -> ligne des MENUS de colonnes maitres (fond bleute,
-#       directement au-dessus des donnees) -> lignes d'APERCU. Memes largeurs.
-#   [7] Valeurs des cellules passees A LA LIGNE (plus de troncature).
-#   [SOURCE] Reaffichage des colonnes d'ORIGINE "Fichier source" et "Onglet"
-#       dans le tableau (elles avaient disparu en v4.3), pour toujours savoir
-#       d'ou vient une ligne. La base construite conserve la colonne maitre
-#       "Source Data" = "fichier (onglet)".
+# Changements de cette version (corrections du mapping) :
+#   [7] Le MENU de la colonne maitre est desormais TOUT EN HAUT de chaque
+#       colonne (au-dessus du nom d'origine et des donnees), comme demande.
+#   [7] Valeurs des cellules A LA LIGNE (fini la troncature) : les styles sont
+#       mis EN LIGNE (style=...) car Streamlit retire les classes CSS du HTML
+#       injecte -> c'est pour ca que la correction v4.4 ne prenait pas.
+#   [SOURCE] La provenance (fichier + onglet) est affichee en clair au-dessus
+#       de chaque tableau. Surtout : pour un Google Sheet, le VRAI nom du
+#       classeur est recupere (en-tete Content-Disposition, ex "AZ") au lieu
+#       du generique "Google Sheets". La colonne "Source Data" de la base
+#       vaut donc "NomDuFichier (Onglet)" pour un Excel importe COMME pour un
+#       Google Sheet.
 #
-# Version 4.3 :
-#   [7 - tableau aligne] Menus + apercu dans la meme grille st.columns.
+# Version 4.4 / 4.3 :
+#   [7] Tableau de mapping aligne (menus + apercu dans la meme grille).
 #
 # Version 4.2 :
 #   [7 - retour visuel] Presentation compacte facon tableau (rangee de menus +
@@ -102,7 +105,7 @@ import pandas as pd
 
 st.set_page_config(page_title="Trieur de Fichiers Leads", layout="wide")
 
-APP_VERSION = "4.4"
+APP_VERSION = "4.5"
 
 # -------------------------------------------------------------
 # [10] DESIGN EPURE FACON APPLE (CSS global, purement cosmetique)
@@ -182,47 +185,15 @@ st.markdown(
       [class*="st-key-maptbl-"] [data-testid="stVerticalBlock"] {
           gap: 0.15rem !important;          /* lignes serrees (compact) */
       }
-      /* Ligne des menus : fond bleute + bordure = distinction "colonne maitre" */
+      /* Ligne des menus : fond bleute + bordure = distinction "colonne maitre".
+         (Cible les classes NATIVES de Streamlit, conservees -> s'applique bien ;
+         le style des cellules de donnees, lui, est mis EN LIGNE car Streamlit
+         retire les classes personnalisees du HTML injecte.) */
       [class*="st-key-maptbl-"] .stSelectbox div[data-baseweb="select"] > div {
           background: #eef4ff;
           border: 1px solid #bcd4ff;
           border-radius: 8px;
           min-height: 34px;
-      }
-      /* Cellules de donnees : aspect tableau compact, valeurs A LA LIGNE
-         (plus de troncature) pour rester lisibles. */
-      [class*="st-key-maptbl-"] .mapcell {
-          font-size: 0.8rem;
-          padding: 3px 6px;
-          border-bottom: 1px solid #ececec;
-          white-space: normal;
-          overflow-wrap: anywhere;
-          word-break: break-word;
-          line-height: 1.25;
-          color: #333;
-      }
-      /* En-tete de colonne (nom d'origine) : gras, hauteur reservee pour que
-         la ligne des menus reste alignee meme si un nom passe sur 2 lignes. */
-      [class*="st-key-maptbl-"] .mapcell.head {
-          font-weight: 600;
-          color: #1d1d1f;
-          background: #f5f7fb;
-          border-bottom: 2px solid #bcd4ff;
-          border-radius: 6px 6px 0 0;
-          min-height: 2.7em;
-          display: flex;
-          align-items: flex-end;
-      }
-      /* Colonnes d'origine (fichier / onglet) : valeur grisee, en italique */
-      [class*="st-key-maptbl-"] .mapcell.srcinfo {
-          font-style: italic;
-          color: #555;
-          background: #fafafa;
-          border: 1px dashed #ddd;
-          border-radius: 8px;
-          min-height: 34px;
-          display: flex;
-          align-items: center;
       }
     </style>
     """,
@@ -417,8 +388,10 @@ with tab2:
             progress_bar = start_progress("Chargement Google Sheets... 0%")
 
         update_progress(progress_bar, 85 if files else 10, "Récupération des onglets Google Sheets...")
-        sheets, inferred = read_google_sheets_all_sheets(google_url)
-        inferred_this_load.extend(f"Google Sheets :: {n}" for n in inferred)
+        # [SOURCE] gs_name = vrai nom du classeur Google (ex: "AZ"), pas un
+        # generique -> la colonne source affichera le bon nom de fichier.
+        sheets, inferred, gs_name = read_google_sheets_all_sheets(google_url)
+        inferred_this_load.extend(f"{gs_name} :: {n}" for n in inferred)
         if sheets:
             sheet_items = list(sheets.items())
             total_sheet_items = len(sheet_items)
@@ -428,12 +401,12 @@ with tab2:
                 pct = start_pct + int(((s_idx + 1) / max(total_sheet_items, 1)) * (end_pct - start_pct))
                 update_progress(progress_bar, pct, f"Traitement Google Sheet {s_idx+1}/{total_sheet_items}")
                 if len(df) > 0:
-                    key = "Google Sheets :: " + sheet_name
+                    key = gs_name + " :: " + sheet_name
                     # [MEM] pas de .copy() (voir import Excel ci-dessus)
-                    df["__source_file__"] = "Google Sheets"
+                    df["__source_file__"] = gs_name
                     df["__source_sheet__"] = sheet_name
                     all_sheets[key] = df
-            st.success(f"✅ Google Sheets importé avec {len(sheets)} onglet(s) détecté(s).")
+            st.success(f"✅ « {gs_name} » importé avec {len(sheets)} onglet(s) détecté(s).")
         else:
             st.warning("⚠️ Impossible de lire le Google Sheets.")
 
@@ -617,53 +590,43 @@ with tab2:
                     st.success(f"✅ {matched_count}/{total_cols} colonnes assignées")
                     st.rerun()
 
-            st.write("**Un seul tableau : ligne d'en-tête (colonne d'origine) → menu de la colonne maître → aperçu des données. Tout est aligné, à la même largeur.**")
+            # Provenance de l'onglet (affichee en clair : fichier + onglet)
+            source_file = sheet_df["__source_file__"].iloc[0] if ("__source_file__" in sheet_df.columns and len(sheet_df)) else sheet_key
+            source_sheet = sheet_df["__source_sheet__"].iloc[0] if ("__source_sheet__" in sheet_df.columns and len(sheet_df)) else ""
+            st.markdown(
+                f"<div style='margin:2px 0 6px 0;font-size:0.85rem;color:#444;'>"
+                f"📁 <b>Fichier :</b> {html.escape(str(source_file))} &nbsp;·&nbsp; "
+                f"📄 <b>Onglet :</b> {html.escape(str(source_sheet))}"
+                f"</div>", unsafe_allow_html=True,
+            )
+            st.write("**Menu de la colonne maître EN HAUT, aperçu des données en dessous, colonne par colonne.**")
 
-            preview_df = sheet_df.head(6).copy()
+            preview_df = sheet_df.head(5).copy()
 
             current_mapping = st.session_state.sheet_mappings[sheet_key]
 
             updated_mapping = {}
 
-            # Provenance de l'onglet (pour la colonne source reaffichee)
-            source_file = sheet_df["__source_file__"].iloc[0] if ("__source_file__" in sheet_df.columns and len(sheet_df)) else sheet_key
-            source_sheet = sheet_df["__source_sheet__"].iloc[0] if ("__source_sheet__" in sheet_df.columns and len(sheet_df)) else ""
+            # Styles INLINE (les classes CSS sont retirees par Streamlit ; le
+            # style en ligne, lui, est conserve -> garantit le retour a la ligne).
+            HEAD_STYLE = ("font-weight:600;font-size:0.8rem;color:#1d1d1f;"
+                          "padding:2px 6px;border-bottom:2px solid #bcd4ff;"
+                          "white-space:normal;overflow-wrap:anywhere;word-break:break-word;")
+            CELL_STYLE = ("font-size:0.8rem;color:#333;padding:3px 6px;"
+                          "border-bottom:1px solid #eee;line-height:1.25;"
+                          "white-space:normal;overflow-wrap:anywhere;word-break:break-word;")
 
-            # Colonnes affichees = colonnes du fichier + 2 colonnes d'ORIGINE
-            # (fichier + onglet), pour toujours savoir d'ou vient une ligne.
-            display_cols = real_columns + ["__source_file__", "__source_sheet__"]
-            n_disp = len(display_cols)
-
-            # [7] Un seul tableau aligne (meme grille st.columns pour chaque ligne) :
-            #   1) en-tetes (nom de la colonne d'origine)
-            #   2) menus des colonnes maitres a selectionner (fond bleute)
-            #   3) lignes d'apercu des donnees (valeurs a la ligne, non coupees)
+            # [7] Un seul tableau, chaque ligne sur la MEME grille st.columns ->
+            # memes largeurs, alignement parfait. Ordre demande :
+            #   1) MENU (selection colonne maitre) tout en haut
+            #   2) nom de la colonne d'origine (en-tete de la donnee)
+            #   3) lignes d'apercu (valeurs A LA LIGNE, non coupees)
+            n = len(real_columns)
             with st.container(key=f"maptbl-{sheet_idx}"):
-                # 1) Ligne d'en-tetes
-                head_cols = st.columns(n_disp)
-                for idx, col in enumerate(display_cols):
-                    with head_cols[idx]:
-                        if col == "__source_file__":
-                            label = "📁 Fichier source"
-                        elif col == "__source_sheet__":
-                            label = "📄 Onglet"
-                        else:
-                            label = col
-                        st.markdown(f"<div class='mapcell head'>{html.escape(str(label))}</div>", unsafe_allow_html=True)
-
-                # 2) Ligne des menus (colonnes maitres) — les 2 colonnes d'origine
-                #    montrent leur valeur au lieu d'un menu.
-                sel_cols = st.columns(n_disp)
-                for idx, col in enumerate(display_cols):
-                    with sel_cols[idx]:
-                        if col == "__source_file__":
-                            st.markdown(f"<div class='mapcell srcinfo'>{html.escape(str(source_file))}</div>", unsafe_allow_html=True)
-                            continue
-                        if col == "__source_sheet__":
-                            st.markdown(f"<div class='mapcell srcinfo'>{html.escape(str(source_sheet))}</div>", unsafe_allow_html=True)
-                            continue
-
-                        src_col = col
+                # 1) Ligne des MENUS (en haut, distincts)
+                menu_cols = st.columns(n)
+                for idx, src_col in enumerate(real_columns):
+                    with menu_cols[idx]:
                         current = current_mapping.get(src_col, "(non assigne)")
                         widget_key = f"map_{sheet_key}_{src_col}"
 
@@ -695,14 +658,20 @@ with tab2:
                         if choice != "(non assigne)":
                             any_assigned = True
 
-                # 3) Lignes d'apercu des donnees (memes colonnes -> aligne)
+                # 2) Ligne des noms de colonnes d'origine
+                name_cols = st.columns(n)
+                for idx, src_col in enumerate(real_columns):
+                    with name_cols[idx]:
+                        st.markdown(f"<div style='{HEAD_STYLE}'>{html.escape(str(src_col))}</div>", unsafe_allow_html=True)
+
+                # 3) Lignes d'apercu des donnees
                 for _, prow in preview_df.iterrows():
-                    data_cols = st.columns(n_disp)
-                    for idx, col in enumerate(display_cols):
+                    data_cols = st.columns(n)
+                    for idx, src_col in enumerate(real_columns):
                         with data_cols[idx]:
-                            v = prow[col] if col in preview_df.columns else ""
+                            v = prow[src_col]
                             txt = "" if pd.isna(v) else html.escape(str(v))
-                            st.markdown(f"<div class='mapcell'>{txt}</div>", unsafe_allow_html=True)
+                            st.markdown(f"<div style='{CELL_STYLE}'>{txt}</div>", unsafe_allow_html=True)
 
             st.session_state.sheet_mappings[sheet_key] = updated_mapping
             st.markdown("---")

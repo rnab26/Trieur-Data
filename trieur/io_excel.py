@@ -12,61 +12,63 @@ from trieur.matching import (
 )
 
 
+def _collect_sheets(all_sheets_dict):
+    """Nettoie un dict {nom: df} : retire les onglets/colonnes vides."""
+    sheets = {}
+    if all_sheets_dict:
+        for sheet_name, df in all_sheets_dict.items():
+            if df is not None and len(df) > 0:
+                df = df.dropna(axis=1, how="all")
+                if len(df.columns) > 0 and len(df) > 0:
+                    sheets[sheet_name] = df
+    return sheets
+
+
 def read_excel_all_sheets_from_file(file_obj, filename):
     """
     Lire TOUS les onglets d'un fichier Excel uploadé.
-    Retourne un dictionnaire {nom_feuille: dataframe}
+    Retourne un dictionnaire {nom_feuille: dataframe}.
+
+    [PERF v4.1] On essaie d'abord le moteur "calamine" (python-calamine),
+    ~3x plus rapide et plus econome en memoire qu'openpyxl sur les gros
+    fichiers. S'il n'est pas installe (ou echoue), on retombe sur openpyxl
+    puis sur le moteur par defaut : aucune regression.
     """
-    sheets = {}
-    try:
-        all_sheets_dict = pd.read_excel(file_obj, sheet_name=None, dtype=str, engine="openpyxl")
-
-        if all_sheets_dict:
-            for sheet_name, df in all_sheets_dict.items():
-                if df is not None and len(df) > 0:
-                    df = df.dropna(axis=1, how='all')
-                    if len(df.columns) > 0 and len(df) > 0:
-                        sheets[sheet_name] = df
-
-        return sheets
-
-    except Exception:
+    # 1) Moteurs rapides : tous les onglets d'un coup
+    for engine in ("calamine", "openpyxl"):
         try:
             file_obj.seek(0)
-            xls = pd.ExcelFile(file_obj, engine="openpyxl")
+            sheets = _collect_sheets(
+                pd.read_excel(file_obj, sheet_name=None, dtype=str, engine=engine)
+            )
+            if sheets:
+                return sheets
+        except Exception:
+            continue
 
+    # 2) Repli robuste : onglet par onglet (openpyxl puis moteur par defaut),
+    #    pour ignorer un onglet corrompu isole.
+    for engine in ("openpyxl", None):
+        try:
+            file_obj.seek(0)
+            xls = pd.ExcelFile(file_obj, engine=engine) if engine else pd.ExcelFile(file_obj)
+            sheets = {}
             for sheet_name in xls.sheet_names:
                 try:
                     df = xls.parse(sheet_name=sheet_name, dtype=str)
                     if df is not None and len(df) > 0:
-                        df = df.dropna(axis=1, how='all')
+                        df = df.dropna(axis=1, how="all")
                         if len(df.columns) > 0 and len(df) > 0:
                             sheets[sheet_name] = df
                 except Exception:
                     continue
-
-            return sheets
-
-        except Exception:
-            try:
-                file_obj.seek(0)
-                xls = pd.ExcelFile(file_obj)
-
-                for sheet_name in xls.sheet_names:
-                    try:
-                        df = xls.parse(sheet_name=sheet_name, dtype=str)
-                        if df is not None and len(df) > 0:
-                            df = df.dropna(axis=1, how='all')
-                            if len(df.columns) > 0 and len(df) > 0:
-                                sheets[sheet_name] = df
-                    except Exception:
-                        continue
-
+            if sheets:
                 return sheets
+        except Exception:
+            continue
 
-            except Exception as e3:
-                st.error(f"❌ Impossible de lire {filename}: {str(e3)}")
-                return {}
+    st.error(f"❌ Impossible de lire {filename}: format non reconnu.")
+    return {}
 
 def _extract_sheet_id(url):
     """Extrait l'identifiant du classeur depuis une URL Google Sheets."""

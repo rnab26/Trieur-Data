@@ -4,3 +4,4 @@ numpy
 xlsxwriter
 openpyxl
 lxml
+python-calamine

@@ -1,14 +1,20 @@
 # =============================================================
 # Trieur de Fichiers Leads
-# VERSION 4.0
+# VERSION 4.1
 #
-# Changements de cette version :
-#   [7] Menus de mapping ALIGNES au-dessus de chaque colonne + texte toujours
-#       lisible en entier : l'assignation est affichee en grille (lots de
-#       colonnes), chaque menu ayant directement en dessous l'apercu de SA
-#       colonne. Plus de menus ecrases quand il y a beaucoup de colonnes.
-#   [10] Design epure facon Apple : CSS global sobre (typographie systeme,
-#       coins arrondis, ombres discretes, accent bleu, plus d'air).
+# Changements de cette version (PERFORMANCE gros fichiers) :
+#   [PERF] Lecture Excel/Google Sheets avec le moteur "calamine" (~3x plus
+#          rapide et plus econome qu'openpyxl), avec repli automatique.
+#   [MEM]  Moins de copies memoire a l'import (suppression des .copy()
+#          inutiles) + liberation des DataFrames intermediaires apres la
+#          construction de la base.
+#   [ALERTE] Avertissement quand le volume total est eleve : sur
+#          l'hebergement gratuit (1 Go RAM), un tres gros fichier peut
+#          ralentir ou faire redemarrer l'app.
+#
+# Version 4.0 :
+#   [7] Menus de mapping ALIGNES au-dessus de chaque colonne + texte lisible.
+#   [10] Design epure facon Apple (CSS global sobre).
 #
 # Versions precedentes :
 #   [5] Filtres PRE-ENREGISTRES (onglet Filtrage) : nommer / appliquer /
@@ -72,11 +78,12 @@ from trieur.persistence import (
 # Reexports pour compatibilite (import pandas conserve pour la construction
 # de la base fusionnee dans l'interface ci-dessous).
 import io
+import gc
 import pandas as pd
 
 st.set_page_config(page_title="Trieur de Fichiers Leads", layout="wide")
 
-APP_VERSION = "4.0"
+APP_VERSION = "4.1"
 
 # -------------------------------------------------------------
 # [10] DESIGN EPURE FACON APPLE (CSS global, purement cosmetique)
@@ -327,7 +334,9 @@ with tab2:
                         continue
 
                     key = f.name + " :: " + sheet_name
-                    df = df.copy()
+                    # [MEM] pas de .copy() : le DataFrame vient d'etre lu et
+                    # nous appartient, on le complete en place (evite de
+                    # doubler la memoire sur les gros fichiers).
                     df["__source_file__"] = f.name
                     df["__source_sheet__"] = sheet_name
                     all_sheets[key] = df
@@ -354,7 +363,7 @@ with tab2:
                 update_progress(progress_bar, pct, f"Traitement Google Sheet {s_idx+1}/{total_sheet_items}")
                 if len(df) > 0:
                     key = "Google Sheets :: " + sheet_name
-                    df = df.copy()
+                    # [MEM] pas de .copy() (voir import Excel ci-dessus)
                     df["__source_file__"] = "Google Sheets"
                     df["__source_sheet__"] = sheet_name
                     all_sheets[key] = df
@@ -462,6 +471,18 @@ with tab2:
                        f"{n_excluded} exclu(s) · {total_files} fichier(s) traité(s).")
         else:
             st.success(f"✅ {total_files} fichier(s) importés, {total_sheets} onglet(s) détecté(s) au total.")
+
+        # [ALERTE v4.1] Prevenir quand le volume est eleve pour l'hebergement
+        # gratuit (1 Go RAM) : traitement lent ou redemarrage possible.
+        total_rows_all = sum(len(v) for v in active_sheets.values())
+        if total_rows_all > 150000:
+            st.warning(
+                f"⚠️ Volume important : **{total_rows_all:,} lignes** au total. "
+                "Sur l'hébergement gratuit (1 Go de RAM), le traitement peut être "
+                "lent, voire faire redémarrer l'application. En cas de souci : "
+                "importez moins de fichiers/onglets à la fois, excluez les onglets "
+                "inutiles ci-dessous, ou découpez le fichier."
+            )
 
         with st.expander("📋 Detail des onglets importes"):
             for k, df in all_sheets.items():
@@ -630,6 +651,10 @@ with tab2:
                 else:
                     final_df = pd.concat(rows, ignore_index=True)
                     final_df = final_df.dropna(how="all")
+                    # [MEM] liberer les DataFrames intermediaires : sur un gros
+                    # import ils doublent la memoire une fois la base construite.
+                    del rows
+                    gc.collect()
 
                     if len(final_df) == 0:
                         st.error("❌ La base fusionnée est vide après nettoyage.")

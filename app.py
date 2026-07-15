@@ -1,22 +1,20 @@
 # =============================================================
 # Trieur de Fichiers Leads
-# VERSION 4.5
+# VERSION 4.6
 #
-# Changements de cette version (corrections du mapping) :
-#   [7] Le MENU de la colonne maitre est desormais TOUT EN HAUT de chaque
-#       colonne (au-dessus du nom d'origine et des donnees), comme demande.
-#   [7] Valeurs des cellules A LA LIGNE (fini la troncature) : les styles sont
-#       mis EN LIGNE (style=...) car Streamlit retire les classes CSS du HTML
-#       injecte -> c'est pour ca que la correction v4.4 ne prenait pas.
-#   [SOURCE] La provenance (fichier + onglet) est affichee en clair au-dessus
-#       de chaque tableau. Surtout : pour un Google Sheet, le VRAI nom du
-#       classeur est recupere (en-tete Content-Disposition, ex "AZ") au lieu
-#       du generique "Google Sheets". La colonne "Source Data" de la base
-#       vaut donc "NomDuFichier (Onglet)" pour un Excel importe COMME pour un
-#       Google Sheet.
-#
-# Version 4.4 / 4.3 :
-#   [7] Tableau de mapping aligne (menus + apercu dans la meme grille).
+# Changements de cette version (STABILITE + simplicite) :
+#   [FIX CRASH] st.selectbox plantait sur Streamlit Cloud (recent) quand un
+#       en-tete de colonne etait numerique (ex 2024 lu comme un entier) : le
+#       label n'etait pas une chaine. Corrige avec str(src_col).
+#   [SIMPLIFICATION] Le tableau de mapping HTML "fait main" (fragile, cause de
+#       troncature et de crash) est remplace par : une rangee de menus EN HAUT
+#       + un apercu via le tableau natif st.dataframe (gere seul l'affichage et
+#       le retour a la ligne). Les colonnes d'origine "Fichier source" / "Onglet"
+#       apparaissent dans l'apercu.
+#   [SOURCE] La colonne "Source Data" (= "NomFichier (Onglet)") est desormais
+#       TOUJOURS creee a la construction de la base, meme si elle n'est pas dans
+#       la liste des colonnes maitres. Le vrai nom du classeur Google (en-tete
+#       Content-Disposition) est utilise (v4.5).
 #
 # Version 4.2 :
 #   [7 - retour visuel] Presentation compacte facon tableau (rangee de menus +
@@ -105,7 +103,7 @@ import pandas as pd
 
 st.set_page_config(page_title="Trieur de Fichiers Leads", layout="wide")
 
-APP_VERSION = "4.5"
+APP_VERSION = "4.6"
 
 # -------------------------------------------------------------
 # [10] DESIGN EPURE FACON APPLE (CSS global, purement cosmetique)
@@ -593,87 +591,59 @@ with tab2:
             # Provenance de l'onglet (affichee en clair : fichier + onglet)
             source_file = sheet_df["__source_file__"].iloc[0] if ("__source_file__" in sheet_df.columns and len(sheet_df)) else sheet_key
             source_sheet = sheet_df["__source_sheet__"].iloc[0] if ("__source_sheet__" in sheet_df.columns and len(sheet_df)) else ""
-            st.markdown(
-                f"<div style='margin:2px 0 6px 0;font-size:0.85rem;color:#444;'>"
-                f"📁 <b>Fichier :</b> {html.escape(str(source_file))} &nbsp;·&nbsp; "
-                f"📄 <b>Onglet :</b> {html.escape(str(source_sheet))}"
-                f"</div>", unsafe_allow_html=True,
-            )
-            st.write("**Menu de la colonne maître EN HAUT, aperçu des données en dessous, colonne par colonne.**")
-
-            preview_df = sheet_df.head(5).copy()
+            st.caption(f"📁 Fichier : **{source_file}**  ·  📄 Onglet : **{source_sheet}**")
+            st.write("**Choisissez la colonne maître au-dessus de chaque colonne, puis vérifiez l'aperçu.**")
 
             current_mapping = st.session_state.sheet_mappings[sheet_key]
-
             updated_mapping = {}
 
-            # Styles INLINE (les classes CSS sont retirees par Streamlit ; le
-            # style en ligne, lui, est conserve -> garantit le retour a la ligne).
-            HEAD_STYLE = ("font-weight:600;font-size:0.8rem;color:#1d1d1f;"
-                          "padding:2px 6px;border-bottom:2px solid #bcd4ff;"
-                          "white-space:normal;overflow-wrap:anywhere;word-break:break-word;")
-            CELL_STYLE = ("font-size:0.8rem;color:#333;padding:3px 6px;"
-                          "border-bottom:1px solid #eee;line-height:1.25;"
-                          "white-space:normal;overflow-wrap:anywhere;word-break:break-word;")
+            # Rangee de menus (un par colonne source) — menus EN HAUT du tableau.
+            menu_cols = st.columns(len(real_columns))
+            for idx, src_col in enumerate(real_columns):
+                with menu_cols[idx]:
+                    current = current_mapping.get(src_col, "(non assigne)")
+                    widget_key = f"map_{sheet_key}_{src_col}"
 
-            # [7] Un seul tableau, chaque ligne sur la MEME grille st.columns ->
-            # memes largeurs, alignement parfait. Ordre demande :
-            #   1) MENU (selection colonne maitre) tout en haut
-            #   2) nom de la colonne d'origine (en-tete de la donnee)
-            #   3) lignes d'apercu (valeurs A LA LIGNE, non coupees)
-            n = len(real_columns)
-            with st.container(key=f"maptbl-{sheet_idx}"):
-                # 1) Ligne des MENUS (en haut, distincts)
-                menu_cols = st.columns(n)
-                for idx, src_col in enumerate(real_columns):
-                    with menu_cols[idx]:
-                        current = current_mapping.get(src_col, "(non assigne)")
-                        widget_key = f"map_{sheet_key}_{src_col}"
+                    if widget_key in st.session_state:
+                        current = st.session_state[widget_key]
+                    else:
+                        st.session_state[widget_key] = current
 
-                        if widget_key in st.session_state:
-                            current = st.session_state[widget_key]
-                        else:
-                            st.session_state[widget_key] = current
+                    already_used_in_current = [updated_mapping.get(c, "") for c in real_columns if c != src_col and updated_mapping.get(c) != "(non assigne)"]
+                    available_options = ["(non assigne)"] + [m for m in st.session_state.master_columns if m not in already_used_in_current]
 
-                        already_used_in_current = [updated_mapping.get(c, "") for c in real_columns if c != src_col and updated_mapping.get(c) != "(non assigne)"]
-                        available_options = ["(non assigne)"] + [m for m in st.session_state.master_columns if m not in already_used_in_current]
+                    if current not in available_options:
+                        current = "(non assigne)"
+                        st.session_state[widget_key] = current
 
-                        if current not in available_options:
-                            current = "(non assigne)"
-                            st.session_state[widget_key] = current
+                    try:
+                        idx_val = available_options.index(current)
+                    except ValueError:
+                        idx_val = 0
 
-                        try:
-                            idx_val = available_options.index(current)
-                        except ValueError:
-                            idx_val = 0
-
-                        choice = st.selectbox(
-                            src_col,
-                            options=available_options,
-                            index=idx_val,
-                            key=widget_key,
-                            label_visibility="collapsed",
-                        )
-                        updated_mapping[src_col] = choice
-                        if choice != "(non assigne)":
-                            any_assigned = True
-
-                # 2) Ligne des noms de colonnes d'origine
-                name_cols = st.columns(n)
-                for idx, src_col in enumerate(real_columns):
-                    with name_cols[idx]:
-                        st.markdown(f"<div style='{HEAD_STYLE}'>{html.escape(str(src_col))}</div>", unsafe_allow_html=True)
-
-                # 3) Lignes d'apercu des donnees
-                for _, prow in preview_df.iterrows():
-                    data_cols = st.columns(n)
-                    for idx, src_col in enumerate(real_columns):
-                        with data_cols[idx]:
-                            v = prow[src_col]
-                            txt = "" if pd.isna(v) else html.escape(str(v))
-                            st.markdown(f"<div style='{CELL_STYLE}'>{txt}</div>", unsafe_allow_html=True)
+                    # str(src_col) : un en-tete numerique (ex "2024") est lu comme
+                    # un entier -> Streamlit recent plante si le label n'est pas
+                    # une chaine. On force donc le type.
+                    choice = st.selectbox(
+                        str(src_col),
+                        options=available_options,
+                        index=idx_val,
+                        key=widget_key,
+                        label_visibility="visible",
+                    )
+                    updated_mapping[src_col] = choice
+                    if choice != "(non assigne)":
+                        any_assigned = True
 
             st.session_state.sheet_mappings[sheet_key] = updated_mapping
+
+            # Apercu (tableau natif Streamlit) : gere seul l'affichage et le
+            # retour a la ligne. On renomme les colonnes d'origine pour qu'elles
+            # soient lisibles (au lieu de __source_file__ / __source_sheet__).
+            preview_df = sheet_df.head(7).rename(
+                columns={"__source_file__": "Fichier source", "__source_sheet__": "Onglet"}
+            )
+            st.dataframe(preview_df, width="stretch")
             st.markdown("---")
 
         if not any_assigned:
@@ -707,6 +677,11 @@ with tab2:
                                 is_empty = combined.isna() | (combined.astype(str).str.strip() == "")
                                 combined = combined.where(~is_empty, sheet_df[extra_col])
                             sub[master_col] = combined
+                    # [SOURCE] Garantir la colonne d'origine meme si "Source Data"
+                    # n'est pas dans la liste des colonnes maitres : chaque ligne
+                    # doit toujours savoir de quel fichier/onglet elle vient.
+                    if "Source Data" not in sub.columns:
+                        sub["Source Data"] = f"{source_file} ({source_sheet})"
                     rows.append(sub)
                     total_merged += len(sub)
 

@@ -1,8 +1,17 @@
 # =============================================================
 # Trieur de Fichiers Leads
-# VERSION 4.1
+# VERSION 4.2
 #
-# Changements de cette version (PERFORMANCE gros fichiers) :
+# Changements de cette version :
+#   [7 - retour visuel] Le mapping revient a une presentation COMPACTE facon
+#       tableau : une seule rangee de menus (un par colonne), dans le meme
+#       ordre que le tableau d'apercu affiche juste en dessous. Plus lisible
+#       et beaucoup moins haut que la grille "menu + apercu par colonne" de la
+#       v4.0. Le CSS empeche la troncature des noms de colonnes.
+#   [ALERTE] Seuil d'avertissement volume releve a 600 000 lignes et texte
+#       corrige (le compte dispose de 2,7 Go de RAM, pas 1 Go).
+#
+# Version 4.1 (PERFORMANCE gros fichiers) :
 #   [PERF] Lecture Excel/Google Sheets avec le moteur "calamine" (~3x plus
 #          rapide et plus econome qu'openpyxl), avec repli automatique.
 #   [MEM]  Moins de copies memoire a l'import (suppression des .copy()
@@ -83,7 +92,7 @@ import pandas as pd
 
 st.set_page_config(page_title="Trieur de Fichiers Leads", layout="wide")
 
-APP_VERSION = "4.1"
+APP_VERSION = "4.2"
 
 # -------------------------------------------------------------
 # [10] DESIGN EPURE FACON APPLE (CSS global, purement cosmetique)
@@ -146,17 +155,13 @@ st.markdown(
           border: 1px solid rgba(0,0,0,0.07);
       }
 
-      /* [7] Nom de colonne source : toujours affiche en ENTIER, jamais tronque */
-      .src-col-name {
-          font-weight: 600;
-          font-size: 0.86rem;
-          line-height: 1.2;
-          white-space: normal;
+      /* [7] Libelles de menus : affiches en ENTIER, jamais tronques, meme sur
+         des colonnes etroites (utile pour la rangee de mapping). */
+      .stSelectbox label, .stSelectbox label p {
+          white-space: normal !important;
           overflow-wrap: anywhere;
           word-break: break-word;
-          min-height: 2.4em;
-          margin-bottom: 0.25rem;
-          color: #1d1d1f;
+          line-height: 1.15;
       }
     </style>
     """,
@@ -472,16 +477,18 @@ with tab2:
         else:
             st.success(f"✅ {total_files} fichier(s) importés, {total_sheets} onglet(s) détecté(s) au total.")
 
-        # [ALERTE v4.1] Prevenir quand le volume est eleve pour l'hebergement
-        # gratuit (1 Go RAM) : traitement lent ou redemarrage possible.
+        # [ALERTE] Prevenir seulement pour un volume vraiment eleve. Le compte
+        # dispose de 2,7 Go de RAM ; mesure reelle : ~540 Mo pour 257 000
+        # lignes. Le seuil est donc place haut (600 000 lignes) pour ne pas
+        # alerter inutilement.
         total_rows_all = sum(len(v) for v in active_sheets.values())
-        if total_rows_all > 150000:
+        if total_rows_all > 600000:
             st.warning(
                 f"⚠️ Volume important : **{total_rows_all:,} lignes** au total. "
-                "Sur l'hébergement gratuit (1 Go de RAM), le traitement peut être "
-                "lent, voire faire redémarrer l'application. En cas de souci : "
-                "importez moins de fichiers/onglets à la fois, excluez les onglets "
-                "inutiles ci-dessous, ou découpez le fichier."
+                "Ton hébergement dispose de 2,7 Go de RAM ; à ce niveau le "
+                "traitement peut devenir lent ou instable. En cas de souci : "
+                "importe moins de fichiers/onglets à la fois, exclus les onglets "
+                "inutiles ci-dessous, ou découpe le fichier."
             )
 
         with st.expander("📋 Detail des onglets importes"):
@@ -549,67 +556,55 @@ with tab2:
                     st.success(f"✅ {matched_count}/{total_cols} colonnes assignées")
                     st.rerun()
 
-            st.write("**Assignez chaque colonne : le menu est directement au-dessus de l'apercu de sa colonne.**")
+            st.write("**Choisissez la colonne maître pour chaque colonne (une rangée de menus, alignée sur le tableau ci-dessous) :**")
 
-            preview_df = sheet_df.head(5).copy()
+            preview_df = sheet_df.head(7).copy()
 
             current_mapping = st.session_state.sheet_mappings[sheet_key]
 
             updated_mapping = {}
 
-            # [7] Grille par lots : menu + apercu de CHAQUE colonne alignes.
-            # On limite a 4 colonnes par rangee pour que le nom de colonne et
-            # l'option choisie restent lisibles en entier meme sur des fichiers
-            # a beaucoup de colonnes.
-            PER_ROW = 4
-            for start in range(0, len(real_columns), PER_ROW):
-                chunk = real_columns[start:start + PER_ROW]
-                cells = st.columns(len(chunk))
-                for i, src_col in enumerate(chunk):
-                    with cells[i]:
-                        current = current_mapping.get(src_col, "(non assigne)")
-                        widget_key = f"map_{sheet_key}_{src_col}"
+            # [7 - compact] Une seule rangee de menus (un par colonne source),
+            # dans le MEME ordre que le tableau d'apercu affiche juste dessous.
+            # Presentation "tableau" : compacte, tout sur une ligne. Le CSS
+            # empeche la troncature du nom de colonne dans le libelle du menu.
+            cols_display = st.columns(len(real_columns))
+            for idx, src_col in enumerate(real_columns):
+                with cols_display[idx]:
+                    current = current_mapping.get(src_col, "(non assigne)")
+                    widget_key = f"map_{sheet_key}_{src_col}"
 
-                        if widget_key in st.session_state:
-                            current = st.session_state[widget_key]
-                        else:
-                            st.session_state[widget_key] = current
+                    if widget_key in st.session_state:
+                        current = st.session_state[widget_key]
+                    else:
+                        st.session_state[widget_key] = current
 
-                        already_used_in_current = [updated_mapping.get(c, "") for c in real_columns if c != src_col and updated_mapping.get(c) != "(non assigne)"]
-                        available_options = ["(non assigne)"] + [m for m in st.session_state.master_columns if m not in already_used_in_current]
+                    already_used_in_current = [updated_mapping.get(c, "") for c in real_columns if c != src_col and updated_mapping.get(c) != "(non assigne)"]
+                    available_options = ["(non assigne)"] + [m for m in st.session_state.master_columns if m not in already_used_in_current]
 
-                        if current not in available_options:
-                            current = "(non assigne)"
-                            st.session_state[widget_key] = current
+                    if current not in available_options:
+                        current = "(non assigne)"
+                        st.session_state[widget_key] = current
 
-                        try:
-                            idx_val = available_options.index(current)
-                        except ValueError:
-                            idx_val = 0
+                    try:
+                        idx_val = available_options.index(current)
+                    except ValueError:
+                        idx_val = 0
 
-                        # Nom de la colonne source, affiche EN ENTIER (CSS anti-troncature)
-                        st.markdown(f"<div class='src-col-name'>{src_col}</div>", unsafe_allow_html=True)
-
-                        choice = st.selectbox(
-                            src_col,
-                            options=available_options,
-                            index=idx_val,
-                            key=widget_key,
-                            label_visibility="collapsed",
-                        )
-                        updated_mapping[src_col] = choice
-                        if choice != "(non assigne)":
-                            any_assigned = True
-
-                        # Apercu de CETTE colonne, aligne juste en dessous du menu
-                        st.dataframe(
-                            preview_df[[src_col]],
-                            width="stretch",
-                            height=180,
-                            hide_index=True,
-                        )
+                    choice = st.selectbox(
+                        src_col,
+                        options=available_options,
+                        index=idx_val,
+                        key=widget_key,
+                        label_visibility="visible",
+                    )
+                    updated_mapping[src_col] = choice
+                    if choice != "(non assigne)":
+                        any_assigned = True
 
             st.session_state.sheet_mappings[sheet_key] = updated_mapping
+            # Tableau d'apercu complet (toutes les colonnes sur une meme grille)
+            st.dataframe(preview_df, width="stretch")
             st.markdown("---")
 
         if not any_assigned:

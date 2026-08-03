@@ -111,6 +111,7 @@ from trieur.io_excel import (
     read_google_sheets_all_sheets,
     is_google_sheet_url,
 )
+from trieur.io_pdf import read_pdf_sepa
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
 from trieur.persistence import (
     MASTER_CONFIG_PATH,
@@ -333,8 +334,8 @@ with tab1:
 with tab2:
     st.subheader("Importer vos fichiers Excel, CSV ou Google Sheets")
     files = st.file_uploader(
-        "Deposez un ou plusieurs fichiers Excel ou CSV",
-        type=["xlsx", "xls", "csv"], accept_multiple_files=True,
+        "Deposez un ou plusieurs fichiers Excel, CSV ou PDF",
+        type=["xlsx", "xls", "csv", "pdf"], accept_multiple_files=True,
     )
     st.caption("💡 Pour de tres gros volumes (plusieurs millions de lignes), le "
                "**CSV** est bien plus rapide et leger que le .xlsx.")
@@ -400,6 +401,9 @@ with tab2:
                 # [GROS FICHIERS] CSV lu directement (rapide/leger) ; sinon Excel.
                 if f.name.lower().endswith(".csv"):
                     sheets, inferred = read_csv_file(f, f.name)
+                elif f.name.lower().endswith(".pdf"):
+                    # [PDF] Prélèvements SEPA -> une ligne par prélèvement
+                    sheets, inferred = read_pdf_sepa(f, f.name)
                 else:
                     sheets = read_excel_all_sheets_from_file(f, f.name)
                     # [2] Onglets sans ligne d'en-tete : relecture + noms deduits

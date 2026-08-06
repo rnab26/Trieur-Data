@@ -393,6 +393,43 @@ def clean_iban(value):
     return re.sub(r"\s+", "", str(value))
 
 
+# Detection par le CONTENU (comme pour le telephone) : le nom de la colonne
+# maitre choisi par l'utilisateur ("Référence", "Compte"...) ne contient pas
+# toujours un mot-cle reconnaissable, alors que la FORME d'un IBAN (2 lettres
+# + 2 chiffres + jusqu'a 30 caracteres alphanumeriques, 15 a 34 caracteres
+# au total une fois les espaces retires) est stable quel que soit le libelle.
+_IBAN_SHAPE_RE = re.compile(r"^[A-Za-z]{2}\d{2}[A-Za-z0-9]{11,30}$")
+
+
+def looks_like_iban(value):
+    """Vrai si UNE valeur a la forme d'un IBAN, espaces ignores."""
+    if pd.isna(value):
+        return False
+    s = re.sub(r"\s+", "", str(value)).upper()
+    return bool(_IBAN_SHAPE_RE.match(s))
+
+
+def detect_iban_column(series, sample=200):
+    """Analyse un ECHANTILLON du contenu d'une colonne (independamment de
+    son nom) et dit si elle ressemble a une colonne d'IBAN.
+
+    Pas de seuil minimum absolu (contrairement au telephone) : la FORME
+    d'un IBAN est deja tres specifique (2 lettres + 2 chiffres + 15-34
+    caracteres), donc un petit fichier de 1 ou 2 lignes toutes conformes
+    doit etre detecte, pas ignore faute d'echantillon assez grand."""
+    try:
+        head = series.head(sample * 5)
+        vals = head.dropna().astype(str)
+    except Exception:
+        return False
+    vals = vals[vals.str.strip() != ""]
+    if len(vals) == 0:
+        return False
+    vals = vals.head(sample)
+    matches = sum(1 for v in vals if looks_like_iban(v))
+    return matches / len(vals) >= 0.8
+
+
 def _build_normalized_synonyms(master_columns):
     """Construit les synonymes normalisés par colonne maître (inclut le nom maître).
 

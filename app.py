@@ -105,6 +105,7 @@ from trieur.matching import (
     auto_assign_single_sheet,
     is_iban_master,
     clean_iban,
+    detect_iban_column,
 )
 from trieur.filters import normalize_cp, cp_matches_prefix
 from trieur.io_excel import (
@@ -787,7 +788,10 @@ with tab2:
 
                             # [1] IBAN / reference bancaire : plus d'espaces internes,
                             # quel que soit le fichier source (PDF, Excel, CSV...).
-                            if is_iban_master(master_col):
+                            # Detection par le nom ET par le contenu (forme d'un IBAN) :
+                            # le nom seul rate les colonnes maitres renommees ("Référence"
+                            # au lieu de "Référence bancaire", "Compte"...).
+                            if is_iban_master(master_col) or detect_iban_column(sub[master_col]):
                                 sub[master_col] = sub[master_col].map(clean_iban)
                         rows.append(sub)
                         total_merged += len(sub)

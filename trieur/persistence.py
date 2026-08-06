@@ -72,3 +72,43 @@ def save_saved_filters(filters):
         return True
     except Exception:
         return False
+
+
+# -------------------------------------------------------------
+# [11] PRESETS D'EXPORT (ordre + selection des colonnes)
+# Chaque preset = {"name", "included": [...], "excluded": [...]}
+# -------------------------------------------------------------
+EXPORT_PRESETS_PATH = "export_presets.json"
+
+
+def _is_valid_export_preset(p):
+    return bool(
+        isinstance(p, dict)
+        and isinstance(p.get("name"), str) and p["name"].strip()
+        and isinstance(p.get("included"), list)
+        and isinstance(p.get("excluded"), list)
+    )
+
+
+def load_export_presets():
+    """Charge la liste des presets d'export (liste vide si absente/invalide)."""
+    try:
+        if os.path.exists(EXPORT_PRESETS_PATH):
+            with open(EXPORT_PRESETS_PATH, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, list):
+                return [p for p in data if _is_valid_export_preset(p)]
+    except Exception:
+        pass
+    return []
+
+
+def save_export_presets(presets):
+    """Enregistre la liste des presets d'export. Retourne True si succes."""
+    try:
+        clean = [p for p in presets if _is_valid_export_preset(p)]
+        with open(EXPORT_PRESETS_PATH, "w", encoding="utf-8") as fh:
+            json.dump(clean, fh, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False

@@ -39,3 +39,39 @@ def test_is_valid_filter():
     assert P._is_valid_filter({"name": "a", "column": "CP", "kind": "x", "values": []}) is False
     assert P._is_valid_filter({"name": "", "column": "CP", "kind": "valeurs", "values": []}) is False
     assert P._is_valid_filter({}) is False
+
+
+def test_load_export_presets_absent(tmp_path, monkeypatch):
+    monkeypatch.setattr(P, "EXPORT_PRESETS_PATH", str(tmp_path / "none.json"))
+    assert P.load_export_presets() == []
+
+
+def test_save_puis_load_export_presets(tmp_path, monkeypatch):
+    path = str(tmp_path / "export_presets.json")
+    monkeypatch.setattr(P, "EXPORT_PRESETS_PATH", path)
+    presets = [
+        {"name": "Rapport banque", "included": ["NOM", "Référence bancaire"], "excluded": ["EMAIL"]},
+    ]
+    assert P.save_export_presets(presets) is True
+    assert P.load_export_presets() == presets
+
+
+def test_les_presets_export_invalides_sont_ignores(tmp_path, monkeypatch):
+    path = str(tmp_path / "export_presets.json")
+    monkeypatch.setattr(P, "EXPORT_PRESETS_PATH", path)
+    mixte = [
+        {"name": "OK", "included": ["NOM"], "excluded": []},
+        {"name": "", "included": ["NOM"], "excluded": []},          # nom vide
+        {"name": "X", "included": "pasuneliste", "excluded": []},   # included non liste
+        "pas un dict",
+    ]
+    P.save_export_presets(mixte)
+    rel = P.load_export_presets()
+    assert len(rel) == 1
+    assert rel[0]["name"] == "OK"
+
+
+def test_is_valid_export_preset():
+    assert P._is_valid_export_preset({"name": "a", "included": [], "excluded": []}) is True
+    assert P._is_valid_export_preset({"name": "", "included": [], "excluded": []}) is False
+    assert P._is_valid_export_preset({}) is False

@@ -800,7 +800,7 @@ with tab2:
                         for _k in ("_export_csv", "_export_xlsx"):
                             st.session_state.pop(_k, None)
                         st.success(f"✅ Base construite : {len(final_df)} lignes fusionnées.")
-                        st.dataframe(final_df.head(50), width="stretch")
+                        st.dataframe(final_df.head(50), use_container_width=True)
     else:
         st.info("ℹ️ Importe un fichier Excel ou colle une URL Google Sheets pour continuer.")
 
@@ -884,7 +884,7 @@ with tab3:
 
         remaining_lines = len(filtered_df)
         st.write(f"Resultat filtre : **{remaining_lines}** lignes conservees sur **{total_lines}** au total")
-        st.dataframe(filtered_df.head(50), width="stretch")
+        st.dataframe(filtered_df.head(50), use_container_width=True)
 
         # [PERF] Le comptage des doublons scanne toute la base : on ne le fait
         # QUE sur demande (sinon il ralentirait chaque interaction).
@@ -924,7 +924,7 @@ with tab3:
                     placeholder="Nom du filtre (ex: Sud-Ouest)",
                 )
             with col_btn:
-                if st.button("💾 Enregistrer", key="tab3_save_filter", width="stretch"):
+                if st.button("💾 Enregistrer", key="tab3_save_filter", use_container_width=True):
                     nm = new_filter_name.strip()
                     if not current_kind:
                         st.warning("⚠️ Aucun filtre a enregistrer (choisissez colonne + valeurs).")
@@ -958,17 +958,17 @@ with tab3:
                         "nom", value=f["name"], key=f"tab3_rn_{i}", label_visibility="collapsed",
                     )
                 with c2:
-                    if st.button("Appliquer", key=f"tab3_apply_{i}", width="stretch"):
+                    if st.button("Appliquer", key=f"tab3_apply_{i}", use_container_width=True):
                         st.session_state["_apply_filter"] = f
                         st.rerun()
                 with c3:
-                    if st.button("Renommer", key=f"tab3_ren_{i}", width="stretch"):
+                    if st.button("Renommer", key=f"tab3_ren_{i}", use_container_width=True):
                         if rn.strip():
                             st.session_state.saved_filters[i]["name"] = rn.strip()
                             save_saved_filters(st.session_state.saved_filters)
                             st.rerun()
                 with c4:
-                    if st.button("Supprimer", key=f"tab3_del_{i}", width="stretch"):
+                    if st.button("Supprimer", key=f"tab3_del_{i}", use_container_width=True):
                         st.session_state.saved_filters.pop(i)
                         save_saved_filters(st.session_state.saved_filters)
                         st.rerun()

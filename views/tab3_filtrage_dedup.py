@@ -143,7 +143,6 @@ def render():
 
             group_ids = st.session_state["_filter_group_ids"]
             all_groups = []
-            groups_to_remove = []
             for gi, crit_ids in enumerate(group_ids):
                 if gi > 0:
                     st.markdown("<div style='text-align:center; font-weight:600; "
@@ -164,19 +163,18 @@ def render():
                             st.rerun()
 
                     if crit_ids_to_remove:
+                        # [FIX] st.rerun() arrete l'execution IMMEDIATEMENT : le nettoyage
+                        # d'un groupe devenu vide doit se faire ICI, pas apres la boucle
+                        # (ce code-la ne serait jamais atteint -> le groupe vide restait
+                        # visible indefiniment, meme apres suppression de son dernier critere).
                         for cid in crit_ids_to_remove:
                             crit_ids.remove(cid)
                             _forget_criterion(cid)
                         if not crit_ids and len(group_ids) > 1:
-                            groups_to_remove.append(gi)
+                            group_ids.pop(gi)
                         st.rerun()
 
                     all_groups.append(group_criteria)
-
-            if groups_to_remove:
-                for gi in sorted(groups_to_remove, reverse=True):
-                    group_ids.pop(gi)
-                st.rerun()
 
             if st.button("➕ Ajouter un groupe (OU)"):
                 group_ids.append([str(uuid.uuid4())])

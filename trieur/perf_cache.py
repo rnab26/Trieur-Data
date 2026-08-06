@@ -44,7 +44,9 @@ def input_signature(
     upload_signatures: Iterable[Tuple[str, int, str]],
     google_url: str,
 ) -> Tuple:
-    return tuple(upload_signatures) + (("__google__", normalize_google_url(google_url)),)
+    # Trier par (nom, hash) pour que l'ordre des fichiers n'affecte pas la signature.
+    sorted_sigs = tuple(sorted(upload_signatures, key=lambda s: (s[0], s[2])))
+    return sorted_sigs + (("__google__", normalize_google_url(google_url)),)
 
 
 def serialize_sheets_for_build(active_sheets: Dict[str, pd.DataFrame]) -> Tuple[SerializedSheet, ...]:
@@ -82,7 +84,7 @@ def rebuild_key(
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-@st.cache_data(show_spinner=False, max_entries=200)
+@st.cache_data(show_spinner=False, max_entries=200, hash_funcs={bytes: lambda _: ""})
 def _parse_uploaded_file_by_hash(file_name: str, file_hash: str, file_bytes: bytes) -> Tuple[Dict[str, pd.DataFrame], List[str]]:
     up = _MemoryUpload(file_bytes, file_name)
     lower = str(file_name or "").lower()

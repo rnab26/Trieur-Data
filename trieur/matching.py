@@ -371,6 +371,28 @@ def identify_phone_masters(master_columns):
     return mobile_master, fixe_master
 
 
+# --- IBAN / reference bancaire : nettoyage des espaces internes -------
+# Meme logique que pour le telephone : detection par le SENS du nom de la
+# colonne maitre (pas un libelle fige), pour marcher meme si l'utilisateur
+# renomme "Référence bancaire" en "IBAN" ou l'inverse.
+_IBAN_HINTS = ("iban", "referencebancaire")
+
+
+def is_iban_master(master_name):
+    """Vrai si le nom de cette colonne maitre designe un IBAN/reference
+    bancaire (par le sens du nom)."""
+    n = normalize_column_name(master_name)
+    return any(h in n for h in _IBAN_HINTS)
+
+
+def clean_iban(value):
+    """Supprime tous les espaces internes d'un IBAN
+    ('FR76 1234 ... 032' -> 'FR761234...032'). Laisse tel quel si vide/NaN."""
+    if pd.isna(value):
+        return value
+    return re.sub(r"\s+", "", str(value))
+
+
 def _build_normalized_synonyms(master_columns):
     """Construit les synonymes normalisés par colonne maître (inclut le nom maître).
 

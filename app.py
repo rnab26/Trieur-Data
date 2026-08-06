@@ -103,6 +103,8 @@ from trieur.matching import (
     auto_assign_columns_fast,
     find_best_master_col,
     auto_assign_single_sheet,
+    is_iban_master,
+    clean_iban,
 )
 from trieur.filters import normalize_cp, cp_matches_prefix
 from trieur.io_excel import (
@@ -747,6 +749,10 @@ with tab2:
                 if st.button("✅ Construire la base de travail fusionnee", type="primary"):
                     rows = []
                     total_merged = 0
+                    # [4] Colonnes maitres reellement mappees sur AU MOINS un
+                    # fichier fusionne : les autres (jamais assignees, donc
+                    # vides sur toute la base) seront retirees de l'export final.
+                    used_master_cols = set()
 
                     # [3] on ne fusionne QUE les onglets coches
                     for sheet_key, sheet_df in active_sheets.items():
@@ -764,17 +770,25 @@ with tab2:
                             src_cols_for_master = [s for s, m in mapping.items() if m == master_col and s in sheet_df.columns]
                             if master_col == "Source Data":
                                 sub[master_col] = f"{source_file} ({source_sheet})"
+                                used_master_cols.add(master_col)
                             elif not src_cols_for_master:
                                 sub[master_col] = None
                             elif len(src_cols_for_master) == 1:
                                 # [MEM] source unique : pas de .copy() (concat copiera)
                                 sub[master_col] = sheet_df[src_cols_for_master[0]]
+                                used_master_cols.add(master_col)
                             else:
                                 combined = sheet_df[src_cols_for_master[0]].copy()
                                 for extra_col in src_cols_for_master[1:]:
                                     is_empty = combined.isna() | (combined.astype(str).str.strip() == "")
                                     combined = combined.where(~is_empty, sheet_df[extra_col])
                                 sub[master_col] = combined
+                                used_master_cols.add(master_col)
+
+                            # [1] IBAN / reference bancaire : plus d'espaces internes,
+                            # quel que soit le fichier source (PDF, Excel, CSV...).
+                            if is_iban_master(master_col):
+                                sub[master_col] = sub[master_col].map(clean_iban)
                         rows.append(sub)
                         total_merged += len(sub)
 
@@ -783,6 +797,9 @@ with tab2:
                     else:
                         final_df = pd.concat(rows, ignore_index=True)
                         final_df = final_df.dropna(how="all")
+                        # [4] Retire les colonnes maitres jamais assignees sur
+                        # aucun fichier fusionne (colonnes "en brut" 100% vides).
+                        final_df = final_df[[c for c in final_df.columns if c in used_master_cols]]
                         # [MEM] liberer les DataFrames intermediaires : sur un gros
                         # import ils doublent la memoire une fois la base construite.
                         del rows
@@ -1023,6 +1040,33 @@ with tab4:
                 st.error("❌ Impossible d'exporter : aucune donnée à exporter après filtrage.")
             else:
                 st.write(f"{len(export_df)} lignes pretes a l'export.")
+
+                # [10] Ordre et selection des colonnes a l'export, sans toucher
+                # au mapping : reprend l'ordre de la base par defaut, modifiable
+                # (retirer une colonne pour l'exclure, la reselectionner pour la
+                # remettre a la fin -> nouvel ordre).
+                current_cols = list(export_df.columns)
+                if "export_col_order" not in st.session_state or any(
+                    c not in current_cols for c in st.session_state["export_col_order"]
+                ):
+                    st.session_state["export_col_order"] = current_cols
+
+                with st.expander("🔀 Ordre et selection des colonnes a l'export", expanded=False):
+                    st.caption(
+                        "Retire une colonne pour l'exclure de l'export, puis "
+                        "reselectionne-la pour la remettre a la fin : l'ordre de "
+                        "selection devient l'ordre des colonnes dans le fichier exporte."
+                    )
+                    selected_col_order = st.multiselect(
+                        "Colonnes incluses (dans l'ordre choisi)",
+                        options=current_cols,
+                        key="export_col_order",
+                    )
+
+                if selected_col_order:
+                    export_df = export_df[selected_col_order]
+                else:
+                    st.warning("⚠️ Aucune colonne sélectionnée : toutes les colonnes sont incluses par défaut.")
 
                 # [9] Nom du fichier personnalisable
                 raw_name = st.text_input(

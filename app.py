@@ -9,6 +9,11 @@
 #   [EXPORT] Presets d'export nommes (ordre + selection des colonnes),
 #       persistance dans export_presets.json, meme logique que les filtres
 #       pre-enregistres.
+#   [MEMOIRE MAPPING] Le mapping confirme au moment de "Construire la base"
+#       est memorise par FORME de fichier (empreinte des noms de colonnes,
+#       independante de l'ordre/casse) dans remembered_mappings.json, et
+#       reapplique automatiquement au prochain fichier de meme structure
+#       (utile en re-import mobile repete).
 #
 # Version 5.0  (GROS FICHIERS : plusieurs millions de lignes sans lenteur)
 #
@@ -84,6 +89,7 @@
 #           trieur/io_pdf.py       -> lecture PDF (SEPA)
 #           trieur/export.py       -> export CSV / Excel + nom de fichier
 #           trieur/persistence.py  -> colonnes maitres + filtres + presets export
+#                                      + mapping memorise par forme de fichier
 #           views/tab1_colonnes_maitres.py -> onglet 1 (colonnes maitres)
 #           views/tab2_import_mapping.py   -> onglet 2 (import + mapping)
 #           views/tab3_filtrage_dedup.py   -> onglet 3 (filtrage + dedup)
@@ -104,7 +110,12 @@
 
 import streamlit as st
 
-from trieur.persistence import load_export_presets, load_master_columns, load_saved_filters
+from trieur.persistence import (
+    load_export_presets,
+    load_master_columns,
+    load_remembered_mappings,
+    load_saved_filters,
+)
 
 import views.tab1_colonnes_maitres as view_tab1
 import views.tab2_import_mapping as view_tab2
@@ -265,6 +276,9 @@ if "saved_filters" not in st.session_state:
 # [11] Presets d'export (ordre/selection des colonnes, charges depuis export_presets.json)
 if "export_presets" not in st.session_state:
     st.session_state.export_presets = load_export_presets()
+# [12] Mapping memorise par forme de fichier (charges depuis remembered_mappings.json)
+if "remembered_mappings" not in st.session_state:
+    st.session_state.remembered_mappings = load_remembered_mappings()
 
 
 st.title("Trieur de Fichiers Leads")

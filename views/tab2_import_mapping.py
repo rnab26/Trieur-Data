@@ -9,12 +9,15 @@ import streamlit as st
 
 from trieur.matching import (
     apply_header_inference_excel,
-    auto_assign_single_sheet,
+    auto_assign_single_sheet_with_memory,
     clean_iban,
+    column_fingerprint,
     detect_iban_column,
     iban_is_valid,
     is_iban_master,
+    mapping_to_remembered,
 )
+from trieur.persistence import save_remembered_mappings
 from trieur.io_excel import (
     read_excel_all_sheets_from_file,
     read_csv_file,
@@ -22,6 +25,19 @@ from trieur.io_excel import (
     is_google_sheet_url,
 )
 from trieur.io_pdf import read_pdf_sepa
+
+
+def _auto_assign(sheet_key, sheet_df):
+    """Auto-assignation d'un onglet, en priorisant le mapping MEMORISE pour
+    cette forme de fichier (cf [12] dans trieur/matching.py) si elle a deja
+    ete rencontree et confirmee."""
+    real_cols = [c for c in sheet_df.columns if c not in ["__source_file__", "__source_sheet__"]]
+    fp = column_fingerprint(real_cols)
+    remembered_for_shape = st.session_state.remembered_mappings.get(fp)
+    return auto_assign_single_sheet_with_memory(
+        sheet_key, sheet_df, st.session_state.master_columns,
+        remembered_for_shape=remembered_for_shape,
+    )
 
 
 def render():
@@ -213,7 +229,7 @@ def render():
             # [FIX 3 onglets] Auto-assignation de TOUS les onglets des l'import,
             # pour qu'aucun onglet ne reste vide et sans avoir a cliquer.
             for _sk, _sdf in all_sheets.items():
-                _new_map, _, _ = auto_assign_single_sheet(_sk, _sdf, st.session_state.master_columns)
+                _new_map, _, _ = _auto_assign(_sk, _sdf)
                 st.session_state.sheet_mappings[_sk] = _new_map
                 for _src, _master in _new_map.items():
                     st.session_state[f"map_{_sk}_{_src}"] = _master
@@ -327,9 +343,7 @@ def render():
                 if st.button("🚀 Auto-assigner TOUS les onglets", key="auto_all_sheets", type="primary"):
                     total_sheets_count = len(active_sheets)
                     for sheet_key, sheet_df in active_sheets.items():
-                        new_mapping, matched_count, total_cols = auto_assign_single_sheet(
-                            sheet_key, sheet_df, st.session_state.master_columns
-                        )
+                        new_mapping, matched_count, total_cols = _auto_assign(sheet_key, sheet_df)
                         st.session_state.sheet_mappings[sheet_key] = new_mapping
                         for src_col, master_col in new_mapping.items():
                             widget_key = f"map_{sheet_key}_{src_col}"
@@ -358,9 +372,7 @@ def render():
                 col_auto, col_space = st.columns([1, 3])
                 with col_auto:
                     if st.button(f"🚀 Auto", key=f"auto_{sheet_key}"):
-                        new_mapping, matched_count, total_cols = auto_assign_single_sheet(
-                            sheet_key, sheet_df, st.session_state.master_columns
-                        )
+                        new_mapping, matched_count, total_cols = _auto_assign(sheet_key, sheet_df)
                         st.session_state.sheet_mappings[sheet_key] = new_mapping
                         for src_col, master_col in new_mapping.items():
                             widget_key = f"map_{sheet_key}_{src_col}"
@@ -451,6 +463,15 @@ def render():
                             st.warning(f"⚠️ {sheet_key}: Aucune colonne assignée, ignoré.")
                             continue
 
+                        # [12] Memoriser ce mapping CONFIRME pour cette forme de
+                        # fichier (voir _auto_assign en haut du fichier) : il sera
+                        # reapplique automatiquement au prochain fichier de meme
+                        # structure de colonnes.
+                        real_cols_for_fp = [c for c in sheet_df.columns
+                                            if c not in ("__source_file__", "__source_sheet__")]
+                        fp = column_fingerprint(real_cols_for_fp)
+                        st.session_state.remembered_mappings[fp] = mapping_to_remembered(mapping)
+
                         sub = pd.DataFrame(index=sheet_df.index)
                         for master_col in st.session_state.master_columns:
                             src_cols_for_master = [s for s, m in mapping.items() if m == master_col and s in sheet_df.columns]
@@ -480,6 +501,8 @@ def render():
                                 sub[master_col] = sub[master_col].map(clean_iban)
                         rows.append(sub)
                         total_merged += len(sub)
+
+                    save_remembered_mappings(st.session_state.remembered_mappings)
 
                     if not rows:
                         st.error("❌ Aucun onglet avec assignation trouvé.")

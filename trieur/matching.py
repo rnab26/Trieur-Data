@@ -700,3 +700,84 @@ def auto_assign_single_sheet(sheet_key, sheet_df, master_columns):
     matched_count = sum(1 for v in new_mapping.values() if v != "(non assigne)")
 
     return new_mapping, matched_count, len(real_columns)
+
+
+# =============================================================
+# [12] MEMOIRE DU MAPPING PAR "FORME" DE FICHIER
+#
+# Un utilisateur qui reimporte regulierement des fichiers de MEME structure
+# (memes en-tetes, meme source) doit refaire le meme mapping manuel a chaque
+# fois -- penible sur mobile. On memorise le mapping CONFIRME (au moment ou
+# la base est construite) sous une empreinte independante de l'ordre et de
+# la casse des colonnes, et on le reapplique automatiquement au prochain
+# fichier de meme forme, en completant par la detection habituelle pour
+# toute colonne nouvelle/inconnue.
+# =============================================================
+def column_fingerprint(real_columns):
+    """Empreinte STABLE d'un jeu de colonnes source (independante de l'ordre
+    et de la casse) : sert a reconnaitre un fichier de meme structure qu'un
+    fichier deja importe."""
+    normed = sorted(set(normalize_column_name(c) for c in real_columns if str(c).strip()))
+    return "|".join(normed)
+
+
+def mapping_to_remembered(mapping):
+    """Convertit un mapping {source_col: master_col} confirme en forme
+    REJOUABLE sur un autre fichier de meme forme : cle = nom de colonne
+    source normalise (independant de la casse exacte)."""
+    return {
+        normalize_column_name(src): master
+        for src, master in mapping.items()
+        if master and master != "(non assigne)"
+    }
+
+
+def apply_remembered_mapping(real_columns, remembered):
+    """Reapplique un mapping memorise (cf mapping_to_remembered) a un jeu de
+    colonnes source, en respectant l'unicite des colonnes maitres."""
+    mapping = {}
+    used = set()
+    for src in real_columns:
+        master = (remembered or {}).get(normalize_column_name(src))
+        if master and master not in used:
+            mapping[src] = master
+            used.add(master)
+        else:
+            mapping[src] = "(non assigne)"
+    return mapping
+
+
+def auto_assign_with_memory(real_columns, master_columns, sheet_df=None, remembered_for_shape=None):
+    """Comme auto_assign_columns_fast, mais priorise un mapping MEMORISE (deja
+    confirme par l'utilisateur sur un fichier de meme forme) pour les colonnes
+    qu'il couvre ; complete le reste par la detection habituelle."""
+    remembered_map = apply_remembered_mapping(real_columns, remembered_for_shape)
+    auto_map = auto_assign_columns_fast(real_columns, master_columns, sheet_df=sheet_df)
+
+    merged = {}
+    used = set()
+    for src in real_columns:
+        m = remembered_map.get(src, "(non assigne)")
+        if m != "(non assigne)" and m in master_columns and m not in used:
+            merged[src] = m
+            used.add(m)
+    for src in real_columns:
+        if src in merged:
+            continue
+        m = auto_map.get(src, "(non assigne)")
+        if m != "(non assigne)" and m not in used:
+            merged[src] = m
+            used.add(m)
+        else:
+            merged[src] = "(non assigne)"
+    return merged
+
+
+def auto_assign_single_sheet_with_memory(sheet_key, sheet_df, master_columns, remembered_for_shape=None):
+    """Variante de auto_assign_single_sheet qui tient compte du mapping
+    memorise pour cette forme de fichier (voir auto_assign_with_memory)."""
+    real_columns = [c for c in sheet_df.columns if c not in ["__source_file__", "__source_sheet__"]]
+    new_mapping = auto_assign_with_memory(real_columns, master_columns, sheet_df=sheet_df,
+                                          remembered_for_shape=remembered_for_shape)
+    matched_count = sum(1 for v in new_mapping.values() if v != "(non assigne)")
+    return new_mapping, matched_count, len(real_columns)

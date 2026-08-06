@@ -112,3 +112,40 @@ def save_export_presets(presets):
         return True
     except Exception:
         return False
+
+
+# -------------------------------------------------------------
+# [12] MEMOIRE DU MAPPING PAR FORME DE FICHIER
+# {empreinte_colonnes: {nom_colonne_source_normalise: colonne_maitre}}
+# -------------------------------------------------------------
+REMEMBERED_MAPPINGS_PATH = "remembered_mappings.json"
+
+
+def load_remembered_mappings():
+    """Charge les mappings memorises par forme de fichier (dict vide si absent/invalide)."""
+    try:
+        if os.path.exists(REMEMBERED_MAPPINGS_PATH):
+            with open(REMEMBERED_MAPPINGS_PATH, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                return {
+                    fp: mapping for fp, mapping in data.items()
+                    if isinstance(fp, str) and isinstance(mapping, dict)
+                }
+    except Exception:
+        pass
+    return {}
+
+
+def save_remembered_mappings(mappings):
+    """Enregistre les mappings memorises par forme de fichier. Retourne True si succes."""
+    try:
+        clean = {
+            fp: mapping for fp, mapping in mappings.items()
+            if isinstance(fp, str) and isinstance(mapping, dict)
+        }
+        with open(REMEMBERED_MAPPINGS_PATH, "w", encoding="utf-8") as fh:
+            json.dump(clean, fh, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False

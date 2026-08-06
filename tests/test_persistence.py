@@ -75,3 +75,25 @@ def test_is_valid_export_preset():
     assert P._is_valid_export_preset({"name": "a", "included": [], "excluded": []}) is True
     assert P._is_valid_export_preset({"name": "", "included": [], "excluded": []}) is False
     assert P._is_valid_export_preset({}) is False
+
+
+def test_load_remembered_mappings_absent(tmp_path, monkeypatch):
+    monkeypatch.setattr(P, "REMEMBERED_MAPPINGS_PATH", str(tmp_path / "none.json"))
+    assert P.load_remembered_mappings() == {}
+
+
+def test_save_puis_load_remembered_mappings(tmp_path, monkeypatch):
+    path = str(tmp_path / "remembered_mappings.json")
+    monkeypatch.setattr(P, "REMEMBERED_MAPPINGS_PATH", path)
+    mappings = {"email|nom": {"nom": "NOM", "email": "EMAIL"}}
+    assert P.save_remembered_mappings(mappings) is True
+    assert P.load_remembered_mappings() == mappings
+
+
+def test_remembered_mappings_invalides_sont_ignores(tmp_path, monkeypatch):
+    path = str(tmp_path / "remembered_mappings.json")
+    monkeypatch.setattr(P, "REMEMBERED_MAPPINGS_PATH", path)
+    mixte = {"ok": {"nom": "NOM"}, "bad": "pasundict", 42: {"x": "y"}}
+    P.save_remembered_mappings(mixte)
+    rel = P.load_remembered_mappings()
+    assert rel == {"ok": {"nom": "NOM"}}

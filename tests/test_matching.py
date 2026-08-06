@@ -2,9 +2,12 @@ import pandas as pd
 
 from trieur.matching import (
     DEFAULT_MASTER_COLUMNS,
+    apply_remembered_mapping,
     auto_assign_columns_fast,
+    auto_assign_with_memory,
     clean_iban,
     clean_phone,
+    column_fingerprint,
     detect_iban_column,
     detect_phone_column_kind,
     iban_is_valid,
@@ -12,6 +15,7 @@ from trieur.matching import (
     is_iban_master,
     looks_like_header,
     looks_like_iban,
+    mapping_to_remembered,
     normalize_text,
     phone_kind,
 )
@@ -156,3 +160,46 @@ def test_iban_is_valid_none_si_non_applicable():
     assert iban_is_valid(None) is None
     assert iban_is_valid("") is None
     assert iban_is_valid("bonjour") is None
+
+
+# --- Memoire du mapping par forme de fichier --------------------------
+def test_column_fingerprint_ignore_ordre_et_casse():
+    fp1 = column_fingerprint(["NOM", "Email", "CP"])
+    fp2 = column_fingerprint(["cp", "nom", "EMAIL"])
+    assert fp1 == fp2
+
+
+def test_column_fingerprint_differe_si_colonnes_differentes():
+    assert column_fingerprint(["NOM", "EMAIL"]) != column_fingerprint(["NOM", "TELEPHONE"])
+
+
+def test_mapping_to_remembered_ignore_les_non_assignes():
+    remembered = mapping_to_remembered({"Ref Client": "NOM", "Autre": "(non assigne)"})
+    assert remembered == {"refclient": "NOM"}
+
+
+def test_apply_remembered_mapping_rejoue_sur_une_casse_differente():
+    remembered = {"refclient": "NOM"}
+    mapping = apply_remembered_mapping(["REF CLIENT", "AUTRE"], remembered)
+    assert mapping["REF CLIENT"] == "NOM"
+    assert mapping["AUTRE"] == "(non assigne)"
+
+
+def test_apply_remembered_mapping_respecte_lunicite():
+    remembered = {"a": "NOM", "b": "NOM"}
+    mapping = apply_remembered_mapping(["a", "b"], remembered)
+    assignes = [v for v in mapping.values() if v != "(non assigne)"]
+    assert assignes == ["NOM"]
+
+
+def test_auto_assign_with_memory_priorise_le_mapping_memorise():
+    # "NUM DOSSIER" n'est reconnu par AUCUNE heuristique -> reste non assigne
+    # sans memoire, mais le mapping memorise doit le recuperer.
+    df = pd.DataFrame({"NUM DOSSIER": ["A", "B"], "EMAIL": ["a@x.fr", "b@x.fr"]})
+    sans_memoire = auto_assign_columns_fast(list(df.columns), M, sheet_df=df)
+    assert sans_memoire["NUM DOSSIER"] == "(non assigne)"
+
+    remembered = {"numdossier": "NOM"}
+    avec_memoire = auto_assign_with_memory(list(df.columns), M, sheet_df=df, remembered_for_shape=remembered)
+    assert avec_memoire["NUM DOSSIER"] == "NOM"
+    assert avec_memoire["EMAIL"] == "EMAIL"

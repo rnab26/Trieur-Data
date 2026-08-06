@@ -5,7 +5,7 @@ import traceback
 import pandas as pd
 import streamlit as st
 
-from trieur.filters import cp_matches_prefix
+from trieur.filters import cp_matches_prefix, dedupe_dataframe
 from trieur.persistence import save_saved_filters
 
 
@@ -88,17 +88,54 @@ def render():
                     if selected_vals:
                         filtered_df = df[df[filter_col].isin(selected_vals)]
 
+            # [5bis] Suppression de doublons active : elle doit survivre aux
+            # reruns suivants (changement de filtre, etc.), sinon l'export
+            # redeviendrait dedupe des le prochain clic. On la reapplique
+            # donc a chaque passage tant qu'elle n'est pas annulee.
+            active_dedup = st.session_state.get("_dedup_active")
+            dedup_removed = None
+            if active_dedup and active_dedup["column"] in filtered_df.columns:
+                before_dedup = len(filtered_df)
+                filtered_df = dedupe_dataframe(filtered_df, active_dedup["column"], active_dedup["keep"])
+                dedup_removed = before_dedup - len(filtered_df)
+
             remaining_lines = len(filtered_df)
             st.write(f"Resultat filtre : **{remaining_lines}** lignes conservees sur **{total_lines}** au total")
+
+            if dedup_removed is not None:
+                col_msg, col_undo = st.columns([4, 1])
+                with col_msg:
+                    st.success(f"✅ Doublons supprimes sur '{active_dedup['column']}' "
+                               f"({dedup_removed} ligne(s) retiree(s), {remaining_lines} restantes).")
+                with col_undo:
+                    if st.button("↩️ Annuler", key="tab3_undo_dedup", use_container_width=True):
+                        st.session_state.pop("_dedup_active", None)
+                        st.rerun()
+
             st.dataframe(filtered_df.head(50), use_container_width=True)
 
             # [PERF] Le comptage des doublons scanne toute la base : on ne le fait
             # QUE sur demande (sinon il ralentirait chaque interaction).
             dup_check_col = st.selectbox("Colonne pour detecter les doublons (ex: TELEPHONE MOBILE)", options=["(aucune)"] + st.session_state.master_columns)
             if dup_check_col != "(aucune)" and dup_check_col in filtered_df.columns:
-                if st.button(f"🔎 Compter les doublons sur '{dup_check_col}'", key="tab3_count_dupes"):
-                    dup_count = int(filtered_df[dup_check_col].duplicated(keep=False).sum())
-                    st.warning(f"{dup_count} lignes en doublon detectees sur la colonne '{dup_check_col}' (non supprimees automatiquement).")
+                col_count, col_remove = st.columns([1, 1])
+                with col_count:
+                    if st.button(f"🔎 Compter les doublons sur '{dup_check_col}'", key="tab3_count_dupes"):
+                        dup_count = int(filtered_df[dup_check_col].duplicated(keep=False).sum())
+                        st.warning(f"{dup_count} lignes en doublon detectees sur la colonne '{dup_check_col}'.")
+
+                keep_label = st.radio(
+                    "En cas de doublon, quelle ligne garder ?",
+                    options=["La premiere ligne importee", "La ligne la plus complete (le moins de champs vides)"],
+                    key="tab3_dedup_keep_rule",
+                    horizontal=True,
+                )
+                keep_rule = "complete" if keep_label.startswith("La ligne la plus") else "first"
+
+                with col_remove:
+                    if st.button(f"🗑️ Supprimer les doublons sur '{dup_check_col}'", key="tab3_remove_dupes", use_container_width=True):
+                        st.session_state["_dedup_active"] = {"column": dup_check_col, "keep": keep_rule}
+                        st.rerun()
 
             st.session_state.filtered_df = filtered_df
 

@@ -117,6 +117,7 @@ from trieur.perf_cache import (
     rebuild_key,
     serialize_mappings_for_build,
     serialize_sheets_for_build,
+    sha256_bytes,
 )
 from trieur.persistence import (
     MASTER_CONFIG_PATH,
@@ -349,6 +350,77 @@ with tab2:
                "**CSV** est bien plus rapide et leger que le .xlsx.")
     google_url = st.text_input("Ou collez une URL Google Sheets publique (optionnel)")
 
+    # ── PANNEAU DE DÉBOGAGE ──────────────────────────────────────────────────
+    with st.expander("🔍 Panneau de débogage (cliquer pour ouvrir)", expanded=False):
+        debug_mode = st.toggle("Activer le mode débogage détaillé", key="debug_mode", value=st.session_state.get("debug_mode", False))
+        st.session_state["debug_mode"] = debug_mode
+
+        if files or google_url:
+            st.markdown("**Fichiers détectés par l'uploader :**")
+            if files:
+                for f in files:
+                    f_bytes = f.getvalue()
+                    f_size = len(f_bytes)
+                    f_hash = sha256_bytes(f_bytes)[:12]
+                    st.write(f"📄 `{f.name}` — {f_size/1024:.1f} Ko — hash: `{f_hash}…`")
+            else:
+                st.write("_Aucun fichier local._")
+
+            if google_url:
+                st.write(f"🔗 URL Google Sheets : `{google_url}`")
+
+            st.markdown("**État session :**")
+            loaded_sig = st.session_state.get("loaded_signature")
+            all_sheets_state = st.session_state.get("all_sheets", {})
+            st.write(f"- `loaded_signature` : `{'(vide)' if not loaded_sig else str(loaded_sig)[:60] + '…'}`")
+            st.write(f"- `all_sheets` : {len(all_sheets_state)} onglet(s) en mémoire")
+            if all_sheets_state:
+                for k, df in list(all_sheets_state.items())[:5]:
+                    st.write(f"  • `{k}` → {len(df)} lignes × {len(df.columns)} colonnes")
+                if len(all_sheets_state) > 5:
+                    st.write(f"  … et {len(all_sheets_state) - 5} autre(s)")
+
+            if debug_mode and files:
+                st.markdown("**Test de lecture fichier par fichier :**")
+                for f in files:
+                    f_bytes = f.getvalue()
+                    lower = f.name.lower()
+                    with st.spinner(f"Test lecture `{f.name}`…"):
+                        try:
+                            if lower.endswith(".csv"):
+                                from trieur.io_excel import read_csv_file
+                                import io as _io
+                                up = _io.BytesIO(f_bytes)
+                                up.name = f.name
+                                sheets, inferred = read_csv_file(up, f.name)
+                            elif lower.endswith(".pdf"):
+                                from trieur.io_pdf import read_pdf_sepa
+                                import io as _io
+                                up = _io.BytesIO(f_bytes)
+                                up.name = f.name
+                                sheets, inferred = read_pdf_sepa(up, f.name)
+                            else:
+                                from trieur.io_excel import read_excel_all_sheets_from_file, apply_header_inference_excel
+                                import io as _io
+                                up = _io.BytesIO(f_bytes)
+                                up.name = f.name
+                                sheets_raw = read_excel_all_sheets_from_file(up, f.name)
+                                up.seek(0)
+                                sheets, inferred = apply_header_inference_excel(sheets_raw, up)
+                            if sheets:
+                                st.success(f"✅ `{f.name}` → {len(sheets)} onglet(s) lus")
+                                for sname, sdf in sheets.items():
+                                    st.write(f"   `{sname}` : {len(sdf)} lignes, colonnes : {list(sdf.columns[:8])}")
+                            else:
+                                st.error(f"❌ `{f.name}` → aucun onglet retourné")
+                        except Exception as e:
+                            import traceback
+                            st.error(f"❌ `{f.name}` → exception : {e}")
+                            st.code(traceback.format_exc(), language="text")
+        else:
+            st.info("Déposez des fichiers ou saisissez une URL pour voir les infos de débogage.")
+    # ── FIN PANNEAU DE DÉBOGAGE ──────────────────────────────────────────────
+
     all_sheets = {}
 
     progress_placeholder = st.empty()
@@ -441,7 +513,10 @@ with tab2:
                     all_sheets[key] = df
 
             except Exception as e:
+                import traceback
                 st.error(f"❌ Erreur lecture {file_name}: {str(e)}")
+                if st.session_state.get("debug_mode"):
+                    st.code(traceback.format_exc(), language="text")
 
         update_progress(progress_bar, 80, "Lecture Excel terminée. Finalisation...")
 

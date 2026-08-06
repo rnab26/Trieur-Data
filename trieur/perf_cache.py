@@ -83,7 +83,7 @@ def rebuild_key(
 
 
 @st.cache_data(show_spinner=False, max_entries=200)
-def _parse_uploaded_file_inner(file_name: str, file_hash: str, file_bytes: bytes) -> Tuple[Dict[str, pd.DataFrame], List[str]]:
+def _parse_uploaded_file_by_hash(file_name: str, file_hash: str, file_bytes: bytes) -> Tuple[Dict[str, pd.DataFrame], List[str]]:
     up = _MemoryUpload(file_bytes, file_name)
     lower = str(file_name or "").lower()
     if lower.endswith(".csv"):
@@ -96,7 +96,7 @@ def _parse_uploaded_file_inner(file_name: str, file_hash: str, file_bytes: bytes
 
 def parse_uploaded_file_cached(file_name: str, file_bytes: bytes) -> Tuple[Dict[str, pd.DataFrame], List[str]]:
     file_hash = sha256_bytes(file_bytes)
-    return _parse_uploaded_file_inner(file_name, file_hash, file_bytes)
+    return _parse_uploaded_file_by_hash(file_name, file_hash, file_bytes)
 
 
 @st.cache_data(show_spinner=False)

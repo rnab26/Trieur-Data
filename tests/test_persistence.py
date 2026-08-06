@@ -1,3 +1,4 @@
+import base64
 import json
 
 import trieur.persistence as P
@@ -70,6 +71,60 @@ def test_load_saved_filters_migre_lancien_format(tmp_path, monkeypatch):
 def test_migrate_filter_laisse_le_nouveau_format_inchange():
     new_format = {"name": "X", "groups": [[{"column": "CP", "kind": "departements", "values": ["75"]}]]}
     assert P._migrate_filter(new_format) == new_format
+
+
+# --- [14] Sauvegarde texte des filtres ----------------------------------
+def test_encode_puis_decode_filters_code_aller_retour():
+    filtres = [
+        {"name": "Sud-Ouest", "groups": [[{"column": "CP", "kind": "departements", "values": ["33", "40"]}]]},
+    ]
+    code = P.encode_filters_code(filtres)
+    assert code.startswith(P.FILTERS_CODE_PREFIX)
+    decoded, err = P.decode_filters_code(code)
+    assert err is None
+    assert decoded == filtres
+
+
+def test_decode_filters_code_migre_lancien_format():
+    old_format = [{"name": "Sud-Ouest", "column": "CP", "kind": "departements", "values": ["33"]}]
+    code = P.FILTERS_CODE_PREFIX + base64.urlsafe_b64encode(
+        json.dumps(old_format).encode("utf-8")
+    ).decode("ascii")
+    decoded, err = P.decode_filters_code(code)
+    assert err is None
+    assert decoded == [{"name": "Sud-Ouest", "groups": [[{"column": "CP", "kind": "departements", "values": ["33"]}]]}]
+
+
+def test_decode_filters_code_vide():
+    decoded, err = P.decode_filters_code("")
+    assert decoded is None
+    assert err
+
+
+def test_decode_filters_code_prefixe_manquant():
+    decoded, err = P.decode_filters_code("n'importe quoi")
+    assert decoded is None
+    assert "prefixe" in err.lower()
+
+
+def test_decode_filters_code_corrompu():
+    decoded, err = P.decode_filters_code(P.FILTERS_CODE_PREFIX + "!!!pas-du-base64!!!")
+    assert decoded is None
+    assert err
+
+
+def test_decode_filters_code_json_valide_mais_pas_une_liste():
+    code = P.FILTERS_CODE_PREFIX + base64.urlsafe_b64encode(b'{"pas": "une liste"}').decode("ascii")
+    decoded, err = P.decode_filters_code(code)
+    assert decoded is None
+    assert err
+
+
+def test_decode_filters_code_aucun_filtre_valide():
+    code = P.FILTERS_CODE_PREFIX + base64.urlsafe_b64encode(b'[{"name": ""}]').decode("ascii")
+    decoded, err = P.decode_filters_code(code)
+    assert decoded is None
+    assert err
 
 
 def test_load_export_presets_absent(tmp_path, monkeypatch):

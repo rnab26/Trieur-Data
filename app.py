@@ -125,6 +125,7 @@ from trieur.persistence import (
 # de la base fusionnee dans l'interface ci-dessous).
 import io
 import gc
+import traceback
 import html
 import pandas as pd
 
@@ -287,788 +288,804 @@ st.caption(f"Import Excel ou Google Sheets → mapping colonnes → aperçu → 
 tab1, tab2, tab3, tab4 = st.tabs(["1. Colonnes maitres", "2. Import et Mapping", "3. Filtrage & Dedup", "4. Export"])
 
 with tab1:
-    st.subheader("Gerer vos colonnes maitres")
-    st.write("Ajoutez, supprimez ou modifiez vos colonnes maitres ci-dessous, une par ligne. "
-             "La liste est **conservee** apres rechargement de la page.")
-    cols_text = st.text_area(
-        "Colonnes maitres",
-        value="\n".join(st.session_state.master_columns),
-        height=250,
-        key="master_cols_input"
-    )
+    try:
+        st.subheader("Gerer vos colonnes maitres")
+        st.write("Ajoutez, supprimez ou modifiez vos colonnes maitres ci-dessous, une par ligne. "
+                 "La liste est **conservee** apres rechargement de la page.")
+        cols_text = st.text_area(
+            "Colonnes maitres",
+            value="\n".join(st.session_state.master_columns),
+            height=250,
+            key="master_cols_input"
+        )
 
-    col_save, col_reset = st.columns([1, 1])
-    with col_save:
-        if st.button("💾 Enregistrer la liste des colonnes maitres", type="primary"):
-            new_list = [c.strip() for c in cols_text.split("\n") if c.strip()]
-            # dedoublonnage en gardant l'ordre
-            seen = set()
-            deduped = []
-            for c in new_list:
-                key = c.lower()
-                if key not in seen:
-                    seen.add(key)
-                    deduped.append(c)
-            if deduped:
-                st.session_state.master_columns = deduped
-                ok = save_master_columns(deduped)
-                if ok:
-                    st.success(f"{len(deduped)} colonnes maitres enregistrees et conservees.")
-                else:
-                    st.warning(f"{len(deduped)} colonnes prises en compte pour la session "
-                               "(sauvegarde disque indisponible sur cet hebergement).")
-            else:
-                st.error("❌ Veuillez entrer au moins une colonne maître.")
-
-    with col_reset:
-        if st.button("↩️ Reinitialiser (liste par defaut)"):
-            st.session_state.master_columns = DEFAULT_MASTER_COLUMNS.copy()
-            save_master_columns(DEFAULT_MASTER_COLUMNS.copy())
-            st.success("Liste reinitialisee aux colonnes par defaut.")
-            st.rerun()
-
-    st.caption("ℹ️ Astuce : les colonnes **TELEPHONE MOBILE** et **TELEPHONE FIXE** "
-               "sont detectees automatiquement d'apres le contenu (prefixes 06/07 = mobile, "
-               "01-05/08/09 = fixe), meme si l'en-tete est absente ou trompeuse.")
-
-with tab2:
-    st.subheader("Importer vos fichiers Excel, CSV ou Google Sheets")
-    files = st.file_uploader(
-        "Deposez un ou plusieurs fichiers Excel, CSV ou PDF",
-        type=["xlsx", "xls", "csv", "pdf"], accept_multiple_files=True,
-    )
-    st.caption("💡 Pour de tres gros volumes (plusieurs millions de lignes), le "
-               "**CSV** est bien plus rapide et leger que le .xlsx.")
-    google_url = st.text_input("Ou collez une URL Google Sheets publique (optionnel)")
-
-    all_sheets = {}
-
-    progress_placeholder = st.empty()
-    progress_label = st.empty()
-    progress_bar = None
-
-    def start_progress(message):
-        bar = progress_placeholder.progress(0)
-        progress_label.info(message)
-        return bar
-
-    def update_progress(bar, pct, message=None):
-        bar.progress(max(0, min(100, int(pct))))
-        if message:
-            progress_label.info(message)
-
-    def end_progress(bar, message=None):
-        bar.progress(100)
-        if message:
-            progress_label.success(message)
-        progress_placeholder.empty()
-        progress_label.empty()
-
-    def _files_signature(_files, _gurl):
-        """Empreinte de l'ensemble importe (nom+taille des fichiers + URL)."""
-        sig = []
-        for _f in _files or []:
-            try:
-                sig.append((_f.name, int(_f.size)))
-            except Exception:
-                sig.append((getattr(_f, "name", "?"), None))
-        sig.append(("__google__", _gurl.strip() if _gurl else ""))
-        return tuple(sig)
-
-    has_input = bool(files) or bool(google_url.strip() and is_google_sheet_url(google_url))
-    current_sig = _files_signature(files, google_url)
-
-    # [PERF] On ne (re)lit les fichiers QUE si l'ensemble importe a change.
-    # Sinon on reutilise ce qui est deja en memoire : plus aucun rechargement
-    # (ni barre de progression) lors des assignations manuelles.
-    need_reload = has_input and (
-        st.session_state.get("loaded_signature") != current_sig
-        or not st.session_state.get("all_sheets")
-    )
-    if not need_reload:
-        all_sheets = st.session_state.get("all_sheets", {})
-
-    # [2] Onglets dont l'en-tete a du etre deduite pendant CE chargement
-    inferred_this_load = []
-
-    if need_reload and files:
-        progress_bar = start_progress("Chargement des fichiers Excel... 0%")
-        total_files = len(files)
-        # [FIX doublons de nom] Deux fichiers deposes ensemble peuvent porter
-        # EXACTEMENT le meme nom (ex: "export.csv" telecharge deux fois a des
-        # dates differentes). Streamlit les distingue tres bien (2 entrees
-        # dans l'uploader), mais notre cle interne all_sheets etait basee sur
-        # f.name : le 2e fichier ecrasait silencieusement le 1er. On rend le
-        # nom utilise pour la cle unique au sein de cet import (export.csv,
-        # export (2).csv...) sans toucher au fichier lu ni a son nom affiche
-        # dans le widget. On verifie l'unicite contre TOUS les noms deja
-        # attribues (pas juste le compteur de f.name) pour ne jamais retomber
-        # sur un nom deja pris par un vrai fichier "... (2).ext" du batch.
-        used_display_names = set()
-        for f_idx, f in enumerate(files):
-            base_pct = int((f_idx / max(total_files, 1)) * 80)
-            update_progress(progress_bar, base_pct, f"Lecture du fichier {f_idx+1}/{total_files} : {f.name}")
-
-            stem, dot, ext = f.name.rpartition(".")
-            display_name = f.name
-            suffix_n = 2
-            while display_name in used_display_names:
-                display_name = f"{stem} ({suffix_n}).{ext}" if dot else f"{f.name} ({suffix_n})"
-                suffix_n += 1
-            used_display_names.add(display_name)
-
-            try:
-                # [GROS FICHIERS] CSV lu directement (rapide/leger) ; sinon Excel.
-                if f.name.lower().endswith(".csv"):
-                    sheets, inferred = read_csv_file(f, display_name)
-                elif f.name.lower().endswith(".pdf"):
-                    # [PDF] Prélèvements SEPA -> une ligne par prélèvement
-                    sheets, inferred = read_pdf_sepa(f, display_name)
-                else:
-                    sheets = read_excel_all_sheets_from_file(f, display_name)
-                    # [2] Onglets sans ligne d'en-tete : relecture + noms deduits
-                    sheets, inferred = apply_header_inference_excel(sheets, f)
-
-                if not sheets:
-                    st.error(f"❌ Aucun onglet lisible dans {display_name}")
-                    continue
-
-                inferred_this_load.extend(f"{display_name} :: {n}" for n in inferred)
-
-                sheet_items = list(sheets.items())
-                total_sheet_items = len(sheet_items)
-
-                for s_idx, (sheet_name, df) in enumerate(sheet_items):
-                    if total_sheet_items > 0:
-                        step_within_file = int(((s_idx + 1) / total_sheet_items) * (80 / max(total_files, 1)))
+        col_save, col_reset = st.columns([1, 1])
+        with col_save:
+            if st.button("💾 Enregistrer la liste des colonnes maitres", type="primary"):
+                new_list = [c.strip() for c in cols_text.split("\n") if c.strip()]
+                # dedoublonnage en gardant l'ordre
+                seen = set()
+                deduped = []
+                for c in new_list:
+                    key = c.lower()
+                    if key not in seen:
+                        seen.add(key)
+                        deduped.append(c)
+                if deduped:
+                    st.session_state.master_columns = deduped
+                    ok = save_master_columns(deduped)
+                    if ok:
+                        st.success(f"{len(deduped)} colonnes maitres enregistrees et conservees.")
                     else:
-                        step_within_file = 0
-                    update_progress(
-                        progress_bar,
-                        base_pct + step_within_file,
-                        f"Traitement de l'onglet {s_idx+1}/{total_sheet_items} de {display_name}"
-                    )
+                        st.warning(f"{len(deduped)} colonnes prises en compte pour la session "
+                                   "(sauvegarde disque indisponible sur cet hebergement).")
+                else:
+                    st.error("❌ Veuillez entrer au moins une colonne maître.")
 
-                    if df is None or len(df) == 0:
-                        st.warning(f"⚠️ {display_name} :: {sheet_name} est vide, ignoré.")
+        with col_reset:
+            if st.button("↩️ Reinitialiser (liste par defaut)"):
+                st.session_state.master_columns = DEFAULT_MASTER_COLUMNS.copy()
+                save_master_columns(DEFAULT_MASTER_COLUMNS.copy())
+                st.success("Liste reinitialisee aux colonnes par defaut.")
+                st.rerun()
+
+        st.caption("ℹ️ Astuce : les colonnes **TELEPHONE MOBILE** et **TELEPHONE FIXE** "
+                   "sont detectees automatiquement d'apres le contenu (prefixes 06/07 = mobile, "
+                   "01-05/08/09 = fixe), meme si l'en-tete est absente ou trompeuse.")
+
+    except Exception:
+        st.error("\u274c Une erreur est survenue dans cet onglet. Copie-colle le detail ci-dessous pour diagnostic.")
+        st.code(traceback.format_exc(), language="text")
+with tab2:
+    try:
+        st.subheader("Importer vos fichiers Excel, CSV ou Google Sheets")
+        files = st.file_uploader(
+            "Deposez un ou plusieurs fichiers Excel, CSV ou PDF",
+            type=["xlsx", "xls", "csv", "pdf"], accept_multiple_files=True,
+        )
+        st.caption("💡 Pour de tres gros volumes (plusieurs millions de lignes), le "
+                   "**CSV** est bien plus rapide et leger que le .xlsx.")
+        google_url = st.text_input("Ou collez une URL Google Sheets publique (optionnel)")
+
+        all_sheets = {}
+
+        progress_placeholder = st.empty()
+        progress_label = st.empty()
+        progress_bar = None
+
+        def start_progress(message):
+            bar = progress_placeholder.progress(0)
+            progress_label.info(message)
+            return bar
+
+        def update_progress(bar, pct, message=None):
+            bar.progress(max(0, min(100, int(pct))))
+            if message:
+                progress_label.info(message)
+
+        def end_progress(bar, message=None):
+            bar.progress(100)
+            if message:
+                progress_label.success(message)
+            progress_placeholder.empty()
+            progress_label.empty()
+
+        def _files_signature(_files, _gurl):
+            """Empreinte de l'ensemble importe (nom+taille des fichiers + URL)."""
+            sig = []
+            for _f in _files or []:
+                try:
+                    sig.append((_f.name, int(_f.size)))
+                except Exception:
+                    sig.append((getattr(_f, "name", "?"), None))
+            sig.append(("__google__", _gurl.strip() if _gurl else ""))
+            return tuple(sig)
+
+        has_input = bool(files) or bool(google_url.strip() and is_google_sheet_url(google_url))
+        current_sig = _files_signature(files, google_url)
+
+        # [PERF] On ne (re)lit les fichiers QUE si l'ensemble importe a change.
+        # Sinon on reutilise ce qui est deja en memoire : plus aucun rechargement
+        # (ni barre de progression) lors des assignations manuelles.
+        need_reload = has_input and (
+            st.session_state.get("loaded_signature") != current_sig
+            or not st.session_state.get("all_sheets")
+        )
+        if not need_reload:
+            all_sheets = st.session_state.get("all_sheets", {})
+
+        # [2] Onglets dont l'en-tete a du etre deduite pendant CE chargement
+        inferred_this_load = []
+
+        if need_reload and files:
+            progress_bar = start_progress("Chargement des fichiers Excel... 0%")
+            total_files = len(files)
+            # [FIX doublons de nom] Deux fichiers deposes ensemble peuvent porter
+            # EXACTEMENT le meme nom (ex: "export.csv" telecharge deux fois a des
+            # dates differentes). Streamlit les distingue tres bien (2 entrees
+            # dans l'uploader), mais notre cle interne all_sheets etait basee sur
+            # f.name : le 2e fichier ecrasait silencieusement le 1er. On rend le
+            # nom utilise pour la cle unique au sein de cet import (export.csv,
+            # export (2).csv...) sans toucher au fichier lu ni a son nom affiche
+            # dans le widget. On verifie l'unicite contre TOUS les noms deja
+            # attribues (pas juste le compteur de f.name) pour ne jamais retomber
+            # sur un nom deja pris par un vrai fichier "... (2).ext" du batch.
+            used_display_names = set()
+            for f_idx, f in enumerate(files):
+                base_pct = int((f_idx / max(total_files, 1)) * 80)
+                update_progress(progress_bar, base_pct, f"Lecture du fichier {f_idx+1}/{total_files} : {f.name}")
+
+                stem, dot, ext = f.name.rpartition(".")
+                display_name = f.name
+                suffix_n = 2
+                while display_name in used_display_names:
+                    display_name = f"{stem} ({suffix_n}).{ext}" if dot else f"{f.name} ({suffix_n})"
+                    suffix_n += 1
+                used_display_names.add(display_name)
+
+                try:
+                    # [GROS FICHIERS] CSV lu directement (rapide/leger) ; sinon Excel.
+                    if f.name.lower().endswith(".csv"):
+                        sheets, inferred = read_csv_file(f, display_name)
+                    elif f.name.lower().endswith(".pdf"):
+                        # [PDF] Prélèvements SEPA -> une ligne par prélèvement
+                        sheets, inferred = read_pdf_sepa(f, display_name)
+                    else:
+                        sheets = read_excel_all_sheets_from_file(f, display_name)
+                        # [2] Onglets sans ligne d'en-tete : relecture + noms deduits
+                        sheets, inferred = apply_header_inference_excel(sheets, f)
+
+                    if not sheets:
+                        st.error(f"❌ Aucun onglet lisible dans {display_name}")
                         continue
 
-                    key = display_name + " :: " + sheet_name
-                    # [MEM] pas de .copy() : le DataFrame vient d'etre lu et
-                    # nous appartient, on le complete en place (evite de
-                    # doubler la memoire sur les gros fichiers).
-                    df["__source_file__"] = display_name
-                    df["__source_sheet__"] = sheet_name
-                    all_sheets[key] = df
+                    inferred_this_load.extend(f"{display_name} :: {n}" for n in inferred)
 
-            except Exception as e:
-                st.error(f"❌ Erreur lecture {display_name}: {str(e)}")
+                    sheet_items = list(sheets.items())
+                    total_sheet_items = len(sheet_items)
 
-        update_progress(progress_bar, 80, "Lecture Excel terminée. Finalisation...")
+                    for s_idx, (sheet_name, df) in enumerate(sheet_items):
+                        if total_sheet_items > 0:
+                            step_within_file = int(((s_idx + 1) / total_sheet_items) * (80 / max(total_files, 1)))
+                        else:
+                            step_within_file = 0
+                        update_progress(
+                            progress_bar,
+                            base_pct + step_within_file,
+                            f"Traitement de l'onglet {s_idx+1}/{total_sheet_items} de {display_name}"
+                        )
 
-    if need_reload and google_url.strip() and is_google_sheet_url(google_url):
-        if progress_bar is None:
-            progress_bar = start_progress("Chargement Google Sheets... 0%")
+                        if df is None or len(df) == 0:
+                            st.warning(f"⚠️ {display_name} :: {sheet_name} est vide, ignoré.")
+                            continue
 
-        update_progress(progress_bar, 85 if files else 10, "Récupération des onglets Google Sheets...")
-        # read_google_sheets_all_sheets renvoie aussi le VRAI nom du classeur
-        # Google (lu dans l'en-tete du telechargement) -> la colonne source
-        # affiche le vrai nom du fichier, pas "Google Sheets".
-        sheets, inferred, gs_name = read_google_sheets_all_sheets(google_url)
-        inferred_this_load.extend(f"{gs_name} :: {n}" for n in inferred)
-        if sheets:
-            sheet_items = list(sheets.items())
-            total_sheet_items = len(sheet_items)
-            for s_idx, (sheet_name, df) in enumerate(sheet_items):
-                start_pct = 85 if files else 10
-                end_pct = 98
-                pct = start_pct + int(((s_idx + 1) / max(total_sheet_items, 1)) * (end_pct - start_pct))
-                update_progress(progress_bar, pct, f"Traitement Google Sheet {s_idx+1}/{total_sheet_items}")
-                if len(df) > 0:
-                    key = gs_name + " :: " + sheet_name
-                    # [MEM] pas de .copy() (voir import Excel ci-dessus)
-                    df["__source_file__"] = gs_name
-                    df["__source_sheet__"] = sheet_name
-                    all_sheets[key] = df
-            st.success(f"✅ Google Sheets importé avec {len(sheets)} onglet(s) détecté(s).")
-        else:
-            st.warning("⚠️ Impossible de lire le Google Sheets.")
+                        key = display_name + " :: " + sheet_name
+                        # [MEM] pas de .copy() : le DataFrame vient d'etre lu et
+                        # nous appartient, on le complete en place (evite de
+                        # doubler la memoire sur les gros fichiers).
+                        df["__source_file__"] = display_name
+                        df["__source_sheet__"] = sheet_name
+                        all_sheets[key] = df
 
-    if progress_bar is not None:
-        end_progress(progress_bar, "Chargement terminé à 100%")
+                except Exception as e:
+                    st.error(f"❌ Erreur lecture {display_name}: {str(e)}")
 
-    if need_reload:
-        # Memoriser le resultat pour ne plus reparser aux prochains reruns
-        st.session_state.all_sheets = all_sheets
-        st.session_state.loaded_signature = current_sig
+            update_progress(progress_bar, 80, "Lecture Excel terminée. Finalisation...")
 
-        # [2] Garder la liste des onglets corriges pour l'afficher a chaque rerun
-        st.session_state.inferred_header_sheets = inferred_this_load
+        if need_reload and google_url.strip() and is_google_sheet_url(google_url):
+            if progress_bar is None:
+                progress_bar = start_progress("Chargement Google Sheets... 0%")
 
-        # [3] Nouvel import = on repart avec tous les onglets inclus
-        st.session_state.excluded_sheets = set()
+            update_progress(progress_bar, 85 if files else 10, "Récupération des onglets Google Sheets...")
+            # read_google_sheets_all_sheets renvoie aussi le VRAI nom du classeur
+            # Google (lu dans l'en-tete du telechargement) -> la colonne source
+            # affiche le vrai nom du fichier, pas "Google Sheets".
+            sheets, inferred, gs_name = read_google_sheets_all_sheets(google_url)
+            inferred_this_load.extend(f"{gs_name} :: {n}" for n in inferred)
+            if sheets:
+                sheet_items = list(sheets.items())
+                total_sheet_items = len(sheet_items)
+                for s_idx, (sheet_name, df) in enumerate(sheet_items):
+                    start_pct = 85 if files else 10
+                    end_pct = 98
+                    pct = start_pct + int(((s_idx + 1) / max(total_sheet_items, 1)) * (end_pct - start_pct))
+                    update_progress(progress_bar, pct, f"Traitement Google Sheet {s_idx+1}/{total_sheet_items}")
+                    if len(df) > 0:
+                        key = gs_name + " :: " + sheet_name
+                        # [MEM] pas de .copy() (voir import Excel ci-dessus)
+                        df["__source_file__"] = gs_name
+                        df["__source_sheet__"] = sheet_name
+                        all_sheets[key] = df
+                st.success(f"✅ Google Sheets importé avec {len(sheets)} onglet(s) détecté(s).")
+            else:
+                st.warning("⚠️ Impossible de lire le Google Sheets.")
 
-        # Repartir sur des mappings propres pour ce nouvel ensemble
-        st.session_state.sheet_mappings = {}
-        for _k in list(st.session_state.keys()):
-            if isinstance(_k, str) and (
-                _k.startswith("map_") or _k.startswith("inc_sheet_") or _k.startswith("inc_file_")
-            ):
-                del st.session_state[_k]
+        if progress_bar is not None:
+            end_progress(progress_bar, "Chargement terminé à 100%")
 
-        # [FIX 3 onglets] Auto-assignation de TOUS les onglets des l'import,
-        # pour qu'aucun onglet ne reste vide et sans avoir a cliquer.
-        for _sk, _sdf in all_sheets.items():
-            _new_map, _, _ = auto_assign_single_sheet(_sk, _sdf, st.session_state.master_columns)
-            st.session_state.sheet_mappings[_sk] = _new_map
-            for _src, _master in _new_map.items():
-                st.session_state[f"map_{_sk}_{_src}"] = _master
+        if need_reload:
+            # Memoriser le resultat pour ne plus reparser aux prochains reruns
+            st.session_state.all_sheets = all_sheets
+            st.session_state.loaded_signature = current_sig
 
-    if all_sheets:
-        # [2] Prevenir que des en-tetes ont ete deduites (persiste entre les reruns)
-        if st.session_state.inferred_header_sheets:
-            st.warning(
-                "⚠️ En-tetes absentes detectees et deduites pour : "
-                + ", ".join(f"**{n}**" for n in st.session_state.inferred_header_sheets)
-                + ". Les colonnes ont ete nommees d'apres leur contenu et aucune ligne "
-                  "n'a ete perdue. Verifiez l'assignation ci-dessous."
-            )
+            # [2] Garder la liste des onglets corriges pour l'afficher a chaque rerun
+            st.session_state.inferred_header_sheets = inferred_this_load
 
-        # [3] Selection des fichiers / onglets a inclure
-        with st.expander("🗂️ Choisir les fichiers et onglets a inclure", expanded=False):
-            st.caption("Decochez ce que vous ne voulez pas traiter. "
-                       "Aucun fichier n'est relu : le changement est immediat.")
+            # [3] Nouvel import = on repart avec tous les onglets inclus
+            st.session_state.excluded_sheets = set()
 
-            sheets_by_file = {}
-            for k in all_sheets.keys():
-                fname = k.split(" :: ")[0]
-                sheets_by_file.setdefault(fname, []).append(k)
+            # Repartir sur des mappings propres pour ce nouvel ensemble
+            st.session_state.sheet_mappings = {}
+            for _k in list(st.session_state.keys()):
+                if isinstance(_k, str) and (
+                    _k.startswith("map_") or _k.startswith("inc_sheet_") or _k.startswith("inc_file_")
+                ):
+                    del st.session_state[_k]
 
-            for fname, keys in sheets_by_file.items():
-                file_included = all(k not in st.session_state.excluded_sheets for k in keys)
-                file_key = f"inc_file_{fname}"
-                prev_key = f"inc_file_prev_{fname}"
+            # [FIX 3 onglets] Auto-assignation de TOUS les onglets des l'import,
+            # pour qu'aucun onglet ne reste vide et sans avoir a cliquer.
+            for _sk, _sdf in all_sheets.items():
+                _new_map, _, _ = auto_assign_single_sheet(_sk, _sdf, st.session_state.master_columns)
+                st.session_state.sheet_mappings[_sk] = _new_map
+                for _src, _master in _new_map.items():
+                    st.session_state[f"map_{_sk}_{_src}"] = _master
 
-                inc_file = st.checkbox(f"**{fname}** ({len(keys)} onglet(s))",
-                                       value=file_included, key=file_key)
+        if all_sheets:
+            # [2] Prevenir que des en-tetes ont ete deduites (persiste entre les reruns)
+            if st.session_state.inferred_header_sheets:
+                st.warning(
+                    "⚠️ En-tetes absentes detectees et deduites pour : "
+                    + ", ".join(f"**{n}**" for n in st.session_state.inferred_header_sheets)
+                    + ". Les colonnes ont ete nommees d'apres leur contenu et aucune ligne "
+                      "n'a ete perdue. Verifiez l'assignation ci-dessous."
+                )
 
-                # Bascule au niveau FICHIER : on propage a tous ses onglets.
-                # On ne le fait qu'au moment ou l'utilisateur change la case,
-                # sinon on ecraserait ses choix onglet par onglet.
-                prev = st.session_state.get(prev_key)
-                if prev is not None and prev != inc_file:
+            # [3] Selection des fichiers / onglets a inclure
+            with st.expander("🗂️ Choisir les fichiers et onglets a inclure", expanded=False):
+                st.caption("Decochez ce que vous ne voulez pas traiter. "
+                           "Aucun fichier n'est relu : le changement est immediat.")
+
+                sheets_by_file = {}
+                for k in all_sheets.keys():
+                    fname = k.split(" :: ")[0]
+                    sheets_by_file.setdefault(fname, []).append(k)
+
+                for fname, keys in sheets_by_file.items():
+                    file_included = all(k not in st.session_state.excluded_sheets for k in keys)
+                    file_key = f"inc_file_{fname}"
+                    prev_key = f"inc_file_prev_{fname}"
+
+                    inc_file = st.checkbox(f"**{fname}** ({len(keys)} onglet(s))",
+                                           value=file_included, key=file_key)
+
+                    # Bascule au niveau FICHIER : on propage a tous ses onglets.
+                    # On ne le fait qu'au moment ou l'utilisateur change la case,
+                    # sinon on ecraserait ses choix onglet par onglet.
+                    prev = st.session_state.get(prev_key)
+                    if prev is not None and prev != inc_file:
+                        for k in keys:
+                            if inc_file:
+                                st.session_state.excluded_sheets.discard(k)
+                            else:
+                                st.session_state.excluded_sheets.add(k)
+                            st.session_state[f"inc_sheet_{k}"] = inc_file
+                        st.session_state[prev_key] = inc_file
+                        st.rerun()
+                    st.session_state[prev_key] = inc_file
+
                     for k in keys:
-                        if inc_file:
+                        sheet_name = k.split(" :: ", 1)[1] if " :: " in k else k
+                        n_rows = len(all_sheets[k])
+                        inc_sheet = st.checkbox(
+                            f"　└ {sheet_name} — {n_rows} lignes",
+                            value=(k not in st.session_state.excluded_sheets),
+                            key=f"inc_sheet_{k}"
+                        )
+                        if inc_sheet:
                             st.session_state.excluded_sheets.discard(k)
                         else:
                             st.session_state.excluded_sheets.add(k)
-                        st.session_state[f"inc_sheet_{k}"] = inc_file
-                    st.session_state[prev_key] = inc_file
-                    st.rerun()
-                st.session_state[prev_key] = inc_file
 
-                for k in keys:
-                    sheet_name = k.split(" :: ", 1)[1] if " :: " in k else k
-                    n_rows = len(all_sheets[k])
-                    inc_sheet = st.checkbox(
-                        f"　└ {sheet_name} — {n_rows} lignes",
-                        value=(k not in st.session_state.excluded_sheets),
-                        key=f"inc_sheet_{k}"
-                    )
-                    if inc_sheet:
-                        st.session_state.excluded_sheets.discard(k)
-                    else:
-                        st.session_state.excluded_sheets.add(k)
+            # Seuls les onglets coches sont mappes puis fusionnes
+            active_sheets = {k: v for k, v in all_sheets.items()
+                             if k not in st.session_state.excluded_sheets}
 
-        # Seuls les onglets coches sont mappes puis fusionnes
-        active_sheets = {k: v for k, v in all_sheets.items()
-                         if k not in st.session_state.excluded_sheets}
+            total_files = len(set([k.split(" :: ")[0] for k in active_sheets.keys()]))
+            total_sheets = len(all_sheets)
+            n_active = len(active_sheets)
+            n_excluded = total_sheets - n_active
 
-        total_files = len(set([k.split(" :: ")[0] for k in active_sheets.keys()]))
-        total_sheets = len(all_sheets)
-        n_active = len(active_sheets)
-        n_excluded = total_sheets - n_active
+            if n_excluded:
+                st.success(f"✅ {total_sheets} onglet(s) détecté(s) — **{n_active} inclus**, "
+                           f"{n_excluded} exclu(s) · {total_files} fichier(s) traité(s).")
+            else:
+                st.success(f"✅ {total_files} fichier(s) importés, {total_sheets} onglet(s) détecté(s) au total.")
 
-        if n_excluded:
-            st.success(f"✅ {total_sheets} onglet(s) détecté(s) — **{n_active} inclus**, "
-                       f"{n_excluded} exclu(s) · {total_files} fichier(s) traité(s).")
-        else:
-            st.success(f"✅ {total_files} fichier(s) importés, {total_sheets} onglet(s) détecté(s) au total.")
+            # [ALERTE] Prevenir seulement pour un volume vraiment eleve. Le compte
+            # dispose de 2,7 Go de RAM ; mesure reelle : ~540 Mo pour 257 000
+            # lignes. Le seuil est donc place haut (600 000 lignes) pour ne pas
+            # alerter inutilement.
+            total_rows_all = sum(len(v) for v in active_sheets.values())
+            if total_rows_all > 600000:
+                st.warning(
+                    f"⚠️ Volume important : **{total_rows_all:,} lignes** au total. "
+                    "Ton hébergement dispose de 2,7 Go de RAM ; à ce niveau le "
+                    "traitement peut devenir lent ou instable. En cas de souci : "
+                    "importe moins de fichiers/onglets à la fois, exclus les onglets "
+                    "inutiles ci-dessous, ou découpe le fichier."
+                )
 
-        # [ALERTE] Prevenir seulement pour un volume vraiment eleve. Le compte
-        # dispose de 2,7 Go de RAM ; mesure reelle : ~540 Mo pour 257 000
-        # lignes. Le seuil est donc place haut (600 000 lignes) pour ne pas
-        # alerter inutilement.
-        total_rows_all = sum(len(v) for v in active_sheets.values())
-        if total_rows_all > 600000:
-            st.warning(
-                f"⚠️ Volume important : **{total_rows_all:,} lignes** au total. "
-                "Ton hébergement dispose de 2,7 Go de RAM ; à ce niveau le "
-                "traitement peut devenir lent ou instable. En cas de souci : "
-                "importe moins de fichiers/onglets à la fois, exclus les onglets "
-                "inutiles ci-dessous, ou découpe le fichier."
-            )
+            with st.expander("📋 Detail des onglets importes"):
+                for k, df in all_sheets.items():
+                    parts = k.split(" :: ")
+                    filename = parts[0]
+                    sheetname = parts[1] if len(parts) > 1 else "Unknown"
+                    num_rows = len(df)
+                    real_cols = [c for c in df.columns if c not in ["__source_file__", "__source_sheet__"]]
+                    num_cols = len(real_cols)
+                    num_dup = df.duplicated().sum()
+                    flag = "" if k in active_sheets else " · ⛔ exclu"
 
-        with st.expander("📋 Detail des onglets importes"):
-            for k, df in all_sheets.items():
-                parts = k.split(" :: ")
-                filename = parts[0]
-                sheetname = parts[1] if len(parts) > 1 else "Unknown"
-                num_rows = len(df)
-                real_cols = [c for c in df.columns if c not in ["__source_file__", "__source_sheet__"]]
-                num_cols = len(real_cols)
-                num_dup = df.duplicated().sum()
-                flag = "" if k in active_sheets else " · ⛔ exclu"
+                    st.write(f"**{filename}** → **{sheetname}** : {num_rows} lignes, {num_cols} colonnes, {num_dup} doublons{flag}")
 
-                st.write(f"**{filename}** → **{sheetname}** : {num_rows} lignes, {num_cols} colonnes, {num_dup} doublons{flag}")
+            if not active_sheets:
+                st.warning("⚠️ Tous les onglets sont exclus. Cochez-en au moins un pour continuer.")
 
-        if not active_sheets:
-            st.warning("⚠️ Tous les onglets sont exclus. Cochez-en au moins un pour continuer.")
+            st.markdown("---")
+            st.subheader("Assignation des colonnes")
 
-        st.markdown("---")
-        st.subheader("Assignation des colonnes")
-
-        col_global_auto, col_space = st.columns([1, 3])
-        with col_global_auto:
-            if st.button("🚀 Auto-assigner TOUS les onglets", key="auto_all_sheets", type="primary"):
-                total_sheets_count = len(active_sheets)
-                for sheet_key, sheet_df in active_sheets.items():
-                    new_mapping, matched_count, total_cols = auto_assign_single_sheet(
-                        sheet_key, sheet_df, st.session_state.master_columns
-                    )
-                    st.session_state.sheet_mappings[sheet_key] = new_mapping
-                    for src_col, master_col in new_mapping.items():
-                        widget_key = f"map_{sheet_key}_{src_col}"
-                        st.session_state[widget_key] = master_col
-
-                st.success(f"✅ Auto-assignation terminée pour {total_sheets_count} onglet(s).")
-                st.rerun()
-
-        st.markdown("---")
-
-        any_assigned = False
-
-        for sheet_idx, (sheet_key, sheet_df) in enumerate(active_sheets.items()):
-            st.markdown(f"### 📄 {sheet_key}")
-
-            real_columns = [c for c in sheet_df.columns if c not in ["__source_file__", "__source_sheet__"]]
-            num_rows = len(sheet_df)
-            num_cols = len(real_columns)
-            num_duplicates = sheet_df.duplicated().sum()
-
-            st.write(f"**Résumé :** {num_rows} lignes | {num_cols} colonnes | {num_duplicates} doublons")
-
-            if sheet_key not in st.session_state.sheet_mappings:
-                st.session_state.sheet_mappings[sheet_key] = {}
-
-            col_auto, col_space = st.columns([1, 3])
-            with col_auto:
-                if st.button(f"🚀 Auto", key=f"auto_{sheet_key}"):
-                    new_mapping, matched_count, total_cols = auto_assign_single_sheet(
-                        sheet_key, sheet_df, st.session_state.master_columns
-                    )
-                    st.session_state.sheet_mappings[sheet_key] = new_mapping
-                    for src_col, master_col in new_mapping.items():
-                        widget_key = f"map_{sheet_key}_{src_col}"
-                        st.session_state[widget_key] = master_col
-                    st.success(f"✅ {matched_count}/{total_cols} colonnes assignées")
-                    st.rerun()
-
-            st.write("**Colonne maître (menu) et aperçu des données forment un même tableau : chaque menu est aligné, à la même largeur, au-dessus de sa colonne.**")
-
-            preview_df = sheet_df.head(6).copy()
-
-            current_mapping = st.session_state.sheet_mappings[sheet_key]
-
-            updated_mapping = {}
-
-            # [7 - tableau aligne] Menus (ligne du haut) + apercu des donnees
-            # rendus dans la MEME grille st.columns(n) -> memes largeurs, parfait
-            # alignement vertical, comme des cellules empilees d'un seul tableau.
-            # Le conteneur porte une cle pour cibler le CSS (fond accentue sur la
-            # ligne des menus, cellules compactes en dessous).
-            with st.container(key=f"maptbl-{sheet_idx}"):
-                # Ligne 1 : les menus des colonnes maitres (visuellement distincts)
-                menu_cols = st.columns(len(real_columns))
-                for idx, src_col in enumerate(real_columns):
-                    with menu_cols[idx]:
-                        current = current_mapping.get(src_col, "(non assigne)")
-                        widget_key = f"map_{sheet_key}_{src_col}"
-
-                        if widget_key in st.session_state:
-                            current = st.session_state[widget_key]
-                        else:
-                            st.session_state[widget_key] = current
-
-                        already_used_in_current = [updated_mapping.get(c, "") for c in real_columns if c != src_col and updated_mapping.get(c) != "(non assigne)"]
-                        available_options = ["(non assigne)"] + [m for m in st.session_state.master_columns if m not in already_used_in_current]
-
-                        if current not in available_options:
-                            current = "(non assigne)"
-                            st.session_state[widget_key] = current
-
-                        try:
-                            idx_val = available_options.index(current)
-                        except ValueError:
-                            idx_val = 0
-
-                        choice = st.selectbox(
-                            str(src_col),  # str() : evite le crash Cloud si l'en-tete est un nombre
-                            options=available_options,
-                            index=idx_val,
-                            key=widget_key,
-                            label_visibility="visible",
+            col_global_auto, col_space = st.columns([1, 3])
+            with col_global_auto:
+                if st.button("🚀 Auto-assigner TOUS les onglets", key="auto_all_sheets", type="primary"):
+                    total_sheets_count = len(active_sheets)
+                    for sheet_key, sheet_df in active_sheets.items():
+                        new_mapping, matched_count, total_cols = auto_assign_single_sheet(
+                            sheet_key, sheet_df, st.session_state.master_columns
                         )
-                        updated_mapping[src_col] = choice
-                        if choice != "(non assigne)":
-                            any_assigned = True
+                        st.session_state.sheet_mappings[sheet_key] = new_mapping
+                        for src_col, master_col in new_mapping.items():
+                            widget_key = f"map_{sheet_key}_{src_col}"
+                            st.session_state[widget_key] = master_col
 
-                # Lignes suivantes : apercu des donnees, memes colonnes -> aligne
-                for _, prow in preview_df.iterrows():
-                    data_cols = st.columns(len(real_columns))
-                    for idx, src_col in enumerate(real_columns):
-                        with data_cols[idx]:
-                            v = prow[src_col]
-                            txt = "" if pd.isna(v) else html.escape(str(v))
-                            st.markdown(f"<div class='mapcell'>{txt}</div>", unsafe_allow_html=True)
+                    st.success(f"✅ Auto-assignation terminée pour {total_sheets_count} onglet(s).")
+                    st.rerun()
 
-            st.session_state.sheet_mappings[sheet_key] = updated_mapping
             st.markdown("---")
 
-        if not any_assigned:
-            st.warning("⚠️ Veuillez assigner au moins une colonne maître avant de construire la base.")
-        else:
-            if st.button("✅ Construire la base de travail fusionnee", type="primary"):
-                rows = []
-                total_merged = 0
+            any_assigned = False
 
-                # [3] on ne fusionne QUE les onglets coches
-                for sheet_key, sheet_df in active_sheets.items():
-                    source_file = sheet_df["__source_file__"].iloc[0] if len(sheet_df) > 0 else sheet_key
-                    source_sheet = sheet_df["__source_sheet__"].iloc[0] if len(sheet_df) > 0 else "Unknown"
-                    mapping = st.session_state.sheet_mappings.get(sheet_key, {})
+            for sheet_idx, (sheet_key, sheet_df) in enumerate(active_sheets.items()):
+                st.markdown(f"### 📄 {sheet_key}")
 
-                    assigned_cols = [m for m in mapping.values() if m != "(non assigne)"]
-                    if not assigned_cols:
-                        st.warning(f"⚠️ {sheet_key}: Aucune colonne assignée, ignoré.")
-                        continue
+                real_columns = [c for c in sheet_df.columns if c not in ["__source_file__", "__source_sheet__"]]
+                num_rows = len(sheet_df)
+                num_cols = len(real_columns)
+                num_duplicates = sheet_df.duplicated().sum()
 
-                    sub = pd.DataFrame(index=sheet_df.index)
-                    for master_col in st.session_state.master_columns:
-                        src_cols_for_master = [s for s, m in mapping.items() if m == master_col and s in sheet_df.columns]
-                        if master_col == "Source Data":
-                            sub[master_col] = f"{source_file} ({source_sheet})"
-                        elif not src_cols_for_master:
-                            sub[master_col] = None
-                        elif len(src_cols_for_master) == 1:
-                            # [MEM] source unique : pas de .copy() (concat copiera)
-                            sub[master_col] = sheet_df[src_cols_for_master[0]]
-                        else:
-                            combined = sheet_df[src_cols_for_master[0]].copy()
-                            for extra_col in src_cols_for_master[1:]:
-                                is_empty = combined.isna() | (combined.astype(str).str.strip() == "")
-                                combined = combined.where(~is_empty, sheet_df[extra_col])
-                            sub[master_col] = combined
-                    rows.append(sub)
-                    total_merged += len(sub)
+                st.write(f"**Résumé :** {num_rows} lignes | {num_cols} colonnes | {num_duplicates} doublons")
 
-                if not rows:
-                    st.error("❌ Aucun onglet avec assignation trouvé.")
-                else:
-                    final_df = pd.concat(rows, ignore_index=True)
-                    final_df = final_df.dropna(how="all")
-                    # [MEM] liberer les DataFrames intermediaires : sur un gros
-                    # import ils doublent la memoire une fois la base construite.
-                    del rows
-                    gc.collect()
+                if sheet_key not in st.session_state.sheet_mappings:
+                    st.session_state.sheet_mappings[sheet_key] = {}
 
-                    # [MEM] colonnes a faible cardinalite -> "category" : enorme
-                    # economie sur des millions de lignes (ex: Source Data, qui
-                    # repete le meme libelle, passe de ~29 Mo a ~1 Mo/million).
-                    for _c in ("Source Data", "GENRE/CIVILITE", "VILLE"):
-                        if _c in final_df.columns:
+                col_auto, col_space = st.columns([1, 3])
+                with col_auto:
+                    if st.button(f"🚀 Auto", key=f"auto_{sheet_key}"):
+                        new_mapping, matched_count, total_cols = auto_assign_single_sheet(
+                            sheet_key, sheet_df, st.session_state.master_columns
+                        )
+                        st.session_state.sheet_mappings[sheet_key] = new_mapping
+                        for src_col, master_col in new_mapping.items():
+                            widget_key = f"map_{sheet_key}_{src_col}"
+                            st.session_state[widget_key] = master_col
+                        st.success(f"✅ {matched_count}/{total_cols} colonnes assignées")
+                        st.rerun()
+
+                st.write("**Colonne maître (menu) et aperçu des données forment un même tableau : chaque menu est aligné, à la même largeur, au-dessus de sa colonne.**")
+
+                preview_df = sheet_df.head(6).copy()
+
+                current_mapping = st.session_state.sheet_mappings[sheet_key]
+
+                updated_mapping = {}
+
+                # [7 - tableau aligne] Menus (ligne du haut) + apercu des donnees
+                # rendus dans la MEME grille st.columns(n) -> memes largeurs, parfait
+                # alignement vertical, comme des cellules empilees d'un seul tableau.
+                # Le conteneur porte une cle pour cibler le CSS (fond accentue sur la
+                # ligne des menus, cellules compactes en dessous).
+                with st.container(key=f"maptbl-{sheet_idx}"):
+                    # Ligne 1 : les menus des colonnes maitres (visuellement distincts)
+                    menu_cols = st.columns(len(real_columns))
+                    for idx, src_col in enumerate(real_columns):
+                        with menu_cols[idx]:
+                            current = current_mapping.get(src_col, "(non assigne)")
+                            widget_key = f"map_{sheet_key}_{src_col}"
+
+                            if widget_key in st.session_state:
+                                current = st.session_state[widget_key]
+                            else:
+                                st.session_state[widget_key] = current
+
+                            already_used_in_current = [updated_mapping.get(c, "") for c in real_columns if c != src_col and updated_mapping.get(c) != "(non assigne)"]
+                            available_options = ["(non assigne)"] + [m for m in st.session_state.master_columns if m not in already_used_in_current]
+
+                            if current not in available_options:
+                                current = "(non assigne)"
+                                st.session_state[widget_key] = current
+
                             try:
-                                final_df[_c] = final_df[_c].astype("category")
-                            except Exception:
-                                pass
+                                idx_val = available_options.index(current)
+                            except ValueError:
+                                idx_val = 0
 
-                    if len(final_df) == 0:
-                        st.error("❌ La base fusionnée est vide après nettoyage.")
+                            choice = st.selectbox(
+                                str(src_col),  # str() : evite le crash Cloud si l'en-tete est un nombre
+                                options=available_options,
+                                index=idx_val,
+                                key=widget_key,
+                                label_visibility="visible",
+                            )
+                            updated_mapping[src_col] = choice
+                            if choice != "(non assigne)":
+                                any_assigned = True
+
+                    # Lignes suivantes : apercu des donnees, memes colonnes -> aligne
+                    for _, prow in preview_df.iterrows():
+                        data_cols = st.columns(len(real_columns))
+                        for idx, src_col in enumerate(real_columns):
+                            with data_cols[idx]:
+                                v = prow[src_col]
+                                txt = "" if pd.isna(v) else html.escape(str(v))
+                                st.markdown(f"<div class='mapcell'>{txt}</div>", unsafe_allow_html=True)
+
+                st.session_state.sheet_mappings[sheet_key] = updated_mapping
+                st.markdown("---")
+
+            if not any_assigned:
+                st.warning("⚠️ Veuillez assigner au moins une colonne maître avant de construire la base.")
+            else:
+                if st.button("✅ Construire la base de travail fusionnee", type="primary"):
+                    rows = []
+                    total_merged = 0
+
+                    # [3] on ne fusionne QUE les onglets coches
+                    for sheet_key, sheet_df in active_sheets.items():
+                        source_file = sheet_df["__source_file__"].iloc[0] if len(sheet_df) > 0 else sheet_key
+                        source_sheet = sheet_df["__source_sheet__"].iloc[0] if len(sheet_df) > 0 else "Unknown"
+                        mapping = st.session_state.sheet_mappings.get(sheet_key, {})
+
+                        assigned_cols = [m for m in mapping.values() if m != "(non assigne)"]
+                        if not assigned_cols:
+                            st.warning(f"⚠️ {sheet_key}: Aucune colonne assignée, ignoré.")
+                            continue
+
+                        sub = pd.DataFrame(index=sheet_df.index)
+                        for master_col in st.session_state.master_columns:
+                            src_cols_for_master = [s for s, m in mapping.items() if m == master_col and s in sheet_df.columns]
+                            if master_col == "Source Data":
+                                sub[master_col] = f"{source_file} ({source_sheet})"
+                            elif not src_cols_for_master:
+                                sub[master_col] = None
+                            elif len(src_cols_for_master) == 1:
+                                # [MEM] source unique : pas de .copy() (concat copiera)
+                                sub[master_col] = sheet_df[src_cols_for_master[0]]
+                            else:
+                                combined = sheet_df[src_cols_for_master[0]].copy()
+                                for extra_col in src_cols_for_master[1:]:
+                                    is_empty = combined.isna() | (combined.astype(str).str.strip() == "")
+                                    combined = combined.where(~is_empty, sheet_df[extra_col])
+                                sub[master_col] = combined
+                        rows.append(sub)
+                        total_merged += len(sub)
+
+                    if not rows:
+                        st.error("❌ Aucun onglet avec assignation trouvé.")
                     else:
-                        st.session_state.final_df = final_df
-                        # invalider un eventuel export mis en cache (base changee)
-                        for _k in ("_export_csv", "_export_xlsx"):
-                            st.session_state.pop(_k, None)
-                        st.success(f"✅ Base construite : {len(final_df)} lignes fusionnées.")
-                        st.dataframe(final_df.head(50), use_container_width=True)
-    else:
-        st.info("ℹ️ Importe un fichier Excel ou colle une URL Google Sheets pour continuer.")
+                        final_df = pd.concat(rows, ignore_index=True)
+                        final_df = final_df.dropna(how="all")
+                        # [MEM] liberer les DataFrames intermediaires : sur un gros
+                        # import ils doublent la memoire une fois la base construite.
+                        del rows
+                        gc.collect()
 
+                        # [MEM] colonnes a faible cardinalite -> "category" : enorme
+                        # economie sur des millions de lignes (ex: Source Data, qui
+                        # repete le meme libelle, passe de ~29 Mo a ~1 Mo/million).
+                        for _c in ("Source Data", "GENRE/CIVILITE", "VILLE"):
+                            if _c in final_df.columns:
+                                try:
+                                    final_df[_c] = final_df[_c].astype("category")
+                                except Exception:
+                                    pass
+
+                        if len(final_df) == 0:
+                            st.error("❌ La base fusionnée est vide après nettoyage.")
+                        else:
+                            st.session_state.final_df = final_df
+                            # invalider un eventuel export mis en cache (base changee)
+                            for _k in ("_export_csv", "_export_xlsx"):
+                                st.session_state.pop(_k, None)
+                            st.success(f"✅ Base construite : {len(final_df)} lignes fusionnées.")
+                            st.dataframe(final_df.head(50), use_container_width=True)
+        else:
+            st.info("ℹ️ Importe un fichier Excel ou colle une URL Google Sheets pour continuer.")
+
+    except Exception:
+        st.error("\u274c Une erreur est survenue dans cet onglet. Copie-colle le detail ci-dessous pour diagnostic.")
+        st.code(traceback.format_exc(), language="text")
 with tab3:
-    st.subheader("Filtrer la base de travail")
-    if st.session_state.final_df is None:
-        st.info("ℹ️ Importez et mappez des fichiers dans l'onglet precedent avant de filtrer.")
-    else:
-        # [PERF] PAS de .copy() ici : sur des millions de lignes, recopier la
-        # base entiere a chaque clic est le principal facteur de lenteur. On
-        # lit la base telle quelle ; le filtrage cree une nouvelle vue.
-        df = st.session_state.final_df
-        total_lines = len(df)
-        st.write(f"Base actuelle : **{total_lines}** lignes importees")
+    try:
+        st.subheader("Filtrer la base de travail")
+        if st.session_state.final_df is None:
+            st.info("ℹ️ Importez et mappez des fichiers dans l'onglet precedent avant de filtrer.")
+        else:
+            # [PERF] PAS de .copy() ici : sur des millions de lignes, recopier la
+            # base entiere a chaque clic est le principal facteur de lenteur. On
+            # lit la base telle quelle ; le filtrage cree une nouvelle vue.
+            df = st.session_state.final_df
+            total_lines = len(df)
+            st.write(f"Base actuelle : **{total_lines}** lignes importees")
 
-        # [5] Application d'un filtre enregistre : on positionne les widgets
-        # AVANT de les afficher (le bouton "Appliquer" a declenche un rerun).
-        pending = st.session_state.pop("_apply_filter", None)
-        if pending is not None:
-            col = pending.get("column")
-            if col in st.session_state.master_columns and col in df.columns:
-                st.session_state["tab3_filter_col"] = col
-                if pending.get("kind") == "departements":
-                    st.session_state["tab3_dep_input"] = ",".join(pending.get("values", []))
-                else:
-                    avail = sorted([v for v in df[col].dropna().unique()])
-                    st.session_state["tab3_selected_vals"] = [
-                        v for v in pending.get("values", []) if v in avail
-                    ]
-            else:
-                st.warning(f"⚠️ Le filtre vise la colonne '{col}', absente de la base actuelle.")
-
-        filter_col = st.selectbox(
-            "Filtrer par colonne",
-            options=["(aucun filtre)"] + st.session_state.master_columns,
-            key="tab3_filter_col",
-        )
-        filtered_df = df
-        dep_input = ""
-        selected_vals = []
-
-        if filter_col == "CP":
-            dep_input = st.text_input(
-                "Departements a filtrer (separes par des virgules, ex: 02,33,77)",
-                key="tab3_dep_input",
-            )
-            if dep_input.strip() and "CP" in df.columns:
-                prefixes = set(p.strip().zfill(2) for p in dep_input.split(",") if p.strip())
-                mask = df["CP"].apply(lambda v: cp_matches_prefix(v, prefixes) if pd.notna(v) else False)
-                filtered_df = df[mask]
-        elif filter_col != "(aucun filtre)":
-            # [PERF] Une colonne a des milliers de valeurs distinctes (NOM, EMAIL...)
-            # -> un menu deroulant deviendrait ingerable et lent. Au-dela d'un
-            # seuil, on bascule sur un filtre TEXTE.
-            n_unique = int(df[filter_col].nunique(dropna=True))
-            if n_unique > 1000:
-                st.caption(f"ℹ️ {n_unique} valeurs distinctes : trop pour une liste. "
-                           "Saisis la ou les valeurs exactes a conserver (separees par ;).")
-                txt = st.text_input(
-                    f"Valeur(s) exacte(s) pour {filter_col}",
-                    key="tab3_text_vals",
-                )
-                if txt.strip():
-                    selected_vals = [v.strip() for v in txt.split(";") if v.strip()]
-                    filtered_df = df[df[filter_col].isin(selected_vals)]
-            else:
-                unique_vals = sorted([v for v in df[filter_col].dropna().unique()])
-                # Securite : ne garder que des valeurs encore presentes (evite un
-                # plantage du multiselect).
-                if "tab3_selected_vals" in st.session_state:
-                    st.session_state["tab3_selected_vals"] = [
-                        v for v in st.session_state["tab3_selected_vals"] if v in unique_vals
-                    ]
-                selected_vals = st.multiselect(
-                    "Valeurs a conserver pour " + filter_col,
-                    options=unique_vals,
-                    key="tab3_selected_vals",
-                )
-                if selected_vals:
-                    filtered_df = df[df[filter_col].isin(selected_vals)]
-
-        remaining_lines = len(filtered_df)
-        st.write(f"Resultat filtre : **{remaining_lines}** lignes conservees sur **{total_lines}** au total")
-        st.dataframe(filtered_df.head(50), use_container_width=True)
-
-        # [PERF] Le comptage des doublons scanne toute la base : on ne le fait
-        # QUE sur demande (sinon il ralentirait chaque interaction).
-        dup_check_col = st.selectbox("Colonne pour detecter les doublons (ex: TELEPHONE MOBILE)", options=["(aucune)"] + st.session_state.master_columns)
-        if dup_check_col != "(aucune)" and dup_check_col in filtered_df.columns:
-            if st.button(f"🔎 Compter les doublons sur '{dup_check_col}'", key="tab3_count_dupes"):
-                dup_count = int(filtered_df[dup_check_col].duplicated(keep=False).sum())
-                st.warning(f"{dup_count} lignes en doublon detectees sur la colonne '{dup_check_col}' (non supprimees automatiquement).")
-
-        st.session_state.filtered_df = filtered_df
-
-        # -------------------------------------------------------------
-        # [5] FILTRES PRE-ENREGISTRES
-        # -------------------------------------------------------------
-        st.markdown("---")
-        with st.expander("💾 Filtres pre-enregistres", expanded=bool(st.session_state.saved_filters)):
-            # Peut-on enregistrer le filtre actuellement affiche ?
-            if filter_col == "CP" and dep_input.strip():
-                current_values = [p.strip().zfill(2) for p in dep_input.split(",") if p.strip()]
-                current_kind = "departements"
-            elif filter_col not in ("CP", "(aucun filtre)") and selected_vals:
-                current_values = list(selected_vals)
-                current_kind = "valeurs"
-            else:
-                current_values = []
-                current_kind = None
-
-            if current_kind:
-                st.caption(f"Filtre actuel : **{filter_col}** = {', '.join(map(str, current_values))}")
-            else:
-                st.caption("Choisissez une colonne et des valeurs ci-dessus pour pouvoir enregistrer un filtre.")
-
-            col_name, col_btn = st.columns([3, 1])
-            with col_name:
-                new_filter_name = st.text_input(
-                    "Nom du filtre", key="tab3_new_filter_name", label_visibility="collapsed",
-                    placeholder="Nom du filtre (ex: Sud-Ouest)",
-                )
-            with col_btn:
-                if st.button("💾 Enregistrer", key="tab3_save_filter", use_container_width=True):
-                    nm = new_filter_name.strip()
-                    if not current_kind:
-                        st.warning("⚠️ Aucun filtre a enregistrer (choisissez colonne + valeurs).")
-                    elif not nm:
-                        st.warning("⚠️ Donnez un nom au filtre.")
+            # [5] Application d'un filtre enregistre : on positionne les widgets
+            # AVANT de les afficher (le bouton "Appliquer" a declenche un rerun).
+            pending = st.session_state.pop("_apply_filter", None)
+            if pending is not None:
+                col = pending.get("column")
+                if col in st.session_state.master_columns and col in df.columns:
+                    st.session_state["tab3_filter_col"] = col
+                    if pending.get("kind") == "departements":
+                        st.session_state["tab3_dep_input"] = ",".join(pending.get("values", []))
                     else:
-                        new_filter = {
-                            "name": nm, "column": filter_col,
-                            "kind": current_kind, "values": current_values,
-                        }
-                        # remplace un filtre du meme nom, sinon ajoute
-                        replaced = False
-                        for i, f in enumerate(st.session_state.saved_filters):
-                            if f["name"].lower() == nm.lower():
-                                st.session_state.saved_filters[i] = new_filter
-                                replaced = True
-                                break
-                        if not replaced:
-                            st.session_state.saved_filters.append(new_filter)
-                        save_saved_filters(st.session_state.saved_filters)
-                        st.success(f"Filtre « {nm} » enregistre.")
-                        st.rerun()
+                        avail = sorted([v for v in df[col].dropna().unique()])
+                        st.session_state["tab3_selected_vals"] = [
+                            v for v in pending.get("values", []) if v in avail
+                        ]
+                else:
+                    st.warning(f"⚠️ Le filtre vise la colonne '{col}', absente de la base actuelle.")
 
-            if st.session_state.saved_filters:
-                st.markdown("**Filtres enregistres :**")
-            for i, f in enumerate(st.session_state.saved_filters):
-                st.caption(f"**{f['name']}** — {f['column']} : {', '.join(map(str, f['values'])) or '(vide)'}")
-                c1, c2, c3, c4 = st.columns([4, 1.2, 1.2, 1.2])
-                with c1:
-                    rn = st.text_input(
-                        "nom", value=f["name"], key=f"tab3_rn_{i}", label_visibility="collapsed",
+            filter_col = st.selectbox(
+                "Filtrer par colonne",
+                options=["(aucun filtre)"] + st.session_state.master_columns,
+                key="tab3_filter_col",
+            )
+            filtered_df = df
+            dep_input = ""
+            selected_vals = []
+
+            if filter_col == "CP":
+                dep_input = st.text_input(
+                    "Departements a filtrer (separes par des virgules, ex: 02,33,77)",
+                    key="tab3_dep_input",
+                )
+                if dep_input.strip() and "CP" in df.columns:
+                    prefixes = set(p.strip().zfill(2) for p in dep_input.split(",") if p.strip())
+                    mask = df["CP"].apply(lambda v: cp_matches_prefix(v, prefixes) if pd.notna(v) else False)
+                    filtered_df = df[mask]
+            elif filter_col != "(aucun filtre)":
+                # [PERF] Une colonne a des milliers de valeurs distinctes (NOM, EMAIL...)
+                # -> un menu deroulant deviendrait ingerable et lent. Au-dela d'un
+                # seuil, on bascule sur un filtre TEXTE.
+                n_unique = int(df[filter_col].nunique(dropna=True))
+                if n_unique > 1000:
+                    st.caption(f"ℹ️ {n_unique} valeurs distinctes : trop pour une liste. "
+                               "Saisis la ou les valeurs exactes a conserver (separees par ;).")
+                    txt = st.text_input(
+                        f"Valeur(s) exacte(s) pour {filter_col}",
+                        key="tab3_text_vals",
                     )
-                with c2:
-                    if st.button("Appliquer", key=f"tab3_apply_{i}", use_container_width=True):
-                        st.session_state["_apply_filter"] = f
-                        st.rerun()
-                with c3:
-                    if st.button("Renommer", key=f"tab3_ren_{i}", use_container_width=True):
-                        if rn.strip():
-                            st.session_state.saved_filters[i]["name"] = rn.strip()
+                    if txt.strip():
+                        selected_vals = [v.strip() for v in txt.split(";") if v.strip()]
+                        filtered_df = df[df[filter_col].isin(selected_vals)]
+                else:
+                    unique_vals = sorted([v for v in df[filter_col].dropna().unique()])
+                    # Securite : ne garder que des valeurs encore presentes (evite un
+                    # plantage du multiselect).
+                    if "tab3_selected_vals" in st.session_state:
+                        st.session_state["tab3_selected_vals"] = [
+                            v for v in st.session_state["tab3_selected_vals"] if v in unique_vals
+                        ]
+                    selected_vals = st.multiselect(
+                        "Valeurs a conserver pour " + filter_col,
+                        options=unique_vals,
+                        key="tab3_selected_vals",
+                    )
+                    if selected_vals:
+                        filtered_df = df[df[filter_col].isin(selected_vals)]
+
+            remaining_lines = len(filtered_df)
+            st.write(f"Resultat filtre : **{remaining_lines}** lignes conservees sur **{total_lines}** au total")
+            st.dataframe(filtered_df.head(50), use_container_width=True)
+
+            # [PERF] Le comptage des doublons scanne toute la base : on ne le fait
+            # QUE sur demande (sinon il ralentirait chaque interaction).
+            dup_check_col = st.selectbox("Colonne pour detecter les doublons (ex: TELEPHONE MOBILE)", options=["(aucune)"] + st.session_state.master_columns)
+            if dup_check_col != "(aucune)" and dup_check_col in filtered_df.columns:
+                if st.button(f"🔎 Compter les doublons sur '{dup_check_col}'", key="tab3_count_dupes"):
+                    dup_count = int(filtered_df[dup_check_col].duplicated(keep=False).sum())
+                    st.warning(f"{dup_count} lignes en doublon detectees sur la colonne '{dup_check_col}' (non supprimees automatiquement).")
+
+            st.session_state.filtered_df = filtered_df
+
+            # -------------------------------------------------------------
+            # [5] FILTRES PRE-ENREGISTRES
+            # -------------------------------------------------------------
+            st.markdown("---")
+            with st.expander("💾 Filtres pre-enregistres", expanded=bool(st.session_state.saved_filters)):
+                # Peut-on enregistrer le filtre actuellement affiche ?
+                if filter_col == "CP" and dep_input.strip():
+                    current_values = [p.strip().zfill(2) for p in dep_input.split(",") if p.strip()]
+                    current_kind = "departements"
+                elif filter_col not in ("CP", "(aucun filtre)") and selected_vals:
+                    current_values = list(selected_vals)
+                    current_kind = "valeurs"
+                else:
+                    current_values = []
+                    current_kind = None
+
+                if current_kind:
+                    st.caption(f"Filtre actuel : **{filter_col}** = {', '.join(map(str, current_values))}")
+                else:
+                    st.caption("Choisissez une colonne et des valeurs ci-dessus pour pouvoir enregistrer un filtre.")
+
+                col_name, col_btn = st.columns([3, 1])
+                with col_name:
+                    new_filter_name = st.text_input(
+                        "Nom du filtre", key="tab3_new_filter_name", label_visibility="collapsed",
+                        placeholder="Nom du filtre (ex: Sud-Ouest)",
+                    )
+                with col_btn:
+                    if st.button("💾 Enregistrer", key="tab3_save_filter", use_container_width=True):
+                        nm = new_filter_name.strip()
+                        if not current_kind:
+                            st.warning("⚠️ Aucun filtre a enregistrer (choisissez colonne + valeurs).")
+                        elif not nm:
+                            st.warning("⚠️ Donnez un nom au filtre.")
+                        else:
+                            new_filter = {
+                                "name": nm, "column": filter_col,
+                                "kind": current_kind, "values": current_values,
+                            }
+                            # remplace un filtre du meme nom, sinon ajoute
+                            replaced = False
+                            for i, f in enumerate(st.session_state.saved_filters):
+                                if f["name"].lower() == nm.lower():
+                                    st.session_state.saved_filters[i] = new_filter
+                                    replaced = True
+                                    break
+                            if not replaced:
+                                st.session_state.saved_filters.append(new_filter)
+                            save_saved_filters(st.session_state.saved_filters)
+                            st.success(f"Filtre « {nm} » enregistre.")
+                            st.rerun()
+
+                if st.session_state.saved_filters:
+                    st.markdown("**Filtres enregistres :**")
+                for i, f in enumerate(st.session_state.saved_filters):
+                    st.caption(f"**{f['name']}** — {f['column']} : {', '.join(map(str, f['values'])) or '(vide)'}")
+                    c1, c2, c3, c4 = st.columns([4, 1.2, 1.2, 1.2])
+                    with c1:
+                        rn = st.text_input(
+                            "nom", value=f["name"], key=f"tab3_rn_{i}", label_visibility="collapsed",
+                        )
+                    with c2:
+                        if st.button("Appliquer", key=f"tab3_apply_{i}", use_container_width=True):
+                            st.session_state["_apply_filter"] = f
+                            st.rerun()
+                    with c3:
+                        if st.button("Renommer", key=f"tab3_ren_{i}", use_container_width=True):
+                            if rn.strip():
+                                st.session_state.saved_filters[i]["name"] = rn.strip()
+                                save_saved_filters(st.session_state.saved_filters)
+                                st.rerun()
+                    with c4:
+                        if st.button("Supprimer", key=f"tab3_del_{i}", use_container_width=True):
+                            st.session_state.saved_filters.pop(i)
                             save_saved_filters(st.session_state.saved_filters)
                             st.rerun()
-                with c4:
-                    if st.button("Supprimer", key=f"tab3_del_{i}", use_container_width=True):
-                        st.session_state.saved_filters.pop(i)
-                        save_saved_filters(st.session_state.saved_filters)
-                        st.rerun()
 
-        # -------------------------------------------------------------
-        # [4] NETTOYAGE MEMOIRE (honnete : pas de tache de fond automatique)
-        # -------------------------------------------------------------
-        with st.expander("🧹 Memoire / cache"):
-            st.caption(
-                "Libere les fichiers importes gardes en memoire (utile apres avoir "
-                "construit la base). La base construite et le resultat filtre sont "
-                "CONSERVES. Streamlit n'offre pas de nettoyage automatique en tache "
-                "de fond : ce bouton est le moyen fiable de recuperer de la memoire."
-            )
-            if st.button("🧹 Vider le cache des fichiers importes", key="tab3_clear_cache"):
-                try:
-                    st.cache_data.clear()
-                except Exception:
-                    pass
-                for _k in ["all_sheets", "sheet_mappings", "loaded_signature",
-                           "excluded_sheets", "inferred_header_sheets"]:
-                    st.session_state.pop(_k, None)
-                for _k in [key for key in list(st.session_state.keys())
-                           if isinstance(key, str) and (
-                               key.startswith("map_") or key.startswith("inc_sheet_")
-                               or key.startswith("inc_file_"))]:
-                    st.session_state.pop(_k, None)
-                st.success("Cache vide. La base construite est conservee.")
-                st.rerun()
+            # -------------------------------------------------------------
+            # [4] NETTOYAGE MEMOIRE (honnete : pas de tache de fond automatique)
+            # -------------------------------------------------------------
+            with st.expander("🧹 Memoire / cache"):
+                st.caption(
+                    "Libere les fichiers importes gardes en memoire (utile apres avoir "
+                    "construit la base). La base construite et le resultat filtre sont "
+                    "CONSERVES. Streamlit n'offre pas de nettoyage automatique en tache "
+                    "de fond : ce bouton est le moyen fiable de recuperer de la memoire."
+                )
+                if st.button("🧹 Vider le cache des fichiers importes", key="tab3_clear_cache"):
+                    try:
+                        st.cache_data.clear()
+                    except Exception:
+                        pass
+                    for _k in ["all_sheets", "sheet_mappings", "loaded_signature",
+                               "excluded_sheets", "inferred_header_sheets"]:
+                        st.session_state.pop(_k, None)
+                    for _k in [key for key in list(st.session_state.keys())
+                               if isinstance(key, str) and (
+                                   key.startswith("map_") or key.startswith("inc_sheet_")
+                                   or key.startswith("inc_file_"))]:
+                        st.session_state.pop(_k, None)
+                    st.success("Cache vide. La base construite est conservee.")
+                    st.rerun()
 
+    except Exception:
+        st.error("\u274c Une erreur est survenue dans cet onglet. Copie-colle le detail ci-dessous pour diagnostic.")
+        st.code(traceback.format_exc(), language="text")
 with tab4:
-    st.subheader("Exporter le resultat filtre")
-    if st.session_state.filtered_df is None:
-        st.info("ℹ️ Appliquez un filtre dans l'onglet precedent avant d'exporter.")
-    else:
-        export_df = st.session_state.filtered_df
-        if len(export_df) == 0:
-            st.error("❌ Impossible d'exporter : aucune donnée à exporter après filtrage.")
+    try:
+        st.subheader("Exporter le resultat filtre")
+        if st.session_state.filtered_df is None:
+            st.info("ℹ️ Appliquez un filtre dans l'onglet precedent avant d'exporter.")
         else:
-            st.write(f"{len(export_df)} lignes pretes a l'export.")
+            export_df = st.session_state.filtered_df
+            if len(export_df) == 0:
+                st.error("❌ Impossible d'exporter : aucune donnée à exporter après filtrage.")
+            else:
+                st.write(f"{len(export_df)} lignes pretes a l'export.")
 
-            # [9] Nom du fichier personnalisable
-            raw_name = st.text_input(
-                "Nom du fichier (sans extension)",
-                value=st.session_state.export_name_base or "export_leads",
-                key="export_name_input"
-            )
-            st.session_state.export_name_base = raw_name
-            clean_name = sanitize_filename(raw_name)
-            st.caption(f"Fichiers generes : **{clean_name}.csv** / **{clean_name}.xlsx**")
+                # [9] Nom du fichier personnalisable
+                raw_name = st.text_input(
+                    "Nom du fichier (sans extension)",
+                    value=st.session_state.export_name_base or "export_leads",
+                    key="export_name_input"
+                )
+                st.session_state.export_name_base = raw_name
+                clean_name = sanitize_filename(raw_name)
+                st.caption(f"Fichiers generes : **{clean_name}.csv** / **{clean_name}.xlsx**")
 
-            # [PERF] On ne genere PLUS l'export a chaque affichage (l'Excel de
-            # plusieurs millions de lignes prend des minutes). On genere
-            # UNIQUEMENT au clic, et on garde le resultat en cache tant que la
-            # base filtree n'a pas change (signature = nb lignes + colonnes).
-            EXCEL_MAX_ROWS = 1_048_576
-            n_rows = len(export_df)
-            export_sig = (n_rows, tuple(map(str, export_df.columns)))
+                # [PERF] On ne genere PLUS l'export a chaque affichage (l'Excel de
+                # plusieurs millions de lignes prend des minutes). On genere
+                # UNIQUEMENT au clic, et on garde le resultat en cache tant que la
+                # base filtree n'a pas change (signature = nb lignes + colonnes).
+                EXCEL_MAX_ROWS = 1_048_576
+                n_rows = len(export_df)
+                export_sig = (n_rows, tuple(map(str, export_df.columns)))
 
-            col1, col2 = st.columns(2)
+                col1, col2 = st.columns(2)
 
-            with col1:
-                st.markdown("**Export CSV** — recommandé (rapide, sans limite)")
-                if st.button("⚙️ Préparer le CSV", key="gen_csv", type="primary"):
-                    with st.spinner("Génération du CSV..."):
-                        st.session_state["_export_csv"] = (export_sig, export_csv_safe(export_df))
-                cached = st.session_state.get("_export_csv")
-                if cached and cached[0] == export_sig and cached[1]:
-                    st.download_button(
-                        label="💾 Telecharger CSV",
-                        data=cached[1],
-                        file_name=f"{clean_name}.csv",
-                        mime="text/csv",
-                        key="dl_csv",
-                    )
-
-            with col2:
-                st.markdown("**Export Excel**")
-                if n_rows > EXCEL_MAX_ROWS:
-                    st.info(f"ℹ️ {n_rows:,} lignes : au-delà de la limite d'Excel "
-                            f"(~{EXCEL_MAX_ROWS:,} par onglet). Utilise l'export CSV.")
-                else:
-                    if n_rows > 100_000:
-                        st.caption("⚠️ Excel est lent au-delà de ~100 000 lignes "
-                                   "(~1 min/million). Le CSV est conseillé.")
-                    if st.button("⚙️ Préparer l'Excel", key="gen_xlsx"):
-                        with st.spinner("Génération de l'Excel (peut être long)..."):
-                            buf = export_excel_safe(export_df)
-                            st.session_state["_export_xlsx"] = (
-                                export_sig, buf.getvalue() if buf else None
-                            )
-                    cachedx = st.session_state.get("_export_xlsx")
-                    if cachedx and cachedx[0] == export_sig and cachedx[1]:
+                with col1:
+                    st.markdown("**Export CSV** — recommandé (rapide, sans limite)")
+                    if st.button("⚙️ Préparer le CSV", key="gen_csv", type="primary"):
+                        with st.spinner("Génération du CSV..."):
+                            st.session_state["_export_csv"] = (export_sig, export_csv_safe(export_df))
+                    cached = st.session_state.get("_export_csv")
+                    if cached and cached[0] == export_sig and cached[1]:
                         st.download_button(
-                            label="💾 Telecharger Excel",
-                            data=cachedx[1],
-                            file_name=f"{clean_name}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key="dl_xlsx",
+                            label="💾 Telecharger CSV",
+                            data=cached[1],
+                            file_name=f"{clean_name}.csv",
+                            mime="text/csv",
+                            key="dl_csv",
                         )
 
-            st.markdown("---")
-            st.info("ℹ️ Les fichiers sont encodés en UTF-8. Pour les très gros volumes, préfère le CSV.")
+                with col2:
+                    st.markdown("**Export Excel**")
+                    if n_rows > EXCEL_MAX_ROWS:
+                        st.info(f"ℹ️ {n_rows:,} lignes : au-delà de la limite d'Excel "
+                                f"(~{EXCEL_MAX_ROWS:,} par onglet). Utilise l'export CSV.")
+                    else:
+                        if n_rows > 100_000:
+                            st.caption("⚠️ Excel est lent au-delà de ~100 000 lignes "
+                                       "(~1 min/million). Le CSV est conseillé.")
+                        if st.button("⚙️ Préparer l'Excel", key="gen_xlsx"):
+                            with st.spinner("Génération de l'Excel (peut être long)..."):
+                                buf = export_excel_safe(export_df)
+                                st.session_state["_export_xlsx"] = (
+                                    export_sig, buf.getvalue() if buf else None
+                                )
+                        cachedx = st.session_state.get("_export_xlsx")
+                        if cachedx and cachedx[0] == export_sig and cachedx[1]:
+                            st.download_button(
+                                label="💾 Telecharger Excel",
+                                data=cachedx[1],
+                                file_name=f"{clean_name}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="dl_xlsx",
+                            )
+
+                st.markdown("---")
+                st.info("ℹ️ Les fichiers sont encodés en UTF-8. Pour les très gros volumes, préfère le CSV.")
+    except Exception:
+        st.error("\u274c Une erreur est survenue dans cet onglet. Copie-colle le detail ci-dessous pour diagnostic.")
+        st.code(traceback.format_exc(), language="text")

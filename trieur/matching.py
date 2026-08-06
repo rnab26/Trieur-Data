@@ -409,6 +409,32 @@ def looks_like_iban(value):
     return bool(_IBAN_SHAPE_RE.match(s))
 
 
+def iban_is_valid(value):
+    """Verifie le checksum ISO 7064 (mod 97) d'un IBAN.
+
+    Renvoie True/False si la valeur a la forme d'un IBAN (voir looks_like_iban),
+    ou None si non applicable (vide ou ne ressemble pas a un IBAN) -- pour ne
+    jamais compter une case vide ou une autre colonne comme "invalide".
+    Ne verifie PAS la longueur exacte par pays (pas de table de correspondance) :
+    le checksum suffit a detecter la grande majorite des erreurs de saisie/OCR.
+    """
+    if pd.isna(value):
+        return None
+    s = re.sub(r"\s+", "", str(value)).upper()
+    if not _IBAN_SHAPE_RE.match(s):
+        return None
+    rearranged = s[4:] + s[:4]
+    digits = []
+    for ch in rearranged:
+        if ch.isdigit():
+            digits.append(ch)
+        elif "A" <= ch <= "Z":
+            digits.append(str(ord(ch) - ord("A") + 10))
+        else:
+            return False
+    return int("".join(digits)) % 97 == 1
+
+
 def detect_iban_column(series, sample=200):
     """Analyse un ECHANTILLON du contenu d'une colonne (independamment de
     son nom) et dit si elle ressemble a une colonne d'IBAN.
@@ -673,4 +699,85 @@ def auto_assign_single_sheet(sheet_key, sheet_df, master_columns):
     new_mapping = auto_assign_columns_fast(real_columns, master_columns, sheet_df=sheet_df)
     matched_count = sum(1 for v in new_mapping.values() if v != "(non assigne)")
 
+    return new_mapping, matched_count, len(real_columns)
+
+
+# =============================================================
+# [12] MEMOIRE DU MAPPING PAR "FORME" DE FICHIER
+#
+# Un utilisateur qui reimporte regulierement des fichiers de MEME structure
+# (memes en-tetes, meme source) doit refaire le meme mapping manuel a chaque
+# fois -- penible sur mobile. On memorise le mapping CONFIRME (au moment ou
+# la base est construite) sous une empreinte independante de l'ordre et de
+# la casse des colonnes, et on le reapplique automatiquement au prochain
+# fichier de meme forme, en completant par la detection habituelle pour
+# toute colonne nouvelle/inconnue.
+# =============================================================
+def column_fingerprint(real_columns):
+    """Empreinte STABLE d'un jeu de colonnes source (independante de l'ordre
+    et de la casse) : sert a reconnaitre un fichier de meme structure qu'un
+    fichier deja importe."""
+    normed = sorted(set(normalize_column_name(c) for c in real_columns if str(c).strip()))
+    return "|".join(normed)
+
+
+def mapping_to_remembered(mapping):
+    """Convertit un mapping {source_col: master_col} confirme en forme
+    REJOUABLE sur un autre fichier de meme forme : cle = nom de colonne
+    source normalise (independant de la casse exacte)."""
+    return {
+        normalize_column_name(src): master
+        for src, master in mapping.items()
+        if master and master != "(non assigne)"
+    }
+
+
+def apply_remembered_mapping(real_columns, remembered):
+    """Reapplique un mapping memorise (cf mapping_to_remembered) a un jeu de
+    colonnes source, en respectant l'unicite des colonnes maitres."""
+    mapping = {}
+    used = set()
+    for src in real_columns:
+        master = (remembered or {}).get(normalize_column_name(src))
+        if master and master not in used:
+            mapping[src] = master
+            used.add(master)
+        else:
+            mapping[src] = "(non assigne)"
+    return mapping
+
+
+def auto_assign_with_memory(real_columns, master_columns, sheet_df=None, remembered_for_shape=None):
+    """Comme auto_assign_columns_fast, mais priorise un mapping MEMORISE (deja
+    confirme par l'utilisateur sur un fichier de meme forme) pour les colonnes
+    qu'il couvre ; complete le reste par la detection habituelle."""
+    remembered_map = apply_remembered_mapping(real_columns, remembered_for_shape)
+    auto_map = auto_assign_columns_fast(real_columns, master_columns, sheet_df=sheet_df)
+
+    merged = {}
+    used = set()
+    for src in real_columns:
+        m = remembered_map.get(src, "(non assigne)")
+        if m != "(non assigne)" and m in master_columns and m not in used:
+            merged[src] = m
+            used.add(m)
+    for src in real_columns:
+        if src in merged:
+            continue
+        m = auto_map.get(src, "(non assigne)")
+        if m != "(non assigne)" and m not in used:
+            merged[src] = m
+            used.add(m)
+        else:
+            merged[src] = "(non assigne)"
+    return merged
+
+
+def auto_assign_single_sheet_with_memory(sheet_key, sheet_df, master_columns, remembered_for_shape=None):
+    """Variante de auto_assign_single_sheet qui tient compte du mapping
+    memorise pour cette forme de fichier (voir auto_assign_with_memory)."""
+    real_columns = [c for c in sheet_df.columns if c not in ["__source_file__", "__source_sheet__"]]
+    new_mapping = auto_assign_with_memory(real_columns, master_columns, sheet_df=sheet_df,
+                                          remembered_for_shape=remembered_for_shape)
+    matched_count = sum(1 for v in new_mapping.values() if v != "(non assigne)")
     return new_mapping, matched_count, len(real_columns)

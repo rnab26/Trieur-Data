@@ -2,11 +2,20 @@ import pandas as pd
 
 from trieur.matching import (
     DEFAULT_MASTER_COLUMNS,
+    apply_remembered_mapping,
     auto_assign_columns_fast,
+    auto_assign_with_memory,
+    clean_iban,
     clean_phone,
+    column_fingerprint,
+    detect_iban_column,
     detect_phone_column_kind,
+    iban_is_valid,
     infer_column_names,
+    is_iban_master,
     looks_like_header,
+    looks_like_iban,
+    mapping_to_remembered,
     normalize_text,
     phone_kind,
 )
@@ -108,3 +117,89 @@ def test_infer_column_names_par_contenu():
     assert n[4] == "CP"
     assert n[0].startswith("COLONNE_")
     assert len(set(n)) == len(n)
+
+
+# --- IBAN --------------------------------------------------------------
+def test_is_iban_master_reconnait_le_sens_du_nom():
+    assert is_iban_master("Référence bancaire") is True
+    assert is_iban_master("IBAN") is True
+    assert is_iban_master("NOM") is False
+
+
+def test_clean_iban_retire_les_espaces_internes():
+    assert clean_iban("FR76 3000 6000 0112 3456 7890 189") == "FR7630006000011234567890189"
+    assert clean_iban(None) is None or pd.isna(clean_iban(None))
+
+
+def test_looks_like_iban_detecte_la_forme():
+    assert looks_like_iban("FR7630006000011234567890189") is True
+    assert looks_like_iban("bonjour") is False
+    assert looks_like_iban(None) is False
+
+
+def test_detect_iban_column_sur_petit_echantillon():
+    s = pd.Series(["FR7630006000011234567890189", "DE89370400440532013000"])
+    assert detect_iban_column(s) is True
+    assert detect_iban_column(pd.Series(["Alice", "Bob"])) is False
+
+
+def test_iban_is_valid_accepte_des_iban_connus_valides():
+    # IBAN d'exemple officiels (registre IBAN / Wikipedia)
+    assert iban_is_valid("FR7630006000011234567890189") is True
+    assert iban_is_valid("DE89370400440532013000") is True
+    assert iban_is_valid("GB29NWBK60161331926819") is True
+    # tolere les espaces
+    assert iban_is_valid("FR76 3000 6000 0112 3456 7890 189") is True
+
+
+def test_iban_is_valid_rejette_un_checksum_casse():
+    assert iban_is_valid("FR7630006000011234567890180") is False
+
+
+def test_iban_is_valid_none_si_non_applicable():
+    assert iban_is_valid(None) is None
+    assert iban_is_valid("") is None
+    assert iban_is_valid("bonjour") is None
+
+
+# --- Memoire du mapping par forme de fichier --------------------------
+def test_column_fingerprint_ignore_ordre_et_casse():
+    fp1 = column_fingerprint(["NOM", "Email", "CP"])
+    fp2 = column_fingerprint(["cp", "nom", "EMAIL"])
+    assert fp1 == fp2
+
+
+def test_column_fingerprint_differe_si_colonnes_differentes():
+    assert column_fingerprint(["NOM", "EMAIL"]) != column_fingerprint(["NOM", "TELEPHONE"])
+
+
+def test_mapping_to_remembered_ignore_les_non_assignes():
+    remembered = mapping_to_remembered({"Ref Client": "NOM", "Autre": "(non assigne)"})
+    assert remembered == {"refclient": "NOM"}
+
+
+def test_apply_remembered_mapping_rejoue_sur_une_casse_differente():
+    remembered = {"refclient": "NOM"}
+    mapping = apply_remembered_mapping(["REF CLIENT", "AUTRE"], remembered)
+    assert mapping["REF CLIENT"] == "NOM"
+    assert mapping["AUTRE"] == "(non assigne)"
+
+
+def test_apply_remembered_mapping_respecte_lunicite():
+    remembered = {"a": "NOM", "b": "NOM"}
+    mapping = apply_remembered_mapping(["a", "b"], remembered)
+    assignes = [v for v in mapping.values() if v != "(non assigne)"]
+    assert assignes == ["NOM"]
+
+
+def test_auto_assign_with_memory_priorise_le_mapping_memorise():
+    # "NUM DOSSIER" n'est reconnu par AUCUNE heuristique -> reste non assigne
+    # sans memoire, mais le mapping memorise doit le recuperer.
+    df = pd.DataFrame({"NUM DOSSIER": ["A", "B"], "EMAIL": ["a@x.fr", "b@x.fr"]})
+    sans_memoire = auto_assign_columns_fast(list(df.columns), M, sheet_df=df)
+    assert sans_memoire["NUM DOSSIER"] == "(non assigne)"
+
+    remembered = {"numdossier": "NOM"}
+    avec_memoire = auto_assign_with_memory(list(df.columns), M, sheet_df=df, remembered_for_shape=remembered)
+    assert avec_memoire["NUM DOSSIER"] == "NOM"
+    assert avec_memoire["EMAIL"] == "EMAIL"

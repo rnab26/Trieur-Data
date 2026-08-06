@@ -6,6 +6,7 @@ import streamlit as st
 from streamlit_sortables import sort_items
 
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
+from trieur.persistence import save_export_presets
 
 
 def render():
@@ -27,6 +28,30 @@ def render():
                 current_cols = list(export_df.columns)
                 included_key = "export_sort_included"
                 excluded_key = "export_sort_excluded"
+
+                # [11] Application d'un preset d'export : positionner AVANT le
+                # widget sort_items (meme logique que le "pending filter" de
+                # l'onglet Filtrage). Les colonnes du preset absentes de la base
+                # actuelle sont ignorees ; les colonnes nouvelles (pas prevues par
+                # le preset) sont ajoutees en fin de liste incluse, pour ne
+                # jamais faire disparaitre une colonne silencieusement.
+                pending_preset = st.session_state.pop("_apply_export_preset", None)
+                if pending_preset is not None:
+                    preset_included = [c for c in pending_preset.get("included", []) if c in current_cols]
+                    preset_excluded = [c for c in pending_preset.get("excluded", []) if c in current_cols]
+                    known = set(preset_included) | set(preset_excluded)
+                    new_cols = [c for c in current_cols if c not in known]
+                    missing = [c for c in pending_preset.get("included", []) + pending_preset.get("excluded", [])
+                               if c not in current_cols]
+                    st.session_state[included_key] = preset_included + new_cols
+                    st.session_state[excluded_key] = preset_excluded
+                    if missing:
+                        st.warning(f"⚠️ Le preset « {pending_preset.get('name', '')} » référençait des "
+                                   f"colonnes absentes de la base actuelle : {', '.join(missing)} (ignorées).")
+                    if new_cols:
+                        st.info("ℹ️ Colonnes non prévues par le preset, ajoutées en fin de liste incluse : "
+                                + ", ".join(new_cols))
+
                 if (
                     included_key not in st.session_state
                     or excluded_key not in st.session_state
@@ -55,6 +80,67 @@ def render():
                     )
                     st.session_state[included_key] = sorted_result[0]["items"]
                     st.session_state[excluded_key] = sorted_result[1]["items"]
+
+                # [11] Presets d'export : enregistrer/reappliquer l'ordre et la
+                # selection de colonnes ci-dessus sous un nom, pour ne pas avoir
+                # a refaire le glisser-deposer a chaque export similaire.
+                with st.expander("💾 Presets d'export (ordre + colonnes)", expanded=False):
+                    st.caption("Enregistre l'ordre et la selection de colonnes definis ci-dessus "
+                               "sous un nom, pour les reappliquer en un clic la prochaine fois.")
+                    col_pname, col_psave = st.columns([3, 1])
+                    with col_pname:
+                        new_preset_name = st.text_input(
+                            "Nom du preset", key="tab4_new_preset_name", label_visibility="collapsed",
+                            placeholder="Nom du preset (ex: Rapport banque)",
+                        )
+                    with col_psave:
+                        if st.button("💾 Enregistrer", key="tab4_save_preset", use_container_width=True):
+                            nm = new_preset_name.strip()
+                            if not nm:
+                                st.warning("⚠️ Donnez un nom au preset.")
+                            else:
+                                new_preset = {
+                                    "name": nm,
+                                    "included": list(st.session_state[included_key]),
+                                    "excluded": list(st.session_state[excluded_key]),
+                                }
+                                replaced = False
+                                for i, p in enumerate(st.session_state.export_presets):
+                                    if p["name"].lower() == nm.lower():
+                                        st.session_state.export_presets[i] = new_preset
+                                        replaced = True
+                                        break
+                                if not replaced:
+                                    st.session_state.export_presets.append(new_preset)
+                                save_export_presets(st.session_state.export_presets)
+                                st.success(f"Preset « {nm} » enregistré.")
+                                st.rerun()
+
+                    if st.session_state.export_presets:
+                        st.markdown("**Presets enregistrés :**")
+                    for i, p in enumerate(st.session_state.export_presets):
+                        st.caption(f"**{p['name']}** — {len(p['included'])} colonne(s) incluse(s), "
+                                   f"{len(p['excluded'])} exclue(s)")
+                        pc1, pc2, pc3, pc4 = st.columns([4, 1.2, 1.2, 1.2])
+                        with pc1:
+                            rn = st.text_input(
+                                "nom", value=p["name"], key=f"tab4_rn_{i}", label_visibility="collapsed",
+                            )
+                        with pc2:
+                            if st.button("Appliquer", key=f"tab4_apply_{i}", use_container_width=True):
+                                st.session_state["_apply_export_preset"] = p
+                                st.rerun()
+                        with pc3:
+                            if st.button("Renommer", key=f"tab4_ren_{i}", use_container_width=True):
+                                if rn.strip():
+                                    st.session_state.export_presets[i]["name"] = rn.strip()
+                                    save_export_presets(st.session_state.export_presets)
+                                    st.rerun()
+                        with pc4:
+                            if st.button("Supprimer", key=f"tab4_del_{i}", use_container_width=True):
+                                st.session_state.export_presets.pop(i)
+                                save_export_presets(st.session_state.export_presets)
+                                st.rerun()
 
                 selected_col_order = st.session_state[included_key]
                 if selected_col_order:

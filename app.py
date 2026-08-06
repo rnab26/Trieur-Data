@@ -99,20 +99,25 @@ from trieur.matching import (
     detect_phone_column_kind,
     looks_like_header,
     infer_column_names,
-    apply_header_inference_excel,
     auto_assign_columns_fast,
     find_best_master_col,
     auto_assign_single_sheet,
 )
 from trieur.filters import normalize_cp, cp_matches_prefix
-from trieur.io_excel import (
-    read_excel_all_sheets_from_file,
-    read_csv_file,
-    read_google_sheets_all_sheets,
-    is_google_sheet_url,
-)
-from trieur.io_pdf import read_pdf_sepa
+from trieur.io_excel import is_google_sheet_url
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
+from trieur.perf_cache import (
+    build_final_df_cached,
+    dataframe_content_hash,
+    input_signature,
+    local_upload_signature,
+    normalize_google_url,
+    parse_google_sheets_cached,
+    parse_uploaded_file_cached,
+    rebuild_key,
+    serialize_mappings_for_build,
+    serialize_sheets_for_build,
+)
 from trieur.persistence import (
     MASTER_CONFIG_PATH,
     load_master_columns,
@@ -279,6 +284,8 @@ if "inferred_header_sheets" not in st.session_state:
 # [5] Filtres pre-enregistres (charges depuis saved_filters.json)
 if "saved_filters" not in st.session_state:
     st.session_state.saved_filters = load_saved_filters()
+if "last_build_key" not in st.session_state:
+    st.session_state.last_build_key = None
 
 
 st.title("Trieur de Fichiers Leads")
@@ -364,19 +371,19 @@ with tab2:
         progress_placeholder.empty()
         progress_label.empty()
 
-    def _files_signature(_files, _gurl):
-        """Empreinte de l'ensemble importe (nom+taille des fichiers + URL)."""
-        sig = []
-        for _f in _files or []:
-            try:
-                sig.append((_f.name, int(_f.size)))
-            except Exception:
-                sig.append((getattr(_f, "name", "?"), None))
-        sig.append(("__google__", _gurl.strip() if _gurl else ""))
-        return tuple(sig)
+    prepared_uploads = []
+    prepared_upload_signatures = []
+    for _f in files or []:
+        _bytes = _f.getvalue()
+        _size = int(getattr(_f, "size", len(_bytes)))
+        prepared_uploads.append((getattr(_f, "name", "fichier"), _size, _bytes))
+        prepared_upload_signatures.append(
+            local_upload_signature(getattr(_f, "name", "fichier"), _size, _bytes)
+        )
 
-    has_input = bool(files) or bool(google_url.strip() and is_google_sheet_url(google_url))
-    current_sig = _files_signature(files, google_url)
+    normalized_google_url = normalize_google_url(google_url)
+    has_input = bool(prepared_uploads) or bool(normalized_google_url and is_google_sheet_url(normalized_google_url))
+    current_sig = input_signature(prepared_upload_signatures, normalized_google_url)
 
     # [PERF] On ne (re)lit les fichiers QUE si l'ensemble importe a change.
     # Sinon on reutilise ce qui est deja en memoire : plus aucun rechargement
@@ -391,29 +398,20 @@ with tab2:
     # [2] Onglets dont l'en-tete a du etre deduite pendant CE chargement
     inferred_this_load = []
 
-    if need_reload and files:
+    if need_reload and prepared_uploads:
         progress_bar = start_progress("Chargement des fichiers Excel... 0%")
-        total_files = len(files)
-        for f_idx, f in enumerate(files):
+        total_files = len(prepared_uploads)
+        for f_idx, (file_name, _file_size, file_bytes) in enumerate(prepared_uploads):
             base_pct = int((f_idx / max(total_files, 1)) * 80)
-            update_progress(progress_bar, base_pct, f"Lecture du fichier {f_idx+1}/{total_files} : {f.name}")
+            update_progress(progress_bar, base_pct, f"Lecture du fichier {f_idx+1}/{total_files} : {file_name}")
             try:
-                # [GROS FICHIERS] CSV lu directement (rapide/leger) ; sinon Excel.
-                if f.name.lower().endswith(".csv"):
-                    sheets, inferred = read_csv_file(f, f.name)
-                elif f.name.lower().endswith(".pdf"):
-                    # [PDF] Prélèvements SEPA -> une ligne par prélèvement
-                    sheets, inferred = read_pdf_sepa(f, f.name)
-                else:
-                    sheets = read_excel_all_sheets_from_file(f, f.name)
-                    # [2] Onglets sans ligne d'en-tete : relecture + noms deduits
-                    sheets, inferred = apply_header_inference_excel(sheets, f)
+                sheets, inferred = parse_uploaded_file_cached(file_name, file_bytes)
 
                 if not sheets:
-                    st.error(f"❌ Aucun onglet lisible dans {f.name}")
+                    st.error(f"❌ Aucun onglet lisible dans {file_name}")
                     continue
 
-                inferred_this_load.extend(f"{f.name} :: {n}" for n in inferred)
+                inferred_this_load.extend(f"{file_name} :: {n}" for n in inferred)
 
                 sheet_items = list(sheets.items())
                 total_sheet_items = len(sheet_items)
@@ -426,27 +424,27 @@ with tab2:
                     update_progress(
                         progress_bar,
                         base_pct + step_within_file,
-                        f"Traitement de l'onglet {s_idx+1}/{total_sheet_items} de {f.name}"
+                        f"Traitement de l'onglet {s_idx+1}/{total_sheet_items} de {file_name}"
                     )
 
                     if df is None or len(df) == 0:
-                        st.warning(f"⚠️ {f.name} :: {sheet_name} est vide, ignoré.")
+                        st.warning(f"⚠️ {file_name} :: {sheet_name} est vide, ignoré.")
                         continue
 
-                    key = f.name + " :: " + sheet_name
-                    # [MEM] pas de .copy() : le DataFrame vient d'etre lu et
-                    # nous appartient, on le complete en place (evite de
-                    # doubler la memoire sur les gros fichiers).
-                    df["__source_file__"] = f.name
+                    key = file_name + " :: " + sheet_name
+                    # [CACHE] copie defensive : les DataFrames viennent d'un
+                    # cache Streamlit, on evite toute mutation in-place.
+                    df = df.copy()
+                    df["__source_file__"] = file_name
                     df["__source_sheet__"] = sheet_name
                     all_sheets[key] = df
 
             except Exception as e:
-                st.error(f"❌ Erreur lecture {f.name}: {str(e)}")
+                st.error(f"❌ Erreur lecture {file_name}: {str(e)}")
 
         update_progress(progress_bar, 80, "Lecture Excel terminée. Finalisation...")
 
-    if need_reload and google_url.strip() and is_google_sheet_url(google_url):
+    if need_reload and normalized_google_url and is_google_sheet_url(normalized_google_url):
         if progress_bar is None:
             progress_bar = start_progress("Chargement Google Sheets... 0%")
 
@@ -454,7 +452,7 @@ with tab2:
         # read_google_sheets_all_sheets renvoie aussi le VRAI nom du classeur
         # Google (lu dans l'en-tete du telechargement) -> la colonne source
         # affiche le vrai nom du fichier, pas "Google Sheets".
-        sheets, inferred, gs_name = read_google_sheets_all_sheets(google_url)
+        sheets, inferred, gs_name = parse_google_sheets_cached(normalized_google_url)
         inferred_this_load.extend(f"{gs_name} :: {n}" for n in inferred)
         if sheets:
             sheet_items = list(sheets.items())
@@ -466,7 +464,8 @@ with tab2:
                 update_progress(progress_bar, pct, f"Traitement Google Sheet {s_idx+1}/{total_sheet_items}")
                 if len(df) > 0:
                     key = gs_name + " :: " + sheet_name
-                    # [MEM] pas de .copy() (voir import Excel ci-dessus)
+                    # [CACHE] copie defensive (voir import Excel ci-dessus)
+                    df = df.copy()
                     df["__source_file__"] = gs_name
                     df["__source_sheet__"] = sheet_name
                     all_sheets[key] = df
@@ -487,6 +486,7 @@ with tab2:
 
         # [3] Nouvel import = on repart avec tous les onglets inclus
         st.session_state.excluded_sheets = set()
+        st.session_state.last_build_key = None
 
         # Repartir sur des mappings propres pour ce nouvel ensemble
         st.session_state.sheet_mappings = {}
@@ -719,63 +719,59 @@ with tab2:
             st.warning("⚠️ Veuillez assigner au moins une colonne maître avant de construire la base.")
         else:
             if st.button("✅ Construire la base de travail fusionnee", type="primary"):
-                rows = []
-                total_merged = 0
+                effective_sheets = {}
+                effective_mappings = {}
 
                 # [3] on ne fusionne QUE les onglets coches
                 for sheet_key, sheet_df in active_sheets.items():
-                    source_file = sheet_df["__source_file__"].iloc[0] if len(sheet_df) > 0 else sheet_key
-                    source_sheet = sheet_df["__source_sheet__"].iloc[0] if len(sheet_df) > 0 else "Unknown"
                     mapping = st.session_state.sheet_mappings.get(sheet_key, {})
 
                     assigned_cols = [m for m in mapping.values() if m != "(non assigne)"]
                     if not assigned_cols:
                         st.warning(f"⚠️ {sheet_key}: Aucune colonne assignée, ignoré.")
                         continue
+                    effective_sheets[sheet_key] = sheet_df
+                    effective_mappings[sheet_key] = mapping
 
-                    sub = pd.DataFrame(index=sheet_df.index)
-                    for master_col in st.session_state.master_columns:
-                        src_cols_for_master = [s for s, m in mapping.items() if m == master_col and s in sheet_df.columns]
-                        if master_col == "Source Data":
-                            sub[master_col] = f"{source_file} ({source_sheet})"
-                        elif not src_cols_for_master:
-                            sub[master_col] = None
-                        elif len(src_cols_for_master) == 1:
-                            # [MEM] source unique : pas de .copy() (concat copiera)
-                            sub[master_col] = sheet_df[src_cols_for_master[0]]
-                        else:
-                            combined = sheet_df[src_cols_for_master[0]].copy()
-                            for extra_col in src_cols_for_master[1:]:
-                                is_empty = combined.isna() | (combined.astype(str).str.strip() == "")
-                                combined = combined.where(~is_empty, sheet_df[extra_col])
-                            sub[master_col] = combined
-                    rows.append(sub)
-                    total_merged += len(sub)
-
-                if not rows:
+                if not effective_sheets:
                     st.error("❌ Aucun onglet avec assignation trouvé.")
                 else:
-                    final_df = pd.concat(rows, ignore_index=True)
-                    final_df = final_df.dropna(how="all")
-                    # [MEM] liberer les DataFrames intermediaires : sur un gros
-                    # import ils doublent la memoire une fois la base construite.
-                    del rows
-                    gc.collect()
+                    current_build_key = rebuild_key(
+                        st.session_state.get("loaded_signature"),
+                        tuple(sorted(effective_sheets.keys())),
+                        effective_mappings,
+                        st.session_state.master_columns,
+                    )
+                    rebuilt_now = False
+                    if (
+                        st.session_state.final_df is not None
+                        and st.session_state.get("last_build_key") == current_build_key
+                    ):
+                        final_df = st.session_state.final_df
+                    else:
+                        final_df = build_final_df_cached(
+                            serialize_sheets_for_build(effective_sheets),
+                            serialize_mappings_for_build(effective_mappings),
+                            tuple(st.session_state.master_columns),
+                        )
+                        rebuilt_now = True
+                        gc.collect()
 
-                    # [MEM] colonnes a faible cardinalite -> "category" : enorme
-                    # economie sur des millions de lignes (ex: Source Data, qui
-                    # repete le meme libelle, passe de ~29 Mo a ~1 Mo/million).
-                    for _c in ("Source Data", "GENRE/CIVILITE", "VILLE"):
-                        if _c in final_df.columns:
-                            try:
-                                final_df[_c] = final_df[_c].astype("category")
-                            except Exception:
-                                pass
+                    if rebuilt_now:
+                        # [MEM] colonnes a faible cardinalite -> "category" :
+                        # enorme economie sur des millions de lignes.
+                        for _c in ("Source Data", "GENRE/CIVILITE", "VILLE"):
+                            if _c in final_df.columns:
+                                try:
+                                    final_df[_c] = final_df[_c].astype("category")
+                                except Exception:
+                                    pass
 
                     if len(final_df) == 0:
                         st.error("❌ La base fusionnée est vide après nettoyage.")
                     else:
                         st.session_state.final_df = final_df
+                        st.session_state.last_build_key = current_build_key
                         # invalider un eventuel export mis en cache (base changee)
                         for _k in ("_export_csv", "_export_xlsx"):
                             st.session_state.pop(_k, None)
@@ -969,7 +965,7 @@ with tab3:
                 except Exception:
                     pass
                 for _k in ["all_sheets", "sheet_mappings", "loaded_signature",
-                           "excluded_sheets", "inferred_header_sheets"]:
+                           "excluded_sheets", "inferred_header_sheets", "last_build_key"]:
                     st.session_state.pop(_k, None)
                 for _k in [key for key in list(st.session_state.keys())
                            if isinstance(key, str) and (
@@ -1003,10 +999,10 @@ with tab4:
             # [PERF] On ne genere PLUS l'export a chaque affichage (l'Excel de
             # plusieurs millions de lignes prend des minutes). On genere
             # UNIQUEMENT au clic, et on garde le resultat en cache tant que la
-            # base filtree n'a pas change (signature = nb lignes + colonnes).
+            # base filtree n'a pas change (signature = hash du contenu).
             EXCEL_MAX_ROWS = 1_048_576
             n_rows = len(export_df)
-            export_sig = (n_rows, tuple(map(str, export_df.columns)))
+            export_sig = dataframe_content_hash(export_df)
 
             col1, col2 = st.columns(2)
 

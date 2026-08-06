@@ -401,18 +401,21 @@ with tab2:
         # f.name : le 2e fichier ecrasait silencieusement le 1er. On rend le
         # nom utilise pour la cle unique au sein de cet import (export.csv,
         # export (2).csv...) sans toucher au fichier lu ni a son nom affiche
-        # dans le widget.
-        seen_names = {}
+        # dans le widget. On verifie l'unicite contre TOUS les noms deja
+        # attribues (pas juste le compteur de f.name) pour ne jamais retomber
+        # sur un nom deja pris par un vrai fichier "... (2).ext" du batch.
+        used_display_names = set()
         for f_idx, f in enumerate(files):
             base_pct = int((f_idx / max(total_files, 1)) * 80)
             update_progress(progress_bar, base_pct, f"Lecture du fichier {f_idx+1}/{total_files} : {f.name}")
 
-            seen_names[f.name] = seen_names.get(f.name, 0) + 1
+            stem, dot, ext = f.name.rpartition(".")
             display_name = f.name
-            if seen_names[f.name] > 1:
-                stem, dot, ext = f.name.rpartition(".")
-                suffix = f" ({seen_names[f.name]})"
-                display_name = f"{stem}{suffix}.{ext}" if dot else f"{f.name}{suffix}"
+            suffix_n = 2
+            while display_name in used_display_names:
+                display_name = f"{stem} ({suffix_n}).{ext}" if dot else f"{f.name} ({suffix_n})"
+                suffix_n += 1
+            used_display_names.add(display_name)
 
             try:
                 # [GROS FICHIERS] CSV lu directement (rapide/leger) ; sinon Excel.
@@ -459,7 +462,7 @@ with tab2:
                     all_sheets[key] = df
 
             except Exception as e:
-                st.error(f"❌ Erreur lecture {f.name}: {str(e)}")
+                st.error(f"❌ Erreur lecture {display_name}: {str(e)}")
 
         update_progress(progress_bar, 80, "Lecture Excel terminée. Finalisation...")
 

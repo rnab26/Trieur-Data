@@ -116,6 +116,7 @@ from trieur.io_excel import (
 )
 from trieur.io_pdf import read_pdf_sepa
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
+from streamlit_sortables import sort_items
 from trieur.persistence import (
     MASTER_CONFIG_PATH,
     load_master_columns,
@@ -1046,27 +1047,42 @@ with tab4:
                 st.write(f"{len(export_df)} lignes pretes a l'export.")
 
                 # [10] Ordre et selection des colonnes a l'export, sans toucher
-                # au mapping : reprend l'ordre de la base par defaut, modifiable
-                # (retirer une colonne pour l'exclure, la reselectionner pour la
-                # remettre a la fin -> nouvel ordre).
+                # au mapping : glisser-deposer pour reordonner, glisser vers
+                # "Colonnes exclues" pour retirer une colonne (et inversement
+                # pour la remettre).
                 current_cols = list(export_df.columns)
-                if "export_col_order" not in st.session_state or any(
-                    c not in current_cols for c in st.session_state["export_col_order"]
+                included_key = "export_sort_included"
+                excluded_key = "export_sort_excluded"
+                if (
+                    included_key not in st.session_state
+                    or excluded_key not in st.session_state
+                    or set(st.session_state[included_key] + st.session_state[excluded_key]) != set(current_cols)
                 ):
-                    st.session_state["export_col_order"] = current_cols
+                    st.session_state[included_key] = current_cols
+                    st.session_state[excluded_key] = []
 
                 with st.expander("🔀 Ordre et selection des colonnes a l'export", expanded=False):
                     st.caption(
-                        "Retire une colonne pour l'exclure de l'export, puis "
-                        "reselectionne-la pour la remettre a la fin : l'ordre de "
-                        "selection devient l'ordre des colonnes dans le fichier exporte."
+                        "Glisse une colonne (icone ⠿) pour changer son ordre, ou "
+                        "fais-la glisser vers « Colonnes exclues » pour la retirer "
+                        "de l'export (et inversement pour la remettre)."
                     )
-                    selected_col_order = st.multiselect(
-                        "Colonnes incluses (dans l'ordre choisi)",
-                        options=current_cols,
-                        key="export_col_order",
+                    sorted_result = sort_items(
+                        [
+                            {"header": "Colonnes incluses (ordre d'export)", "items": st.session_state[included_key]},
+                            {"header": "Colonnes exclues", "items": st.session_state[excluded_key]},
+                        ],
+                        multi_containers=True,
+                        direction="vertical",
+                        custom_style="""
+                            .sortable-item::before { content: "⠿  "; opacity: 0.55; }
+                        """,
+                        key="export_col_sortable",
                     )
+                    st.session_state[included_key] = sorted_result[0]["items"]
+                    st.session_state[excluded_key] = sorted_result[1]["items"]
 
+                selected_col_order = st.session_state[included_key]
                 if selected_col_order:
                     export_df = export_df[selected_col_order]
                 else:

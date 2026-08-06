@@ -6,3 +6,4 @@ openpyxl
 lxml
 python-calamine
 pdfplumber
+streamlit-sortables

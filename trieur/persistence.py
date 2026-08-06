@@ -1,5 +1,6 @@
 """Persistance des colonnes maitres dans un fichier JSON local.
 Survit au rechargement de page ; reinitialise au redeploiement Cloud."""
+import base64
 import json
 import os
 
@@ -104,6 +105,48 @@ def save_saved_filters(filters):
         return True
     except Exception:
         return False
+
+
+# -------------------------------------------------------------
+# [14] SAUVEGARDE TEXTE DES FILTRES (copier/coller)
+# Un code court a copier ailleurs (note, message...) et recoller plus tard
+# ou sur un autre appareil, en secours si le fichier serveur est perdu
+# (redemarrage du conteneur Streamlit Cloud -- voir MASTER_CONFIG_PATH).
+# -------------------------------------------------------------
+FILTERS_CODE_PREFIX = "TRIEUR-FILTRES-v1:"
+
+
+def encode_filters_code(filters):
+    """Encode la liste de filtres enregistres en un code texte copiable."""
+    payload = json.dumps(filters, ensure_ascii=False)
+    b64 = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii")
+    return FILTERS_CODE_PREFIX + b64
+
+
+def decode_filters_code(code):
+    """Decode un code de sauvegarde de filtres.
+
+    Renvoie (filtres_valides, message_erreur) -- l'un des deux est toujours
+    None. Les filtres de l'ancien format (avant le multi-criteres) sont
+    migres automatiquement, comme au chargement normal."""
+    code = (code or "").strip()
+    if not code:
+        return None, "Colle un code de sauvegarde."
+    if not code.startswith(FILTERS_CODE_PREFIX):
+        return None, "Code invalide (prefixe manquant) : verifie le copier/coller."
+    b64 = code[len(FILTERS_CODE_PREFIX):]
+    try:
+        payload = base64.urlsafe_b64decode(b64.encode("ascii")).decode("utf-8")
+        data = json.loads(payload)
+    except Exception:
+        return None, "Code illisible : le copier/coller semble incomplet ou corrompu."
+    if not isinstance(data, list):
+        return None, "Code invalide : format inattendu."
+    migrated = [_migrate_filter(f) for f in data]
+    valid = [f for f in migrated if _is_valid_filter(f)]
+    if not valid:
+        return None, "Aucun filtre valide dans ce code."
+    return valid, None
 
 
 # -------------------------------------------------------------

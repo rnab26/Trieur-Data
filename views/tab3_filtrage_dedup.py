@@ -13,7 +13,7 @@ from trieur.filters import (
     duplicate_groups,
     most_complete_row_index,
 )
-from trieur.persistence import save_saved_filters
+from trieur.persistence import decode_filters_code, encode_filters_code, save_saved_filters
 
 # Au-dela de ce nombre de GROUPES de doublons, la revue manuelle groupe par
 # groupe (aperçu + choix de la ligne a garder) devient impraticable -> on
@@ -115,12 +115,15 @@ def render():
             pending_groups = st.session_state.pop("_apply_filter_groups", None)
             if pending_groups is not None:
                 new_group_ids = []
+                missing_columns = []
                 for group in pending_groups:
                     ids_for_group = []
                     for crit in group:
                         cid = str(uuid.uuid4())
                         ids_for_group.append(cid)
                         column = crit.get("column")
+                        if column not in st.session_state.master_columns:
+                            missing_columns.append(column)
                         st.session_state[f"fc_col_{cid}"] = (
                             column if column in st.session_state.master_columns
                             else st.session_state.master_columns[0]
@@ -136,6 +139,13 @@ def render():
                     if ids_for_group:
                         new_group_ids.append(ids_for_group)
                 st.session_state["_filter_group_ids"] = new_group_ids or [[str(uuid.uuid4())]]
+                if missing_columns:
+                    st.warning(
+                        "⚠️ Ce filtre reference des colonnes absentes de la liste actuelle des "
+                        f"colonnes maitres : {', '.join(sorted(set(missing_columns)))}. "
+                        "Elles ont ete remplacees par la premiere colonne disponible -- verifie "
+                        "et corrige les criteres concernes ci-dessous."
+                    )
 
             st.markdown("**Filtrer par un ou plusieurs criteres**")
             st.caption("Plusieurs groupes = **OU** entre eux ; plusieurs criteres dans un "
@@ -246,6 +256,42 @@ def render():
                             st.session_state.saved_filters.pop(i)
                             save_saved_filters(st.session_state.saved_filters)
                             st.rerun()
+
+                # [14] Sauvegarde texte : les filtres ne vivent que sur le serveur
+                # (voir plus haut) -- ce code permet de les garder en lieu sur
+                # ailleurs (note, message...) et de les restaurer meme apres une
+                # perte du fichier serveur, sans manipuler de fichier.
+                st.markdown("---")
+                st.markdown("**🔗 Sauvegarde texte (copier/coller)**")
+                if st.session_state.saved_filters:
+                    st.caption("Copie ce code et garde-le en lieu sur (note, message...) : il "
+                               "permet de retrouver tes filtres meme si le serveur les perd.")
+                    st.code(encode_filters_code(st.session_state.saved_filters), language=None)
+                else:
+                    st.caption("Enregistre au moins un filtre ci-dessus pour obtenir un code a sauvegarder.")
+
+                pasted_code = st.text_area(
+                    "Coller un code de filtres pour le restaurer",
+                    key="tab3_filters_code_input", height=80,
+                    placeholder="TRIEUR-FILTRES-v1:...",
+                )
+                if st.button("♻️ Restaurer depuis ce code", key="tab3_restore_filters_code"):
+                    restored, err = decode_filters_code(pasted_code)
+                    if err:
+                        st.error(f"❌ {err}")
+                    else:
+                        for f in restored:
+                            replaced = False
+                            for i, existing in enumerate(st.session_state.saved_filters):
+                                if existing["name"].lower() == f["name"].lower():
+                                    st.session_state.saved_filters[i] = f
+                                    replaced = True
+                                    break
+                            if not replaced:
+                                st.session_state.saved_filters.append(f)
+                        save_saved_filters(st.session_state.saved_filters)
+                        st.success(f"✅ {len(restored)} filtre(s) restaure(s)/mis a jour.")
+                        st.rerun()
 
             st.markdown("---")
 

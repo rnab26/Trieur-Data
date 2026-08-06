@@ -92,3 +92,73 @@ def cp_matches_prefix(cp_value, prefixes):
     if cp5 is None:
         return False
     return cp5[:2] in prefixes
+
+
+# =============================================================
+# FILTRES MULTI-CRITERES
+#
+# Un filtre = une liste de GROUPES ; chaque groupe = une liste de CRITERES.
+# Les criteres d'un meme groupe sont combines en ET, les groupes entre eux
+# en OU. Exemple : [CP dept 34] OU [CP dept 71 ET VILLE=Lyon].
+# Un critere = {"column": str, "kind": "departements"|"valeurs", "values": [...]}
+# =============================================================
+def apply_single_criterion(df, criterion):
+    """Applique UN critere et renvoie le masque booleen correspondant.
+    Un critere sans colonne/valeurs ne matche rien (masque tout-False),
+    plutot que de planter ou de tout laisser passer par erreur."""
+    column = criterion.get("column")
+    values = criterion.get("values") or []
+    if not column or column not in df.columns or not values:
+        return pd.Series(False, index=df.index)
+    if criterion.get("kind") == "departements":
+        prefixes = set(values)
+        return df[column].apply(lambda v: cp_matches_prefix(v, prefixes) if pd.notna(v) else False)
+    return df[column].isin(values)
+
+
+def apply_filter_groups(df, groups):
+    """Applique un filtre multi-criteres (groupes en OU, criteres en ET).
+
+    Un groupe n'est pris en compte QUE s'il est COMPLET (tous ses criteres
+    ont une colonne ET des valeurs) : un groupe encore en cours de saisie
+    (valeurs pas encore choisies) est ignore plutot que de filtrer tout a
+    zero. S'il n'y a AUCUN groupe complet, renvoie `df` tel quel (pas de
+    filtre actif), pour ne jamais masquer les donnees par accident pendant
+    que l'utilisateur configure son filtre.
+    """
+    complete_groups = [g for g in groups if g and all(c.get("values") for c in g)]
+    if not complete_groups:
+        return df
+
+    combined = None
+    for group in complete_groups:
+        group_mask = None
+        for criterion in group:
+            mask = apply_single_criterion(df, criterion)
+            group_mask = mask if group_mask is None else (group_mask & mask)
+        combined = group_mask if combined is None else (combined | group_mask)
+    return df[combined]
+
+
+def describe_criterion(criterion):
+    """Resume lisible d'un critere, ex: 'CP dept 34' ou 'VILLE = Lyon'."""
+    column = criterion.get("column") or "?"
+    values = criterion.get("values") or []
+    vals_str = ", ".join(map(str, values)) if values else "(vide)"
+    if criterion.get("kind") == "departements":
+        return f"{column} dept {vals_str}"
+    return f"{column} = {vals_str}"
+
+
+def describe_filter_groups(groups):
+    """Resume lisible d'un filtre multi-criteres complet, ex:
+    '(CP dept 34) OU (CP dept 71 ET VILLE = Lyon)'."""
+    if not groups:
+        return "(vide)"
+    group_strs = []
+    for group in groups:
+        crit_strs = [describe_criterion(c) for c in group]
+        group_strs.append(" ET ".join(crit_strs) if crit_strs else "(vide)")
+    if len(group_strs) > 1:
+        return " OU ".join(f"({s})" for s in group_strs)
+    return group_strs[0]

@@ -1,3 +1,5 @@
+import json
+
 import trieur.persistence as P
 
 
@@ -10,8 +12,15 @@ def test_save_puis_load_filtres(tmp_path, monkeypatch):
     path = str(tmp_path / "saved_filters.json")
     monkeypatch.setattr(P, "FILTERS_CONFIG_PATH", path)
     filtres = [
-        {"name": "Sud-Ouest", "column": "CP", "kind": "departements", "values": ["33", "40", "64"]},
-        {"name": "Grandes villes", "column": "VILLE", "kind": "valeurs", "values": ["Paris", "Lyon"]},
+        {"name": "Sud-Ouest", "groups": [[{"column": "CP", "kind": "departements", "values": ["33", "40", "64"]}]]},
+        {"name": "Grandes villes", "groups": [[{"column": "VILLE", "kind": "valeurs", "values": ["Paris", "Lyon"]}]]},
+        {"name": "34 ou 71+Lyon", "groups": [
+            [{"column": "CP", "kind": "departements", "values": ["34"]}],
+            [
+                {"column": "CP", "kind": "departements", "values": ["71"]},
+                {"column": "VILLE", "kind": "valeurs", "values": ["Lyon"]},
+            ],
+        ]},
     ]
     assert P.save_saved_filters(filtres) is True
     rel = P.load_saved_filters()
@@ -22,10 +31,12 @@ def test_les_filtres_invalides_sont_ignores(tmp_path, monkeypatch):
     path = str(tmp_path / "saved_filters.json")
     monkeypatch.setattr(P, "FILTERS_CONFIG_PATH", path)
     mixte = [
-        {"name": "OK", "column": "CP", "kind": "departements", "values": ["75"]},
-        {"name": "", "column": "CP", "kind": "departements", "values": ["75"]},   # nom vide
-        {"name": "X", "column": "CP", "kind": "autre", "values": []},              # kind invalide
-        {"name": "Y", "column": "CP", "kind": "valeurs", "values": "pasuneliste"}, # values non liste
+        {"name": "OK", "groups": [[{"column": "CP", "kind": "departements", "values": ["75"]}]]},
+        {"name": "", "groups": [[{"column": "CP", "kind": "departements", "values": ["75"]}]]},  # nom vide
+        {"name": "X", "groups": [[{"column": "CP", "kind": "autre", "values": []}]]},              # kind invalide
+        {"name": "Y", "groups": [[{"column": "CP", "kind": "valeurs", "values": "pasuneliste"}]]}, # values non liste
+        {"name": "Z", "groups": []},                                                               # groupes vides
+        {"name": "W", "groups": [[]]},                                                             # groupe sans critere
         "pas un dict",
     ]
     P.save_saved_filters(mixte)
@@ -35,10 +46,30 @@ def test_les_filtres_invalides_sont_ignores(tmp_path, monkeypatch):
 
 
 def test_is_valid_filter():
-    assert P._is_valid_filter({"name": "a", "column": "CP", "kind": "valeurs", "values": []}) is True
-    assert P._is_valid_filter({"name": "a", "column": "CP", "kind": "x", "values": []}) is False
-    assert P._is_valid_filter({"name": "", "column": "CP", "kind": "valeurs", "values": []}) is False
+    assert P._is_valid_filter({"name": "a", "groups": [[{"column": "CP", "kind": "valeurs", "values": []}]]}) is True
+    assert P._is_valid_filter({"name": "a", "groups": [[{"column": "CP", "kind": "x", "values": []}]]}) is False
+    assert P._is_valid_filter({"name": "", "groups": [[{"column": "CP", "kind": "valeurs", "values": []}]]}) is False
     assert P._is_valid_filter({}) is False
+
+
+def test_load_saved_filters_migre_lancien_format(tmp_path, monkeypatch):
+    # Simule un fichier ecrit AVANT l'ajout du multi-criteres : un filtre
+    # doit continuer a fonctionner, converti en groupe unique/critere unique.
+    path = tmp_path / "saved_filters.json"
+    monkeypatch.setattr(P, "FILTERS_CONFIG_PATH", str(path))
+    old_format = [
+        {"name": "Sud-Ouest", "column": "CP", "kind": "departements", "values": ["33", "40"]},
+    ]
+    path.write_text(json.dumps(old_format), encoding="utf-8")
+    rel = P.load_saved_filters()
+    assert rel == [
+        {"name": "Sud-Ouest", "groups": [[{"column": "CP", "kind": "departements", "values": ["33", "40"]}]]},
+    ]
+
+
+def test_migrate_filter_laisse_le_nouveau_format_inchange():
+    new_format = {"name": "X", "groups": [[{"column": "CP", "kind": "departements", "values": ["75"]}]]}
+    assert P._migrate_filter(new_format) == new_format
 
 
 def test_load_export_presets_absent(tmp_path, monkeypatch):

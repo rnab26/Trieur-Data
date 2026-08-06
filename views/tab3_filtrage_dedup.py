@@ -1,14 +1,15 @@
-"""Onglet 3 : filtrage de la base fusionnee (par colonne / departement),
-comptage de doublons, et filtres pre-enregistres."""
+"""Onglet 3 : filtrage multi-criteres de la base fusionnee, revue des
+doublons groupe par groupe, et filtres pre-enregistres."""
 import traceback
+import uuid
 
-import pandas as pd
 import streamlit as st
 
 from trieur.filters import (
-    cp_matches_prefix,
+    apply_filter_groups,
     dedupe_dataframe,
     dedupe_dataframe_manual,
+    describe_filter_groups,
     duplicate_groups,
     most_complete_row_index,
 )
@@ -18,6 +19,72 @@ from trieur.persistence import save_saved_filters
 # groupe (aperçu + choix de la ligne a garder) devient impraticable -> on
 # repasse automatiquement sur une regle globale (premiere/plus complete).
 DEDUP_GROUP_THRESHOLD = 50
+
+
+def _render_value_picker(df, column, key_prefix):
+    """Widget de choix de valeurs adapte a `column` (departements pour CP,
+    texte libre au-dela de 1000 valeurs distinctes, multiselect sinon).
+    Renvoie (kind, values) pour CE critere."""
+    if column == "CP":
+        dep_input = st.text_input(
+            "Departements (ex: 02,33,77)",
+            key=f"{key_prefix}_dep",
+            label_visibility="collapsed",
+            placeholder="Departements, ex: 02,33,77",
+        )
+        values = [p.strip().zfill(2) for p in dep_input.split(",") if p.strip()]
+        return "departements", values
+
+    n_unique = int(df[column].nunique(dropna=True)) if column in df.columns else 0
+    if n_unique > 1000:
+        # [PERF] Une colonne a des milliers de valeurs distinctes (NOM, EMAIL...)
+        # -> un menu deroulant deviendrait ingerable et lent. Au-dela d'un
+        # seuil, on bascule sur un filtre TEXTE.
+        txt = st.text_input(
+            f"Valeur(s) exacte(s) pour {column} (separees par ;)",
+            key=f"{key_prefix}_txt",
+            label_visibility="collapsed",
+            placeholder=f"Valeur(s) pour {column}, separees par ;",
+        )
+        values = [v.strip() for v in txt.split(";") if v.strip()]
+        return "valeurs", values
+
+    unique_vals = sorted([v for v in df[column].dropna().unique()]) if column in df.columns else []
+    vals_key = f"{key_prefix}_vals"
+    # Securite : ne garder que des valeurs encore presentes (evite un
+    # plantage du multiselect si la base a change entre-temps).
+    if vals_key in st.session_state:
+        st.session_state[vals_key] = [v for v in st.session_state[vals_key] if v in unique_vals]
+    values = st.multiselect(
+        f"Valeurs pour {column}",
+        options=unique_vals,
+        key=vals_key,
+        label_visibility="collapsed",
+        placeholder=f"Valeurs pour {column}",
+    )
+    return "valeurs", values
+
+
+def _render_criterion(df, cid):
+    """Affiche UNE ligne de critere (colonne + valeurs + suppression).
+    Renvoie (criterion_dict, remove_clicked)."""
+    col1, col2, col3 = st.columns([2, 4, 0.6])
+    with col1:
+        column = st.selectbox(
+            "Colonne", options=st.session_state.master_columns,
+            key=f"fc_col_{cid}", label_visibility="collapsed",
+        )
+    with col2:
+        kind, values = _render_value_picker(df, column, key_prefix=f"fc_{cid}")
+    with col3:
+        remove = st.button("🗑️", key=f"fc_rm_{cid}", help="Retirer ce critere")
+    return {"column": column, "kind": kind, "values": values}, remove
+
+
+def _forget_criterion(cid):
+    for suffix in ("_dep", "_txt", "_vals"):
+        st.session_state.pop(f"fc_{cid}{suffix}", None)
+    st.session_state.pop(f"fc_col_{cid}", None)
 
 
 def render():
@@ -33,71 +100,156 @@ def render():
             total_lines = len(df)
             st.write(f"Base actuelle : **{total_lines}** lignes importees")
 
-            # [5] Application d'un filtre enregistre : on positionne les widgets
-            # AVANT de les afficher (le bouton "Appliquer" a declenche un rerun).
-            pending = st.session_state.pop("_apply_filter", None)
-            if pending is not None:
-                col = pending.get("column")
-                if col in st.session_state.master_columns and col in df.columns:
-                    st.session_state["tab3_filter_col"] = col
-                    if pending.get("kind") == "departements":
-                        st.session_state["tab3_dep_input"] = ",".join(pending.get("values", []))
-                    else:
-                        avail = sorted([v for v in df[col].dropna().unique()])
-                        st.session_state["tab3_selected_vals"] = [
-                            v for v in pending.get("values", []) if v in avail
-                        ]
-                else:
-                    st.warning(f"⚠️ Le filtre vise la colonne '{col}', absente de la base actuelle.")
+            # -------------------------------------------------------------
+            # [13] FILTRE MULTI-CRITERES : plusieurs GROUPES combines en OU,
+            # chaque groupe pouvant contenir plusieurs criteres combines en ET.
+            # Ex : [CP dept 34] OU [CP dept 71 ET VILLE = Lyon].
+            # -------------------------------------------------------------
+            if "_filter_group_ids" not in st.session_state:
+                st.session_state["_filter_group_ids"] = [[str(uuid.uuid4())]]
 
-            filter_col = st.selectbox(
-                "Filtrer par colonne",
-                options=["(aucun filtre)"] + st.session_state.master_columns,
-                key="tab3_filter_col",
-            )
-            filtered_df = df
-            dep_input = ""
-            selected_vals = []
+            # Application d'un filtre enregistre : on genere de nouveaux ids et on
+            # pre-positionne les widgets AVANT de les afficher (meme logique que
+            # les autres "pending" de ce projet), le bouton "Appliquer" ayant
+            # declenche un rerun.
+            pending_groups = st.session_state.pop("_apply_filter_groups", None)
+            if pending_groups is not None:
+                new_group_ids = []
+                for group in pending_groups:
+                    ids_for_group = []
+                    for crit in group:
+                        cid = str(uuid.uuid4())
+                        ids_for_group.append(cid)
+                        column = crit.get("column")
+                        st.session_state[f"fc_col_{cid}"] = (
+                            column if column in st.session_state.master_columns
+                            else st.session_state.master_columns[0]
+                        )
+                        values = crit.get("values") or []
+                        if crit.get("kind") == "departements":
+                            st.session_state[f"fc_{cid}_dep"] = ",".join(values)
+                        else:
+                            # on pre-seed les deux widgets possibles (texte ou
+                            # multiselect) ; seul celui reellement affiche compte.
+                            st.session_state[f"fc_{cid}_txt"] = ";".join(map(str, values))
+                            st.session_state[f"fc_{cid}_vals"] = list(values)
+                    if ids_for_group:
+                        new_group_ids.append(ids_for_group)
+                st.session_state["_filter_group_ids"] = new_group_ids or [[str(uuid.uuid4())]]
 
-            if filter_col == "CP":
-                dep_input = st.text_input(
-                    "Departements a filtrer (separes par des virgules, ex: 02,33,77)",
-                    key="tab3_dep_input",
-                )
-                if dep_input.strip() and "CP" in df.columns:
-                    prefixes = set(p.strip().zfill(2) for p in dep_input.split(",") if p.strip())
-                    mask = df["CP"].apply(lambda v: cp_matches_prefix(v, prefixes) if pd.notna(v) else False)
-                    filtered_df = df[mask]
-            elif filter_col != "(aucun filtre)":
-                # [PERF] Une colonne a des milliers de valeurs distinctes (NOM, EMAIL...)
-                # -> un menu deroulant deviendrait ingerable et lent. Au-dela d'un
-                # seuil, on bascule sur un filtre TEXTE.
-                n_unique = int(df[filter_col].nunique(dropna=True))
-                if n_unique > 1000:
-                    st.caption(f"ℹ️ {n_unique} valeurs distinctes : trop pour une liste. "
-                               "Saisis la ou les valeurs exactes a conserver (separees par ;).")
-                    txt = st.text_input(
-                        f"Valeur(s) exacte(s) pour {filter_col}",
-                        key="tab3_text_vals",
-                    )
-                    if txt.strip():
-                        selected_vals = [v.strip() for v in txt.split(";") if v.strip()]
-                        filtered_df = df[df[filter_col].isin(selected_vals)]
+            st.markdown("**Filtrer par un ou plusieurs criteres**")
+            st.caption("Plusieurs groupes = **OU** entre eux ; plusieurs criteres dans un "
+                       "groupe = **ET**. Ex : tout le 34, plus le 71 seulement pour Lyon.")
+
+            group_ids = st.session_state["_filter_group_ids"]
+            all_groups = []
+            groups_to_remove = []
+            for gi, crit_ids in enumerate(group_ids):
+                if gi > 0:
+                    st.markdown("<div style='text-align:center; font-weight:600; "
+                               "color:#888; margin:4px 0;'>OU</div>", unsafe_allow_html=True)
+                with st.container(border=True):
+                    group_criteria = []
+                    crit_ids_to_remove = []
+                    for cid in crit_ids:
+                        crit, remove = _render_criterion(df, cid)
+                        group_criteria.append(crit)
+                        if remove:
+                            crit_ids_to_remove.append(cid)
+
+                    add_col, _sp = st.columns([1, 3])
+                    with add_col:
+                        if st.button("➕ Critere (ET)", key=f"fc_addcrit_{gi}"):
+                            crit_ids.append(str(uuid.uuid4()))
+                            st.rerun()
+
+                    if crit_ids_to_remove:
+                        for cid in crit_ids_to_remove:
+                            crit_ids.remove(cid)
+                            _forget_criterion(cid)
+                        if not crit_ids and len(group_ids) > 1:
+                            groups_to_remove.append(gi)
+                        st.rerun()
+
+                    all_groups.append(group_criteria)
+
+            if groups_to_remove:
+                for gi in sorted(groups_to_remove, reverse=True):
+                    group_ids.pop(gi)
+                st.rerun()
+
+            if st.button("➕ Ajouter un groupe (OU)"):
+                group_ids.append([str(uuid.uuid4())])
+                st.rerun()
+
+            filtered_df = apply_filter_groups(df, all_groups)
+            complete_groups = [g for g in all_groups if g and all(c.get("values") for c in g)]
+
+            # -------------------------------------------------------------
+            # [5] FILTRES PRE-ENREGISTRES -- juste sous le filtre, pour etre
+            # visible immediatement (pas besoin de scroller).
+            # -------------------------------------------------------------
+            with st.expander("💾 Filtres pre-enregistres", expanded=bool(st.session_state.saved_filters)):
+                if complete_groups:
+                    st.caption(f"Filtre actuel : **{describe_filter_groups(complete_groups)}**")
                 else:
-                    unique_vals = sorted([v for v in df[filter_col].dropna().unique()])
-                    # Securite : ne garder que des valeurs encore presentes (evite un
-                    # plantage du multiselect).
-                    if "tab3_selected_vals" in st.session_state:
-                        st.session_state["tab3_selected_vals"] = [
-                            v for v in st.session_state["tab3_selected_vals"] if v in unique_vals
-                        ]
-                    selected_vals = st.multiselect(
-                        "Valeurs a conserver pour " + filter_col,
-                        options=unique_vals,
-                        key="tab3_selected_vals",
+                    st.caption("Choisis au moins une colonne et des valeurs ci-dessus pour "
+                               "pouvoir enregistrer un filtre.")
+
+                col_name, col_btn = st.columns([3, 1])
+                with col_name:
+                    new_filter_name = st.text_input(
+                        "Nom du filtre", key="tab3_new_filter_name", label_visibility="collapsed",
+                        placeholder="Nom du filtre (ex: Sud-Ouest)",
                     )
-                    if selected_vals:
-                        filtered_df = df[df[filter_col].isin(selected_vals)]
+                with col_btn:
+                    if st.button("💾 Enregistrer", key="tab3_save_filter", use_container_width=True):
+                        nm = new_filter_name.strip()
+                        if not complete_groups:
+                            st.warning("⚠️ Aucun critere complet a enregistrer (choisis colonne + valeurs).")
+                        elif not nm:
+                            st.warning("⚠️ Donnez un nom au filtre.")
+                        else:
+                            new_filter = {"name": nm, "groups": complete_groups}
+                            # remplace un filtre du meme nom, sinon ajoute
+                            replaced = False
+                            for i, f in enumerate(st.session_state.saved_filters):
+                                if f["name"].lower() == nm.lower():
+                                    st.session_state.saved_filters[i] = new_filter
+                                    replaced = True
+                                    break
+                            if not replaced:
+                                st.session_state.saved_filters.append(new_filter)
+                            save_saved_filters(st.session_state.saved_filters)
+                            st.success(f"Filtre « {nm} » enregistre.")
+                            st.rerun()
+
+                if st.session_state.saved_filters:
+                    st.markdown("**Filtres enregistres :**")
+                for i, f in enumerate(st.session_state.saved_filters):
+                    st.caption(f"**{f['name']}** — {describe_filter_groups(f['groups'])}")
+                    c1, c2, c3, c4 = st.columns([4, 1.2, 1.2, 1.2])
+                    with c1:
+                        rn = st.text_input(
+                            "nom", value=f["name"], key=f"tab3_rn_{i}", label_visibility="collapsed",
+                        )
+                    with c2:
+                        if st.button("Appliquer", key=f"tab3_apply_{i}", use_container_width=True):
+                            st.session_state["_apply_filter_groups"] = f["groups"]
+                            st.rerun()
+                    with c3:
+                        if st.button("Renommer", key=f"tab3_ren_{i}", use_container_width=True):
+                            if rn.strip():
+                                st.session_state.saved_filters[i]["name"] = rn.strip()
+                                save_saved_filters(st.session_state.saved_filters)
+                                st.rerun()
+                    with c4:
+                        if st.button("Supprimer", key=f"tab3_del_{i}", use_container_width=True):
+                            st.session_state.saved_filters.pop(i)
+                            save_saved_filters(st.session_state.saved_filters)
+                            st.rerun()
+
+            st.markdown("---")
 
             # [5bis] Suppression de doublons active : elle doit survivre aux
             # reruns suivants (changement de filtre, etc.), sinon l'export
@@ -210,83 +362,6 @@ def render():
             st.session_state.filtered_df = filtered_df
 
             # -------------------------------------------------------------
-            # [5] FILTRES PRE-ENREGISTRES
-            # -------------------------------------------------------------
-            st.markdown("---")
-            with st.expander("💾 Filtres pre-enregistres", expanded=bool(st.session_state.saved_filters)):
-                # Peut-on enregistrer le filtre actuellement affiche ?
-                if filter_col == "CP" and dep_input.strip():
-                    current_values = [p.strip().zfill(2) for p in dep_input.split(",") if p.strip()]
-                    current_kind = "departements"
-                elif filter_col not in ("CP", "(aucun filtre)") and selected_vals:
-                    current_values = list(selected_vals)
-                    current_kind = "valeurs"
-                else:
-                    current_values = []
-                    current_kind = None
-
-                if current_kind:
-                    st.caption(f"Filtre actuel : **{filter_col}** = {', '.join(map(str, current_values))}")
-                else:
-                    st.caption("Choisissez une colonne et des valeurs ci-dessus pour pouvoir enregistrer un filtre.")
-
-                col_name, col_btn = st.columns([3, 1])
-                with col_name:
-                    new_filter_name = st.text_input(
-                        "Nom du filtre", key="tab3_new_filter_name", label_visibility="collapsed",
-                        placeholder="Nom du filtre (ex: Sud-Ouest)",
-                    )
-                with col_btn:
-                    if st.button("💾 Enregistrer", key="tab3_save_filter", use_container_width=True):
-                        nm = new_filter_name.strip()
-                        if not current_kind:
-                            st.warning("⚠️ Aucun filtre a enregistrer (choisissez colonne + valeurs).")
-                        elif not nm:
-                            st.warning("⚠️ Donnez un nom au filtre.")
-                        else:
-                            new_filter = {
-                                "name": nm, "column": filter_col,
-                                "kind": current_kind, "values": current_values,
-                            }
-                            # remplace un filtre du meme nom, sinon ajoute
-                            replaced = False
-                            for i, f in enumerate(st.session_state.saved_filters):
-                                if f["name"].lower() == nm.lower():
-                                    st.session_state.saved_filters[i] = new_filter
-                                    replaced = True
-                                    break
-                            if not replaced:
-                                st.session_state.saved_filters.append(new_filter)
-                            save_saved_filters(st.session_state.saved_filters)
-                            st.success(f"Filtre « {nm} » enregistre.")
-                            st.rerun()
-
-                if st.session_state.saved_filters:
-                    st.markdown("**Filtres enregistres :**")
-                for i, f in enumerate(st.session_state.saved_filters):
-                    st.caption(f"**{f['name']}** — {f['column']} : {', '.join(map(str, f['values'])) or '(vide)'}")
-                    c1, c2, c3, c4 = st.columns([4, 1.2, 1.2, 1.2])
-                    with c1:
-                        rn = st.text_input(
-                            "nom", value=f["name"], key=f"tab3_rn_{i}", label_visibility="collapsed",
-                        )
-                    with c2:
-                        if st.button("Appliquer", key=f"tab3_apply_{i}", use_container_width=True):
-                            st.session_state["_apply_filter"] = f
-                            st.rerun()
-                    with c3:
-                        if st.button("Renommer", key=f"tab3_ren_{i}", use_container_width=True):
-                            if rn.strip():
-                                st.session_state.saved_filters[i]["name"] = rn.strip()
-                                save_saved_filters(st.session_state.saved_filters)
-                                st.rerun()
-                    with c4:
-                        if st.button("Supprimer", key=f"tab3_del_{i}", use_container_width=True):
-                            st.session_state.saved_filters.pop(i)
-                            save_saved_filters(st.session_state.saved_filters)
-                            st.rerun()
-
-            # -------------------------------------------------------------
             # [4] NETTOYAGE MEMOIRE (honnete : pas de tache de fond automatique)
             # -------------------------------------------------------------
             with st.expander("🧹 Memoire / cache"):
@@ -313,5 +388,5 @@ def render():
                     st.rerun()
 
     except Exception:
-        st.error("\u274c Une erreur est survenue dans cet onglet. Copie-colle le detail ci-dessous pour diagnostic.")
+        st.error("❌ Une erreur est survenue dans cet onglet. Copie-colle le detail ci-dessous pour diagnostic.")
         st.code(traceback.format_exc(), language="text")

@@ -2,3 +2,4 @@
 # NON installees sur Streamlit Cloud (qui n'utilise que requirements.txt).
 -r requirements.txt
 pytest
+playwright

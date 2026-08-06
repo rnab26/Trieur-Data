@@ -394,26 +394,43 @@ with tab2:
     if need_reload and files:
         progress_bar = start_progress("Chargement des fichiers Excel... 0%")
         total_files = len(files)
+        # [FIX doublons de nom] Deux fichiers deposes ensemble peuvent porter
+        # EXACTEMENT le meme nom (ex: "export.csv" telecharge deux fois a des
+        # dates differentes). Streamlit les distingue tres bien (2 entrees
+        # dans l'uploader), mais notre cle interne all_sheets etait basee sur
+        # f.name : le 2e fichier ecrasait silencieusement le 1er. On rend le
+        # nom utilise pour la cle unique au sein de cet import (export.csv,
+        # export (2).csv...) sans toucher au fichier lu ni a son nom affiche
+        # dans le widget.
+        seen_names = {}
         for f_idx, f in enumerate(files):
             base_pct = int((f_idx / max(total_files, 1)) * 80)
             update_progress(progress_bar, base_pct, f"Lecture du fichier {f_idx+1}/{total_files} : {f.name}")
+
+            seen_names[f.name] = seen_names.get(f.name, 0) + 1
+            display_name = f.name
+            if seen_names[f.name] > 1:
+                stem, dot, ext = f.name.rpartition(".")
+                suffix = f" ({seen_names[f.name]})"
+                display_name = f"{stem}{suffix}.{ext}" if dot else f"{f.name}{suffix}"
+
             try:
                 # [GROS FICHIERS] CSV lu directement (rapide/leger) ; sinon Excel.
                 if f.name.lower().endswith(".csv"):
-                    sheets, inferred = read_csv_file(f, f.name)
+                    sheets, inferred = read_csv_file(f, display_name)
                 elif f.name.lower().endswith(".pdf"):
                     # [PDF] Prélèvements SEPA -> une ligne par prélèvement
-                    sheets, inferred = read_pdf_sepa(f, f.name)
+                    sheets, inferred = read_pdf_sepa(f, display_name)
                 else:
-                    sheets = read_excel_all_sheets_from_file(f, f.name)
+                    sheets = read_excel_all_sheets_from_file(f, display_name)
                     # [2] Onglets sans ligne d'en-tete : relecture + noms deduits
                     sheets, inferred = apply_header_inference_excel(sheets, f)
 
                 if not sheets:
-                    st.error(f"❌ Aucun onglet lisible dans {f.name}")
+                    st.error(f"❌ Aucun onglet lisible dans {display_name}")
                     continue
 
-                inferred_this_load.extend(f"{f.name} :: {n}" for n in inferred)
+                inferred_this_load.extend(f"{display_name} :: {n}" for n in inferred)
 
                 sheet_items = list(sheets.items())
                 total_sheet_items = len(sheet_items)
@@ -426,18 +443,18 @@ with tab2:
                     update_progress(
                         progress_bar,
                         base_pct + step_within_file,
-                        f"Traitement de l'onglet {s_idx+1}/{total_sheet_items} de {f.name}"
+                        f"Traitement de l'onglet {s_idx+1}/{total_sheet_items} de {display_name}"
                     )
 
                     if df is None or len(df) == 0:
-                        st.warning(f"⚠️ {f.name} :: {sheet_name} est vide, ignoré.")
+                        st.warning(f"⚠️ {display_name} :: {sheet_name} est vide, ignoré.")
                         continue
 
-                    key = f.name + " :: " + sheet_name
+                    key = display_name + " :: " + sheet_name
                     # [MEM] pas de .copy() : le DataFrame vient d'etre lu et
                     # nous appartient, on le complete en place (evite de
                     # doubler la memoire sur les gros fichiers).
-                    df["__source_file__"] = f.name
+                    df["__source_file__"] = display_name
                     df["__source_sheet__"] = sheet_name
                     all_sheets[key] = df
 

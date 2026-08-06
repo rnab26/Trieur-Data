@@ -343,6 +343,7 @@ with tab2:
     files = st.file_uploader(
         "Deposez un ou plusieurs fichiers Excel, CSV ou PDF",
         type=["xlsx", "xls", "csv", "pdf"], accept_multiple_files=True,
+        key="main_file_uploader",
     )
     st.caption("💡 Pour de tres gros volumes (plusieurs millions de lignes), le "
                "**CSV** est bien plus rapide et leger que le .xlsx.")
@@ -503,6 +504,12 @@ with tab2:
             st.session_state.sheet_mappings[_sk] = _new_map
             for _src, _master in _new_map.items():
                 st.session_state[f"map_{_sk}_{_src}"] = _master
+
+    if not has_input and not all_sheets:
+        st.info("📂 Déposez un fichier Excel, CSV ou PDF ci-dessus pour commencer.")
+
+    if has_input and not all_sheets:
+        st.warning("⚠️ Aucun onglet n'a pu être lu depuis les fichiers fournis. Vérifiez que les fichiers ne sont pas vides ou protégés.")
 
     if all_sheets:
         # [2] Prevenir que des en-tetes ont ete deduites (persiste entre les reruns)

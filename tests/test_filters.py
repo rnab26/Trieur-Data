@@ -1,6 +1,13 @@
 import pandas as pd
 
-from trieur.filters import cp_matches_prefix, dedupe_dataframe, normalize_cp
+from trieur.filters import (
+    cp_matches_prefix,
+    dedupe_dataframe,
+    dedupe_dataframe_manual,
+    duplicate_groups,
+    most_complete_row_index,
+    normalize_cp,
+)
 
 
 def test_normalize_cp_complete_les_codes_a_4_chiffres():
@@ -68,6 +75,56 @@ def test_dedupe_dataframe_sans_doublon_ne_change_rien():
 def test_dedupe_dataframe_colonne_absente_renvoie_le_df_inchange():
     df = pd.DataFrame({"NOM": ["Alice", "Alice"]})
     result = dedupe_dataframe(df, "TELEPHONE")
+    assert len(result) == 2
+
+
+def test_dedupe_dataframe_ne_traite_pas_les_cases_vides_comme_doublons():
+    # Deux lignes SANS telephone ne sont pas des doublons l'une de l'autre.
+    df = pd.DataFrame({
+        "TELEPHONE": ["0601020304", None, None, "0601020304"],
+        "NOM": ["Alice", "Bob", "Carla", "Alice bis"],
+    })
+    result = dedupe_dataframe(df, "TELEPHONE", keep="first")
+    assert len(result) == 3
+    assert set(result["NOM"]) == {"Alice", "Bob", "Carla"}
+
+
+def test_duplicate_groups_ignore_les_cases_vides():
+    df = pd.DataFrame({"TELEPHONE": ["0601020304", "0601020304", None, None, "0611111111"]})
+    groups = duplicate_groups(df, "TELEPHONE")
+    assert len(groups) == 1
+    value, idx = groups[0]
+    assert value == "0601020304"
+    assert set(idx) == {0, 1}
+
+
+def test_duplicate_groups_colonne_absente():
+    df = pd.DataFrame({"NOM": ["Alice"]})
+    assert duplicate_groups(df, "TELEPHONE") == []
+
+
+def test_most_complete_row_index_choisit_le_moins_de_vides():
+    df = pd.DataFrame({
+        "TELEPHONE": ["0601020304", "0601020304"],
+        "EMAIL": [None, "alice@example.com"],
+        "NOM": ["Alice", "Alice"],
+    })
+    assert most_complete_row_index(df, [0, 1]) == 1
+
+
+def test_dedupe_dataframe_manual_respecte_le_choix_par_groupe():
+    df = pd.DataFrame({
+        "TELEPHONE": ["0601020304", "0601020304", "0611111111", None],
+        "NOM": ["Alice A", "Alice B", "Bob", "Sans tel"],
+    })
+    # on choisit explicitement de garder la ligne 1 (Alice B) du groupe de doublons
+    result = dedupe_dataframe_manual(df, "TELEPHONE", keep_indices=[1])
+    assert set(result["NOM"]) == {"Alice B", "Bob", "Sans tel"}
+
+
+def test_dedupe_dataframe_manual_colonne_absente():
+    df = pd.DataFrame({"NOM": ["Alice", "Alice"]})
+    result = dedupe_dataframe_manual(df, "TELEPHONE", keep_indices=[])
     assert len(result) == 2
 
 

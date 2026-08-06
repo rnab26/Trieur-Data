@@ -5,8 +5,19 @@ import traceback
 import pandas as pd
 import streamlit as st
 
-from trieur.filters import cp_matches_prefix, dedupe_dataframe
+from trieur.filters import (
+    cp_matches_prefix,
+    dedupe_dataframe,
+    dedupe_dataframe_manual,
+    duplicate_groups,
+    most_complete_row_index,
+)
 from trieur.persistence import save_saved_filters
+
+# Au-dela de ce nombre de GROUPES de doublons, la revue manuelle groupe par
+# groupe (aperçu + choix de la ligne a garder) devient impraticable -> on
+# repasse automatiquement sur une regle globale (premiere/plus complete).
+DEDUP_GROUP_THRESHOLD = 50
 
 
 def render():
@@ -96,7 +107,12 @@ def render():
             dedup_removed = None
             if active_dedup and active_dedup["column"] in filtered_df.columns:
                 before_dedup = len(filtered_df)
-                filtered_df = dedupe_dataframe(filtered_df, active_dedup["column"], active_dedup["keep"])
+                if active_dedup.get("mode") == "manual":
+                    filtered_df = dedupe_dataframe_manual(
+                        filtered_df, active_dedup["column"], set(active_dedup.get("keep_indices", []))
+                    )
+                else:
+                    filtered_df = dedupe_dataframe(filtered_df, active_dedup["column"], active_dedup.get("keep", "first"))
                 dedup_removed = before_dedup - len(filtered_df)
 
             remaining_lines = len(filtered_df)
@@ -114,28 +130,82 @@ def render():
 
             st.dataframe(filtered_df.head(50), use_container_width=True)
 
-            # [PERF] Le comptage des doublons scanne toute la base : on ne le fait
-            # QUE sur demande (sinon il ralentirait chaque interaction).
-            dup_check_col = st.selectbox("Colonne pour detecter les doublons (ex: TELEPHONE MOBILE)", options=["(aucune)"] + st.session_state.master_columns)
+            # [PERF] L'analyse des doublons scanne toute la base : on ne le fait
+            # QUE sur demande (sinon elle ralentirait chaque interaction).
+            dup_check_col = st.selectbox(
+                "Colonne pour detecter les doublons (ex: TELEPHONE MOBILE)",
+                options=["(aucune)"] + st.session_state.master_columns,
+                key="tab3_dup_col",
+            )
             if dup_check_col != "(aucune)" and dup_check_col in filtered_df.columns:
-                col_count, col_remove = st.columns([1, 1])
-                with col_count:
-                    if st.button(f"🔎 Compter les doublons sur '{dup_check_col}'", key="tab3_count_dupes"):
-                        dup_count = int(filtered_df[dup_check_col].duplicated(keep=False).sum())
-                        st.warning(f"{dup_count} lignes en doublon detectees sur la colonne '{dup_check_col}'.")
+                if st.button(f"🔎 Analyser les doublons sur '{dup_check_col}'", key="tab3_analyze_dupes"):
+                    st.session_state["_dedup_analysis"] = {
+                        "column": dup_check_col,
+                        "groups": duplicate_groups(filtered_df, dup_check_col),
+                    }
+                    for _k in [k for k in list(st.session_state.keys())
+                               if isinstance(k, str) and k.startswith("tab3_group_choice_")]:
+                        st.session_state.pop(_k, None)
 
-                keep_label = st.radio(
-                    "En cas de doublon, quelle ligne garder ?",
-                    options=["La premiere ligne importee", "La ligne la plus complete (le moins de champs vides)"],
-                    key="tab3_dedup_keep_rule",
-                    horizontal=True,
-                )
-                keep_rule = "complete" if keep_label.startswith("La ligne la plus") else "first"
+                analysis = st.session_state.get("_dedup_analysis")
+                if analysis and analysis["column"] == dup_check_col:
+                    groups = analysis["groups"]
+                    n_groups = len(groups)
 
-                with col_remove:
-                    if st.button(f"🗑️ Supprimer les doublons sur '{dup_check_col}'", key="tab3_remove_dupes", use_container_width=True):
-                        st.session_state["_dedup_active"] = {"column": dup_check_col, "keep": keep_rule}
-                        st.rerun()
+                    if n_groups == 0:
+                        st.info(f"ℹ️ Aucun doublon detecte sur '{dup_check_col}'.")
+                    elif n_groups <= DEDUP_GROUP_THRESHOLD:
+                        dup_rows = sum(len(idx) for _, idx in groups)
+                        st.write(f"**{n_groups} groupe(s) de doublons** ({dup_rows} lignes) — "
+                                 "la ligne la plus complete est pre-selectionnee ; corrige si besoin.")
+                        for gi, (value, idx_list) in enumerate(groups):
+                            choice_key = f"tab3_group_choice_{gi}"
+                            if choice_key not in st.session_state:
+                                st.session_state[choice_key] = most_complete_row_index(filtered_df, idx_list)
+
+                            st.caption(f"**{value}** — {len(idx_list)} lignes")
+                            st.dataframe(filtered_df.loc[idx_list], use_container_width=True)
+
+                            def _row_label(i, _df=filtered_df):
+                                row = _df.loc[i]
+                                preview = " | ".join(str(v) for v in row.dropna().astype(str).head(3))
+                                return f"Ligne {i} : {preview}"
+
+                            st.selectbox(
+                                "Ligne a conserver",
+                                options=idx_list,
+                                format_func=_row_label,
+                                key=choice_key,
+                                label_visibility="collapsed",
+                            )
+
+                        if st.button(f"✅ Appliquer la selection ({n_groups} groupe(s))",
+                                     key="tab3_apply_manual_dedup", type="primary"):
+                            keep_indices = [st.session_state[f"tab3_group_choice_{gi}"] for gi in range(n_groups)]
+                            st.session_state["_dedup_active"] = {
+                                "column": dup_check_col, "mode": "manual", "keep_indices": keep_indices,
+                            }
+                            st.session_state.pop("_dedup_analysis", None)
+                            st.rerun()
+                    else:
+                        st.warning(
+                            f"⚠️ {n_groups} groupes de doublons detectes : au-dela de la limite de "
+                            f"{DEDUP_GROUP_THRESHOLD} groupes pour la revue manuelle. Choisis une regle "
+                            "automatique appliquee a tous les groupes :"
+                        )
+                        keep_label = st.radio(
+                            "En cas de doublon, quelle ligne garder ?",
+                            options=["La premiere ligne importee", "La ligne la plus complete (le moins de champs vides)"],
+                            key="tab3_dedup_keep_rule",
+                            horizontal=True,
+                        )
+                        keep_rule = "complete" if keep_label.startswith("La ligne la plus") else "first"
+                        if st.button(f"🗑️ Supprimer les doublons sur '{dup_check_col}'", key="tab3_remove_dupes"):
+                            st.session_state["_dedup_active"] = {
+                                "column": dup_check_col, "mode": "rule", "keep": keep_rule,
+                            }
+                            st.session_state.pop("_dedup_analysis", None)
+                            st.rerun()
 
             st.session_state.filtered_df = filtered_df
 

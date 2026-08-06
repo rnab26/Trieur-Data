@@ -32,22 +32,53 @@ def save_master_columns(cols):
 
 
 # -------------------------------------------------------------
-# [5] FILTRES PRE-ENREGISTRES
-# Chaque filtre = {"name", "column", "kind", "values"} ou :
-#   kind = "departements" -> values = ["33", "77", ...] (prefixes CP)
-#   kind = "valeurs"      -> values = ["Paris", "Lyon", ...]
+# [5][13] FILTRES PRE-ENREGISTRES (multi-criteres depuis [13])
+# Chaque filtre = {"name", "groups": [[critere, ...], ...]} ou :
+#   - les criteres d'un meme groupe (liste interne) sont combines en ET
+#   - les groupes entre eux (liste externe) sont combines en OU
+#   - un critere = {"column", "kind", "values"} avec :
+#       kind = "departements" -> values = ["33", "77", ...] (prefixes CP)
+#       kind = "valeurs"      -> values = ["Paris", "Lyon", ...]
 # -------------------------------------------------------------
 FILTERS_CONFIG_PATH = "saved_filters.json"
 
 
-def _is_valid_filter(f):
+def _is_valid_criterion(c):
     return bool(
-        isinstance(f, dict)
-        and isinstance(f.get("name"), str) and f["name"].strip()
-        and isinstance(f.get("column"), str) and f["column"]
-        and f.get("kind") in ("departements", "valeurs")
-        and isinstance(f.get("values"), list)
+        isinstance(c, dict)
+        and isinstance(c.get("column"), str) and c["column"]
+        and c.get("kind") in ("departements", "valeurs")
+        and isinstance(c.get("values"), list)
     )
+
+
+def _is_valid_filter(f):
+    if not (isinstance(f, dict) and isinstance(f.get("name"), str) and f["name"].strip()):
+        return False
+    groups = f.get("groups")
+    if not isinstance(groups, list) or not groups:
+        return False
+    return all(
+        isinstance(g, list) and g and all(_is_valid_criterion(c) for c in g)
+        for g in groups
+    )
+
+
+def _migrate_filter(f):
+    """Convertit un filtre de l'ANCIEN format {name,column,kind,values}
+    (avant le multi-criteres) vers le nouveau format {name, groups:[[...]]}
+    -- un groupe unique avec un seul critere -- pour que les filtres deja
+    enregistres continuent de fonctionner sans rien perdre."""
+    if isinstance(f, dict) and "groups" not in f and "column" in f:
+        return {
+            "name": f.get("name"),
+            "groups": [[{
+                "column": f.get("column"),
+                "kind": f.get("kind"),
+                "values": f.get("values"),
+            }]],
+        }
+    return f
 
 
 def load_saved_filters():
@@ -57,7 +88,8 @@ def load_saved_filters():
             with open(FILTERS_CONFIG_PATH, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
             if isinstance(data, list):
-                return [f for f in data if _is_valid_filter(f)]
+                migrated = [_migrate_filter(f) for f in data]
+                return [f for f in migrated if _is_valid_filter(f)]
     except Exception:
         pass
     return []

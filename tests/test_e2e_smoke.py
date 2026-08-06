@@ -74,7 +74,8 @@ def streamlit_server():
         except subprocess.TimeoutExpired:
             proc.kill()
         # Nettoyage des fichiers ecrits par persistence.py pendant le test.
-        for name in ("user_master_columns.json", "saved_filters.json"):
+        for name in ("user_master_columns.json", "saved_filters.json",
+                     "export_presets.json", "remembered_mappings.json"):
             p = REPO_ROOT / name
             if p.exists():
                 p.unlink()

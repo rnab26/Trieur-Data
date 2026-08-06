@@ -1,6 +1,8 @@
 # Fichiers generes a l'execution (ne pas committer)
 user_master_columns.json
 saved_filters.json
+export_presets.json
+remembered_mappings.json
 
 __pycache__/
 *.pyc

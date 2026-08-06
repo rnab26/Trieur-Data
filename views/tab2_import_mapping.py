@@ -12,6 +12,7 @@ from trieur.matching import (
     auto_assign_single_sheet,
     clean_iban,
     detect_iban_column,
+    iban_is_valid,
     is_iban_master,
 )
 from trieur.io_excel import (
@@ -512,6 +513,35 @@ def render():
                                 st.session_state.pop(_k, None)
                             st.success(f"✅ Base construite : {len(final_df)} lignes fusionnées.")
                             st.dataframe(final_df.head(50), use_container_width=True)
+
+                            # [IBAN] Verification du checksum (mod 97) sur les colonnes IBAN
+                            # detectees. N'invalide rien automatiquement (la base garde toutes
+                            # les lignes) : sert a reperer une erreur de saisie / OCR PDF avant
+                            # l'export final.
+                            iban_cols = [c for c in final_df.columns
+                                        if is_iban_master(c) or detect_iban_column(final_df[c])]
+                            invalid_by_col = []
+                            total_invalid = 0
+                            for c in iban_cols:
+                                mask = final_df[c].map(iban_is_valid) == False  # noqa: E712 (None != False)
+                                n = int(mask.sum())
+                                if n:
+                                    total_invalid += n
+                                    preview_cols = [c] + (["Source Data"] if "Source Data" in final_df.columns else [])
+                                    invalid_by_col.append((c, n, final_df.loc[mask, preview_cols].head(20)))
+
+                            if total_invalid:
+                                st.warning(
+                                    f"⚠️ {total_invalid} IBAN(s) avec un checksum invalide detecte(s) sur "
+                                    + ", ".join(f"**{c}** ({n})" for c, n, _ in invalid_by_col)
+                                    + ". Rien n'est supprime automatiquement, mais cela indique souvent une "
+                                      "erreur de saisie ou un caractere mal reconnu par l'OCR d'un PDF. "
+                                      "A verifier avant l'export final."
+                                )
+                                with st.expander(f"🔍 Voir les IBAN suspects ({total_invalid})"):
+                                    for c, n, sample in invalid_by_col:
+                                        st.caption(f"**{c}** : {n} IBAN(s) suspect(s)")
+                                        st.dataframe(sample, use_container_width=True)
         else:
             st.info("ℹ️ Importe un fichier Excel ou colle une URL Google Sheets pour continuer.")
 

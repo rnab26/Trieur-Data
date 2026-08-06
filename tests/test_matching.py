@@ -3,10 +3,15 @@ import pandas as pd
 from trieur.matching import (
     DEFAULT_MASTER_COLUMNS,
     auto_assign_columns_fast,
+    clean_iban,
     clean_phone,
+    detect_iban_column,
     detect_phone_column_kind,
+    iban_is_valid,
     infer_column_names,
+    is_iban_master,
     looks_like_header,
+    looks_like_iban,
     normalize_text,
     phone_kind,
 )
@@ -108,3 +113,46 @@ def test_infer_column_names_par_contenu():
     assert n[4] == "CP"
     assert n[0].startswith("COLONNE_")
     assert len(set(n)) == len(n)
+
+
+# --- IBAN --------------------------------------------------------------
+def test_is_iban_master_reconnait_le_sens_du_nom():
+    assert is_iban_master("Référence bancaire") is True
+    assert is_iban_master("IBAN") is True
+    assert is_iban_master("NOM") is False
+
+
+def test_clean_iban_retire_les_espaces_internes():
+    assert clean_iban("FR76 3000 6000 0112 3456 7890 189") == "FR7630006000011234567890189"
+    assert clean_iban(None) is None or pd.isna(clean_iban(None))
+
+
+def test_looks_like_iban_detecte_la_forme():
+    assert looks_like_iban("FR7630006000011234567890189") is True
+    assert looks_like_iban("bonjour") is False
+    assert looks_like_iban(None) is False
+
+
+def test_detect_iban_column_sur_petit_echantillon():
+    s = pd.Series(["FR7630006000011234567890189", "DE89370400440532013000"])
+    assert detect_iban_column(s) is True
+    assert detect_iban_column(pd.Series(["Alice", "Bob"])) is False
+
+
+def test_iban_is_valid_accepte_des_iban_connus_valides():
+    # IBAN d'exemple officiels (registre IBAN / Wikipedia)
+    assert iban_is_valid("FR7630006000011234567890189") is True
+    assert iban_is_valid("DE89370400440532013000") is True
+    assert iban_is_valid("GB29NWBK60161331926819") is True
+    # tolere les espaces
+    assert iban_is_valid("FR76 3000 6000 0112 3456 7890 189") is True
+
+
+def test_iban_is_valid_rejette_un_checksum_casse():
+    assert iban_is_valid("FR7630006000011234567890180") is False
+
+
+def test_iban_is_valid_none_si_non_applicable():
+    assert iban_is_valid(None) is None
+    assert iban_is_valid("") is None
+    assert iban_is_valid("bonjour") is None

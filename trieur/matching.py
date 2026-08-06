@@ -409,6 +409,32 @@ def looks_like_iban(value):
     return bool(_IBAN_SHAPE_RE.match(s))
 
 
+def iban_is_valid(value):
+    """Verifie le checksum ISO 7064 (mod 97) d'un IBAN.
+
+    Renvoie True/False si la valeur a la forme d'un IBAN (voir looks_like_iban),
+    ou None si non applicable (vide ou ne ressemble pas a un IBAN) -- pour ne
+    jamais compter une case vide ou une autre colonne comme "invalide".
+    Ne verifie PAS la longueur exacte par pays (pas de table de correspondance) :
+    le checksum suffit a detecter la grande majorite des erreurs de saisie/OCR.
+    """
+    if pd.isna(value):
+        return None
+    s = re.sub(r"\s+", "", str(value)).upper()
+    if not _IBAN_SHAPE_RE.match(s):
+        return None
+    rearranged = s[4:] + s[:4]
+    digits = []
+    for ch in rearranged:
+        if ch.isdigit():
+            digits.append(ch)
+        elif "A" <= ch <= "Z":
+            digits.append(str(ord(ch) - ord("A") + 10))
+        else:
+            return False
+    return int("".join(digits)) % 97 == 1
+
+
 def detect_iban_column(series, sample=200):
     """Analyse un ECHANTILLON du contenu d'une colonne (independamment de
     son nom) et dit si elle ressemble a une colonne d'IBAN.

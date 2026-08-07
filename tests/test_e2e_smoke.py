@@ -102,12 +102,14 @@ def test_full_pipeline_no_crash(streamlit_server):
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         try:
             page.goto(streamlit_server, wait_until="load", timeout=30000)
-            tabs = page.get_by_role("tab")
-            tabs.first.wait_for(state="visible", timeout=30000)
+            # [14] Barre d'onglets "maison" (boutons, pas des st.tabs natifs --
+            # necessaire pour piloter la navigation depuis le code Python).
+            nav = lambda label: page.get_by_role("button", name=label, exact=True)  # noqa: E731
+            nav("1. Colonnes maitres").wait_for(state="visible", timeout=30000)
             _assert_no_crash(page, "tab 1 (Colonnes maitres)")
 
             # Onglet "Import et Mapping"
-            tabs.nth(1).click()
+            nav("2. Import et Mapping").click()
             page.wait_for_timeout(1000)
             page.locator('input[type="file"]').set_input_files(str(FIXTURE_CSV))
             page.wait_for_timeout(3000)
@@ -129,13 +131,13 @@ def test_full_pipeline_no_crash(streamlit_server):
             # declenche le crash width="stretch" en production (le tableau
             # filtre s'affiche sans condition des que la base existe, sur
             # CHAQUE rerun -- il faut verifier CE tab, pas seulement Export).
-            tabs.nth(2).click()
+            nav("3. Filtrage & Dedup").click()
             page.wait_for_timeout(1500)
             body = _assert_no_crash(page, "tab 3 (Filtrage & Dedup)")
             assert "lignes conservees" in body or "lignes conservées" in body, body
 
             # Onglet "Export"
-            tabs.nth(3).click()
+            nav("4. Export").click()
             page.wait_for_timeout(1500)
             body = _assert_no_crash(page, "tab 4 (Export)")
             assert "prêtes à l'export" in body or "pretes a l'export" in body, body

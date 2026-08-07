@@ -1,5 +1,5 @@
 # =============================================================
-# Trieur de Fichiers Leads
+# Trieur de Data
 # VERSION 5.1 :
 #   [DEDUP] Suppression reelle des doublons (onglet Filtrage & Dedup), avec
 #       choix de la ligne a garder (premiere importee, ou la plus complete).
@@ -122,7 +122,9 @@ import views.tab2_import_mapping as view_tab2
 import views.tab3_filtrage_dedup as view_tab3
 import views.tab4_export as view_tab4
 
-st.set_page_config(page_title="Trieur de Fichiers Leads", layout="wide")
+LOGO_PATH = "assets/logo.png"
+
+st.set_page_config(page_title="Trieur de Data", page_icon=LOGO_PATH, layout="wide")
 
 APP_VERSION = "5.1"
 
@@ -281,7 +283,11 @@ if "remembered_mappings" not in st.session_state:
     st.session_state.remembered_mappings = load_remembered_mappings()
 
 
-st.title("Trieur de Fichiers Leads")
+col_logo, col_title = st.columns([1, 8])
+with col_logo:
+    st.image(LOGO_PATH, width=72)
+with col_title:
+    st.title("Trieur de Data")
 st.caption(f"Import Excel ou Google Sheets → mapping colonnes → aperçu → filtrage → export · v{APP_VERSION}")
 
 tab1, tab2, tab3, tab4 = st.tabs(["1. Colonnes maitres", "2. Import et Mapping", "3. Filtrage & Dedup", "4. Export"])

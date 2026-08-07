@@ -129,64 +129,107 @@ st.set_page_config(page_title="Trieur de Data", page_icon=LOGO_PATH, layout="wid
 APP_VERSION = "5.1"
 
 # -------------------------------------------------------------
-# [10] DESIGN EPURE FACON APPLE (CSS global, purement cosmetique)
-# N'affecte aucun comportement ; se contente d'affiner l'apparence.
+# [13] DESIGN "FEUTRE ELEGANT" (CSS global, purement cosmetique)
+# Palette + typographie choisies parmi 3 pistes proposees et validees par
+# l'utilisateur (fond gris-bleu doux, cartes flottantes a ombre legere,
+# titres en serif, accent bleu petrole). N'affecte aucun comportement ;
+# se contente d'affiner l'apparence.
 # -------------------------------------------------------------
 st.markdown(
     """
     <style>
-      :root { --accent: #0071e3; }
+      :root {
+          --bg: #F1F3F5;
+          --card: #FFFFFF;
+          --ink: #1D2229;
+          --muted: #667080;
+          --border: #DCE2E7;
+          --accent: #1F6F8B;
+          --accent-soft: #E4EEF2;
+          --danger: #A6433F;
+          --font-display: Georgia, "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+          --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
 
       html, body, [class*="css"], .stApp {
-          font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
-                       "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+          background: var(--bg);
+          color: var(--ink);
+          font-family: var(--font-body);
           -webkit-font-smoothing: antialiased;
       }
 
-      /* Titres : plus fins, mieux espaces */
-      h1, h2, h3 { letter-spacing: -0.02em; font-weight: 600; }
+      /* Titres : serif, pour une touche plus feutree/editoriale */
+      h1, h2, h3 {
+          font-family: var(--font-display);
+          letter-spacing: -0.005em;
+          font-weight: 600;
+          color: var(--ink);
+      }
       .block-container { padding-top: 2.2rem; max-width: 1300px; }
+      p, span, div, label { color: var(--ink); }
+      [data-testid="stCaptionContainer"], .stCaption { color: var(--muted) !important; }
 
       /* Boutons : coins arrondis, transition douce */
       .stButton > button, .stDownloadButton > button {
+          background: var(--card);
           border-radius: 10px;
-          border: 1px solid rgba(0,0,0,0.08);
+          border: 1px solid var(--border);
           padding: 0.45rem 1.0rem;
           font-weight: 500;
+          color: var(--ink);
           transition: all 0.15s ease;
       }
       .stButton > button:hover, .stDownloadButton > button:hover {
           border-color: var(--accent);
           color: var(--accent);
       }
-      /* Bouton principal : bleu plein facon Apple */
+      /* Bouton principal : bleu petrole plein, ombre douce */
       .stButton > button[kind="primary"] {
           background: var(--accent);
+          color: #fff;
           border: none;
-          box-shadow: 0 1px 3px rgba(0,113,227,0.30);
+          box-shadow: 0 4px 12px -4px rgba(31,111,139,0.45);
+      }
+      .stButton > button[kind="primary"]:hover {
+          background: #1a5f78;
+          color: #fff;
       }
 
-      /* Champs et menus : coins arrondis */
+      /* Champs et menus : coins arrondis, fond carte */
       .stSelectbox div[data-baseweb="select"] > div,
       .stTextInput input, .stTextArea textarea {
           border-radius: 10px;
+          background: var(--card);
+          border-color: var(--border);
+          color: var(--ink);
       }
 
       /* Onglets : plus d'air, soulignement accent */
-      .stTabs [data-baseweb="tab-list"] { gap: 0.4rem; }
+      .stTabs [data-baseweb="tab-list"] { gap: 0.4rem; border-bottom-color: var(--border); }
       .stTabs [data-baseweb="tab"] {
           border-radius: 10px 10px 0 0;
           padding: 0.4rem 1rem;
+          color: var(--muted);
       }
+      .stTabs [aria-selected="true"] { color: var(--accent) !important; }
+      .stTabs [data-baseweb="tab-highlight"] { background-color: var(--accent) !important; }
 
-      /* Tableaux et cartes : coins arrondis, ombre discrete */
+      /* Tableaux, cartes, expanders : coins arrondis, ombre douce plutot
+         qu'une simple bordure -- l'effet "carte flottante" de la direction
+         retenue. */
       [data-testid="stDataFrame"] {
           border-radius: 12px;
-          box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+          border: 1px solid var(--border);
+          box-shadow: 0 6px 20px -12px rgba(20,40,55,0.18);
       }
       [data-testid="stExpander"] {
           border-radius: 12px;
-          border: 1px solid rgba(0,0,0,0.07);
+          border: 1px solid var(--border);
+          background: var(--card);
+          box-shadow: 0 6px 20px -14px rgba(20,40,55,0.14);
+      }
+      div[data-testid="stVerticalBlockBorderWrapper"]:has(> div > div[style*="border"]) {
+          box-shadow: 0 6px 20px -14px rgba(20,40,55,0.14);
       }
 
       /* [7] Libelles de menus : affiches en ENTIER, jamais tronques, meme sur
@@ -223,10 +266,11 @@ st.markdown(
       [class*="st-key-maptbl-"] [data-testid="stVerticalBlock"] {
           gap: 0.15rem !important;          /* lignes serrees (compact) */
       }
-      /* Ligne des menus : fond bleute + bordure = distinction "colonne maitre" */
+      /* Ligne des menus : fond accent-soft + bordure accent = distinction
+         "colonne maitre" (repris de la palette feutre elegant). */
       [class*="st-key-maptbl-"] .stSelectbox div[data-baseweb="select"] > div {
-          background: #eef4ff;
-          border: 1px solid #bcd4ff;
+          background: var(--accent-soft);
+          border: 1px solid var(--accent);
           border-radius: 8px;
           min-height: 34px;
       }
@@ -235,11 +279,11 @@ st.markdown(
       [class*="st-key-maptbl-"] .mapcell {
           font-size: 0.8rem;
           padding: 3px 6px;
-          border-bottom: 1px solid #ececec;
+          border-bottom: 1px solid var(--border);
           white-space: normal;
           overflow-wrap: anywhere;
           word-break: break-word;
-          color: #333;
+          color: var(--muted);
       }
     </style>
     """,

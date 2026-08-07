@@ -129,107 +129,64 @@ st.set_page_config(page_title="Trieur de Data", page_icon=LOGO_PATH, layout="wid
 APP_VERSION = "5.1"
 
 # -------------------------------------------------------------
-# [13] DESIGN "FEUTRE ELEGANT" (CSS global, purement cosmetique)
-# Palette + typographie choisies parmi 3 pistes proposees et validees par
-# l'utilisateur (fond gris-bleu doux, cartes flottantes a ombre legere,
-# titres en serif, accent bleu petrole). N'affecte aucun comportement ;
-# se contente d'affiner l'apparence.
+# [10] DESIGN EPURE FACON APPLE (CSS global, purement cosmetique)
+# N'affecte aucun comportement ; se contente d'affiner l'apparence.
 # -------------------------------------------------------------
 st.markdown(
     """
     <style>
-      :root {
-          --bg: #F1F3F5;
-          --card: #FFFFFF;
-          --ink: #1D2229;
-          --muted: #667080;
-          --border: #DCE2E7;
-          --accent: #1F6F8B;
-          --accent-soft: #E4EEF2;
-          --danger: #A6433F;
-          --font-display: Georgia, "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
-          --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      }
+      :root { --accent: #0071e3; }
 
       html, body, [class*="css"], .stApp {
-          background: var(--bg);
-          color: var(--ink);
-          font-family: var(--font-body);
+          font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+                       "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
           -webkit-font-smoothing: antialiased;
       }
 
-      /* Titres : serif, pour une touche plus feutree/editoriale */
-      h1, h2, h3 {
-          font-family: var(--font-display);
-          letter-spacing: -0.005em;
-          font-weight: 600;
-          color: var(--ink);
-      }
+      /* Titres : plus fins, mieux espaces */
+      h1, h2, h3 { letter-spacing: -0.02em; font-weight: 600; }
       .block-container { padding-top: 2.2rem; max-width: 1300px; }
-      p, span, div, label { color: var(--ink); }
-      [data-testid="stCaptionContainer"], .stCaption { color: var(--muted) !important; }
 
       /* Boutons : coins arrondis, transition douce */
       .stButton > button, .stDownloadButton > button {
-          background: var(--card);
           border-radius: 10px;
-          border: 1px solid var(--border);
+          border: 1px solid rgba(0,0,0,0.08);
           padding: 0.45rem 1.0rem;
           font-weight: 500;
-          color: var(--ink);
           transition: all 0.15s ease;
       }
       .stButton > button:hover, .stDownloadButton > button:hover {
           border-color: var(--accent);
           color: var(--accent);
       }
-      /* Bouton principal : bleu petrole plein, ombre douce */
+      /* Bouton principal : bleu plein facon Apple */
       .stButton > button[kind="primary"] {
           background: var(--accent);
-          color: #fff;
           border: none;
-          box-shadow: 0 4px 12px -4px rgba(31,111,139,0.45);
-      }
-      .stButton > button[kind="primary"]:hover {
-          background: #1a5f78;
-          color: #fff;
+          box-shadow: 0 1px 3px rgba(0,113,227,0.30);
       }
 
-      /* Champs et menus : coins arrondis, fond carte */
+      /* Champs et menus : coins arrondis */
       .stSelectbox div[data-baseweb="select"] > div,
       .stTextInput input, .stTextArea textarea {
           border-radius: 10px;
-          background: var(--card);
-          border-color: var(--border);
-          color: var(--ink);
       }
 
       /* Onglets : plus d'air, soulignement accent */
-      .stTabs [data-baseweb="tab-list"] { gap: 0.4rem; border-bottom-color: var(--border); }
+      .stTabs [data-baseweb="tab-list"] { gap: 0.4rem; }
       .stTabs [data-baseweb="tab"] {
           border-radius: 10px 10px 0 0;
           padding: 0.4rem 1rem;
-          color: var(--muted);
       }
-      .stTabs [aria-selected="true"] { color: var(--accent) !important; }
-      .stTabs [data-baseweb="tab-highlight"] { background-color: var(--accent) !important; }
 
-      /* Tableaux, cartes, expanders : coins arrondis, ombre douce plutot
-         qu'une simple bordure -- l'effet "carte flottante" de la direction
-         retenue. */
+      /* Tableaux et cartes : coins arrondis, ombre discrete */
       [data-testid="stDataFrame"] {
           border-radius: 12px;
-          border: 1px solid var(--border);
-          box-shadow: 0 6px 20px -12px rgba(20,40,55,0.18);
+          box-shadow: 0 1px 4px rgba(0,0,0,0.06);
       }
       [data-testid="stExpander"] {
           border-radius: 12px;
-          border: 1px solid var(--border);
-          background: var(--card);
-          box-shadow: 0 6px 20px -14px rgba(20,40,55,0.14);
-      }
-      div[data-testid="stVerticalBlockBorderWrapper"]:has(> div > div[style*="border"]) {
-          box-shadow: 0 6px 20px -14px rgba(20,40,55,0.14);
+          border: 1px solid rgba(0,0,0,0.07);
       }
 
       /* [7] Libelles de menus : affiches en ENTIER, jamais tronques, meme sur
@@ -266,11 +223,10 @@ st.markdown(
       [class*="st-key-maptbl-"] [data-testid="stVerticalBlock"] {
           gap: 0.15rem !important;          /* lignes serrees (compact) */
       }
-      /* Ligne des menus : fond accent-soft + bordure accent = distinction
-         "colonne maitre" (repris de la palette feutre elegant). */
+      /* Ligne des menus : fond bleute + bordure = distinction "colonne maitre" */
       [class*="st-key-maptbl-"] .stSelectbox div[data-baseweb="select"] > div {
-          background: var(--accent-soft);
-          border: 1px solid var(--accent);
+          background: #eef4ff;
+          border: 1px solid #bcd4ff;
           border-radius: 8px;
           min-height: 34px;
       }
@@ -279,11 +235,11 @@ st.markdown(
       [class*="st-key-maptbl-"] .mapcell {
           font-size: 0.8rem;
           padding: 3px 6px;
-          border-bottom: 1px solid var(--border);
+          border-bottom: 1px solid #ececec;
           white-space: normal;
           overflow-wrap: anywhere;
           word-break: break-word;
-          color: var(--muted);
+          color: #333;
       }
     </style>
     """,
@@ -325,6 +281,11 @@ if "export_presets" not in st.session_state:
 # [12] Mapping memorise par forme de fichier (charges depuis remembered_mappings.json)
 if "remembered_mappings" not in st.session_state:
     st.session_state.remembered_mappings = load_remembered_mappings()
+# [14] Onglet actif : index dans TAB_LABELS. st.tabs() ne peut pas etre pilote
+# depuis le code Python (limitation Streamlit) -- on utilise donc une barre
+# d'onglets "maison" pilotable, pour permettre les boutons "etape suivante".
+if "active_tab" not in st.session_state:
+    st.session_state.active_tab = 0
 
 
 col_logo, col_title = st.columns([1, 8])
@@ -334,16 +295,18 @@ with col_title:
     st.title("Trieur de Data")
 st.caption(f"Import Excel ou Google Sheets → mapping colonnes → aperçu → filtrage → export · v{APP_VERSION}")
 
-tab1, tab2, tab3, tab4 = st.tabs(["1. Colonnes maitres", "2. Import et Mapping", "3. Filtrage & Dedup", "4. Export"])
+TAB_LABELS = ["1. Colonnes maitres", "2. Import et Mapping", "3. Filtrage & Dedup", "4. Export"]
+TAB_VIEWS = [view_tab1.render, view_tab2.render, view_tab3.render, view_tab4.render]
 
-with tab1:
-    view_tab1.render()
+nav_cols = st.columns(len(TAB_LABELS))
+for _i, _label in enumerate(TAB_LABELS):
+    with nav_cols[_i]:
+        if st.button(
+            _label, key=f"navtab_{_i}", use_container_width=True,
+            type="primary" if st.session_state.active_tab == _i else "secondary",
+        ):
+            st.session_state.active_tab = _i
+            st.rerun()
+st.markdown("---")
 
-with tab2:
-    view_tab2.render()
-
-with tab3:
-    view_tab3.render()
-
-with tab4:
-    view_tab4.render()
+TAB_VIEWS[st.session_state.active_tab]()

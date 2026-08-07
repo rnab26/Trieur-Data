@@ -155,9 +155,8 @@ def render():
             all_groups = []
             for gi, crit_ids in enumerate(group_ids):
                 if gi > 0:
-                    st.markdown("<div style='text-align:center; font-weight:700; "
-                               "font-size:11px; letter-spacing:0.08em; color:#1F6F8B; "
-                               "margin:6px 0;'>OU</div>", unsafe_allow_html=True)
+                    st.markdown("<div style='text-align:center; font-weight:600; "
+                               "color:#888; margin:4px 0;'>OU</div>", unsafe_allow_html=True)
                 with st.container(border=True):
                     group_criteria = []
                     crit_ids_to_remove = []
@@ -405,6 +404,12 @@ def render():
                             st.rerun()
 
             st.session_state.filtered_df = filtered_df
+
+            # [NAV] Passer directement a l'export du resultat filtre actuel.
+            st.markdown("---")
+            if st.button("➡️ Passer à l'export", key="goto_tab4", type="primary"):
+                st.session_state.active_tab = 3
+                st.rerun()
 
             # -------------------------------------------------------------
             # [4] NETTOYAGE MEMOIRE (honnete : pas de tache de fond automatique)

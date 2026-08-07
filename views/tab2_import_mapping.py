@@ -568,6 +568,14 @@ def render():
         else:
             st.info("ℹ️ Importe un fichier Excel ou colle une URL Google Sheets pour continuer.")
 
+        # [NAV] Base deja construite (meme apres un "Vider le cache", qui la
+        # conserve) : proposer de passer directement a l'etape suivante.
+        if st.session_state.final_df is not None:
+            st.markdown("---")
+            if st.button("➡️ Passer au filtrage", key="goto_tab3", type="primary"):
+                st.session_state.active_tab = 2
+                st.rerun()
+
     except Exception:
         st.error("\u274c Une erreur est survenue dans cet onglet. Copie-colle le detail ci-dessous pour diagnostic.")
         st.code(traceback.format_exc(), language="text")

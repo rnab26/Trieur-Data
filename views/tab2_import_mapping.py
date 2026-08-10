@@ -25,6 +25,7 @@ from trieur.io_excel import (
     is_google_sheet_url,
 )
 from trieur.io_pdf import read_pdf_sepa
+from views._nav import goto_native_tab
 
 
 def _auto_assign(sheet_key, sheet_df):
@@ -569,12 +570,13 @@ def render():
             st.info("ℹ️ Importe un fichier Excel ou colle une URL Google Sheets pour continuer.")
 
         # [NAV] Base deja construite (meme apres un "Vider le cache", qui la
-        # conserve) : proposer de passer directement a l'etape suivante.
+        # conserve) : proposer de passer directement a l'etape suivante. Un
+        # clic JS sur l'onglet natif (pas de rerun) : voir la note [14] dans
+        # app.py sur pourquoi st.tabs() natif est conserve.
         if st.session_state.final_df is not None:
             st.markdown("---")
             if st.button("➡️ Passer au filtrage", key="goto_tab3", type="primary"):
-                st.session_state.active_tab = 2
-                st.rerun()
+                goto_native_tab(2)
 
     except Exception:
         st.error("\u274c Une erreur est survenue dans cet onglet. Copie-colle le detail ci-dessous pour diagnostic.")

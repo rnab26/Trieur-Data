@@ -14,6 +14,7 @@ from trieur.filters import (
     most_complete_row_index,
 )
 from trieur.persistence import decode_filters_code, encode_filters_code, save_saved_filters
+from views._nav import goto_native_tab
 
 # Au-dela de ce nombre de GROUPES de doublons, la revue manuelle groupe par
 # groupe (aperçu + choix de la ligne a garder) devient impraticable -> on
@@ -408,8 +409,7 @@ def render():
             # [NAV] Passer directement a l'export du resultat filtre actuel.
             st.markdown("---")
             if st.button("➡️ Passer à l'export", key="goto_tab4", type="primary"):
-                st.session_state.active_tab = 3
-                st.rerun()
+                goto_native_tab(3)
 
             # -------------------------------------------------------------
             # [4] NETTOYAGE MEMOIRE (honnete : pas de tache de fond automatique)

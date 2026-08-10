@@ -281,11 +281,6 @@ if "export_presets" not in st.session_state:
 # [12] Mapping memorise par forme de fichier (charges depuis remembered_mappings.json)
 if "remembered_mappings" not in st.session_state:
     st.session_state.remembered_mappings = load_remembered_mappings()
-# [14] Onglet actif : index dans TAB_LABELS. st.tabs() ne peut pas etre pilote
-# depuis le code Python (limitation Streamlit) -- on utilise donc une barre
-# d'onglets "maison" pilotable, pour permettre les boutons "etape suivante".
-if "active_tab" not in st.session_state:
-    st.session_state.active_tab = 0
 
 
 col_logo, col_title = st.columns([1, 8])
@@ -295,18 +290,24 @@ with col_title:
     st.title("Trieur de Data")
 st.caption(f"Import Excel ou Google Sheets → mapping colonnes → aperçu → filtrage → export · v{APP_VERSION}")
 
-TAB_LABELS = ["1. Colonnes maitres", "2. Import et Mapping", "3. Filtrage & Dedup", "4. Export"]
-TAB_VIEWS = [view_tab1.render, view_tab2.render, view_tab3.render, view_tab4.render]
+# [14] st.tabs() natif : conserve TOUS les onglets montes dans le DOM (juste
+# masques). C'est important pour les composants custom (ex: streamlit-sortables
+# dans l'onglet Export) dont la detection de hauteur ne se declenche fiablement
+# QUE dans ce mode -- une barre d'onglets "maison" pilotee par session_state
+# avait ete tentee pour permettre les boutons "etape suivante" (voir
+# views/tab2_import_mapping.py et views/tab3_filtrage_dedup.py), mais elle ne
+# monte le contenu QUE de l'onglet actif et cassait ainsi ce composant. Les
+# boutons "etape suivante" font donc plutot un clic JS sur l'onglet natif.
+tab1, tab2, tab3, tab4 = st.tabs(["1. Colonnes maitres", "2. Import et Mapping", "3. Filtrage & Dedup", "4. Export"])
 
-nav_cols = st.columns(len(TAB_LABELS))
-for _i, _label in enumerate(TAB_LABELS):
-    with nav_cols[_i]:
-        if st.button(
-            _label, key=f"navtab_{_i}", use_container_width=True,
-            type="primary" if st.session_state.active_tab == _i else "secondary",
-        ):
-            st.session_state.active_tab = _i
-            st.rerun()
-st.markdown("---")
+with tab1:
+    view_tab1.render()
 
-TAB_VIEWS[st.session_state.active_tab]()
+with tab2:
+    view_tab2.render()
+
+with tab3:
+    view_tab3.render()
+
+with tab4:
+    view_tab4.render()

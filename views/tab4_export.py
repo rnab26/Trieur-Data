@@ -3,6 +3,7 @@ CSV/Excel de la base filtree."""
 import traceback
 
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit_sortables import sort_items
 
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
@@ -80,6 +81,30 @@ def render():
                     )
                     st.session_state[included_key] = sorted_result[0]["items"]
                     st.session_state[excluded_key] = sorted_result[1]["items"]
+
+                    # [FIX] Le composant streamlit-sortables ne detecte pas toujours
+                    # sa propre hauteur au premier montage (reste a 0px, invisible)
+                    # depuis que les onglets sont rendus par notre barre de
+                    # navigation (rendu conditionnel) plutot que par st.tabs()
+                    # natif (qui montait toujours tous les onglets et laissait donc
+                    # au composant l'occasion de se re-mesurer a chaque rerun). On
+                    # force un vrai changement de taille (display:none -> visible)
+                    # sur SON PROPRE iframe : c'est ce genre de transition -- pas un
+                    # simple evenement "resize" -- que son ResizeObserver detecte.
+                    components.html(
+                        """<script>
+                        setTimeout(function () {
+                            var fr = window.parent.document.querySelectorAll('iframe[title*="sortable"]');
+                            fr.forEach(function (f) {
+                                var prev = f.style.display;
+                                f.style.display = 'none';
+                                void f.offsetHeight;
+                                f.style.display = prev || '';
+                            });
+                        }, 150);
+                        </script>""",
+                        height=0,
+                    )
 
                 # [11] Presets d'export : enregistrer/reappliquer l'ordre et la
                 # selection de colonnes ci-dessus sous un nom, pour ne pas avoir

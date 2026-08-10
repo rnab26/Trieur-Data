@@ -102,14 +102,12 @@ def test_full_pipeline_no_crash(streamlit_server):
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         try:
             page.goto(streamlit_server, wait_until="load", timeout=30000)
-            # [14] Barre d'onglets "maison" (boutons, pas des st.tabs natifs --
-            # necessaire pour piloter la navigation depuis le code Python).
-            nav = lambda label: page.get_by_role("button", name=label, exact=True)  # noqa: E731
-            nav("1. Colonnes maitres").wait_for(state="visible", timeout=30000)
+            tabs = page.get_by_role("tab")
+            tabs.first.wait_for(state="visible", timeout=30000)
             _assert_no_crash(page, "tab 1 (Colonnes maitres)")
 
             # Onglet "Import et Mapping"
-            nav("2. Import et Mapping").click()
+            tabs.nth(1).click()
             page.wait_for_timeout(1000)
             page.locator('input[type="file"]').set_input_files(str(FIXTURE_CSV))
             page.wait_for_timeout(3000)
@@ -127,19 +125,37 @@ def test_full_pipeline_no_crash(streamlit_server):
             body = _assert_no_crash(page, "tab 2 after build")
             assert "Base construite" in body, body
 
-            # Onglet "Filtrage & Dedup" : c'est exactement le chemin qui a
-            # declenche le crash width="stretch" en production (le tableau
-            # filtre s'affiche sans condition des que la base existe, sur
-            # CHAQUE rerun -- il faut verifier CE tab, pas seulement Export).
-            nav("3. Filtrage & Dedup").click()
-            page.wait_for_timeout(1500)
-            body = _assert_no_crash(page, "tab 3 (Filtrage & Dedup)")
+            # [NAV] Le bouton "Passer au filtrage" doit reellement basculer
+            # sur l'onglet 3 (clic JS sur l'onglet natif -- voir views/_nav.py).
+            # Regression passee : le selecteur JS ne matchait plus rien sur
+            # cette version de Streamlit et le bouton ne faisait rien.
+            page.locator('button:visible', has_text="Passer au filtrage").click()
+            page.wait_for_timeout(1000)
+            body = _assert_no_crash(page, "tab 3 apres clic sur 'Passer au filtrage'")
             assert "lignes conservees" in body or "lignes conservées" in body, body
 
-            # Onglet "Export"
-            nav("4. Export").click()
-            page.wait_for_timeout(1500)
-            body = _assert_no_crash(page, "tab 4 (Export)")
+            # [NAV] Meme verification pour "Passer à l'export".
+            page.locator('button:visible', has_text="Passer à l'export").click()
+            page.wait_for_timeout(1000)
+            body = _assert_no_crash(page, "tab 4 apres clic sur 'Passer à l'export'")
             assert "prêtes à l'export" in body or "pretes a l'export" in body, body
+
+            # [SORTABLE] Regression passee : le widget de glisser-deposer des
+            # colonnes (streamlit-sortables) restait invisible (iframe a
+            # hauteur 0) quand les onglets n'etaient pas rendus par st.tabs()
+            # natif. On verifie que son iframe a une hauteur reelle.
+            page.get_by_text("Ordre et selection des colonnes", exact=False).click()
+            page.wait_for_timeout(1500)
+            sortable_iframe = page.locator('iframe[title="streamlit_sortables.sortable_items"]')
+            sortable_iframe.wait_for(state="attached", timeout=10000)
+            height = sortable_iframe.evaluate("el => getComputedStyle(el).height")
+            assert height != "0px", f"widget de glisser-deposer invisible (hauteur iframe: {height})"
+
+            # Navigation manuelle directe (clic sur un onglet) doit aussi
+            # fonctionner independamment des boutons de raccourci.
+            tabs.nth(0).click()
+            page.wait_for_timeout(1000)
+            body = _assert_no_crash(page, "tab 1 apres navigation manuelle")
+            assert "Gerer vos colonnes maitres" in body, body
         finally:
             browser.close()

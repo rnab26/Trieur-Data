@@ -134,6 +134,9 @@ pipeline). La CI a connu une panne côté plateforme GitHub Actions
 **Quoi** : ce fichier et `CLAUDE.md`, poussés directement sur `main`
 (exception explicite à la regle de branche — voir `CLAUDE.md`).
 
-**État** : mis en place.
+**État** : mis en place. Politique d'exécution autonome précisée le
+2026-08-10 : une tâche confirmée une fois s'exécute de bout en bout
+(commit/push/merge/déploiement inclus) sans redemander à chaque étape —
+voir `CLAUDE.md` section "Exécution autonome".
 
 **Notes / À faire** : (rien en attente)

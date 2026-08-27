@@ -3,36 +3,43 @@
 Consignes de travail pour Claude Code sur ce repo. À lire avant toute
 intervention.
 
+## Exécution autonome
+
+- "Demande explicite" veut dire que l'utilisateur a confirmé une tâche
+  (ou une liste de tâches) UNE FOIS dans la discussion. À partir de là,
+  tout s'exécute de bout en bout sans redemander à chaque étape :
+  commit, push, **merge sur `main`**, déploiement si c'est le but de la
+  tâche. Ne jamais renvoyer la balle à l'utilisateur pour une action
+  d'exécution (cliquer dans GitHub, un dashboard, etc.) — c'est à faire
+  soi-même.
+- Si un outil ou une contrainte technique bloque une action normalement
+  autorisée (ex. `git push` refusé), chercher un autre chemin qui aboutit
+  au même résultat (API GitHub, autre méthode) plutôt que de reporter la
+  décision sur l'utilisateur.
+- Rendre compte APRÈS coup, pas avant, sauf pour une vraie décision
+  ambiguë que seul l'utilisateur peut trancher (choix de design non
+  précisé, arbitrage produit...).
+- Si quelque chose casse suite à une action faite en autonomie, revenir
+  en arrière dès que l'utilisateur le signale — pas besoin d'une
+  validation préalable pour ça non plus.
+
 ## Discipline de branche (code applicatif)
 
-- Ne jamais travailler directement sur `main` pour du code applicatif.
-  Toujours rester sur la branche du chantier en cours.
-- Ne jamais merger une PR de code ni déployer sans demande explicite de
-  l'utilisateur POUR CE CHANGEMENT PRÉCIS, même si tous les tests
-  passent. Pousser le correctif validé sur la branche du chantier et
-  ouvrir/mettre à jour la PR, puis attendre l'accord pour merger.
-- Si merger soi-même est techniquement bloqué par la configuration de la
-  session, le dire clairement plutôt que de chercher un contournement —
-  l'utilisateur mergera lui-même via GitHub.
+- Chaque chantier de code a sa propre branche. Ne jamais déborder sur la
+  branche d'un autre chantier en cours.
+- Merger/déployer du code reste conditionné à une tâche confirmée (voir
+  "Exécution autonome" ci-dessus) — mais l'exécution complète, merge sur
+  `main` inclus, est toujours faite directement, sans repasser par
+  l'utilisateur.
 
-## Exception : fichiers de doc/suivi (CLAUDE.md, PROJECT_LOG.md)
+## Fichiers de doc/suivi (CLAUDE.md, PROJECT_LOG.md)
 
-- Ces deux fichiers sont créés, modifiés et poussés **directement sur
-  `main`**, sans demander confirmation à chaque fois — l'utilisateur ne
-  veut pas valider ça manuellement dans GitHub.
+- Ces deux fichiers se mettent à jour sur `main` sans même demander de
+  confirmation à chaque fois : c'est une mise à jour de routine, pas une
+  vraie décision.
 - Si `git push` vers `main` est bloqué par une contrainte de session,
   utiliser l'API GitHub (`create_or_update_file` ou équivalent) pour
   écrire directement sur `main` à la place.
-- Cette exception ne s'applique qu'à ces deux fichiers de suivi — jamais
-  au code applicatif.
-
-## Autonomie par défaut
-
-- Corriger un bug évident, relancer un test, pousser un correctif validé
-  sans redemander la permission à chaque étape.
-- Ne pas attendre de confirmation pour des actions réversibles et locales
-  au chantier (lancer les tests, ajuster le code, committer sur la
-  branche de travail).
 
 ## Rigueur technique
 

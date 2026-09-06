@@ -27,6 +27,14 @@ des noms de colonnes), nettoyage + vérification checksum IBAN (mod 97).
   et une sélection du "type de base"/métier avant import (prospection
   téléphonique vs IBAN, etc. — la structure de la base doit s'adapter).
   Gros chantier, à cadrer avant de commencer.
+- [ ] Signalé par l'utilisateur (2026-09-06) : ses colonnes maîtres se
+  réinitialisent au démarrage d'un tri. Cause : `user_master_columns.json`
+  est stocké côté serveur et remis à zéro à chaque redémarrage du
+  conteneur Streamlit Cloud (voir chantier Infra). Piste proposée mais
+  PAS encore validée par l'utilisateur : sauvegarde automatique côté
+  navigateur (`localStorage`, propre à l'ordinateur du père) qui
+  restaurerait les colonnes maîtres au chargement si le fichier serveur
+  a été réinitialisé. Ne pas implémenter sans confirmation explicite.
 
 ---
 

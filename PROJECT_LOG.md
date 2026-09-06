@@ -20,6 +20,10 @@ des noms de colonnes), nettoyage + vérification checksum IBAN (mod 97).
 - Désambiguïsation des noms de fichiers identiques dans un même import.
 - Le mapping mémorisé doit toujours avertir si une colonne référencée
   n'existe plus dans les colonnes maîtres actuelles.
+- Le composant `views/_ls_sync.py` renvoie `None` tant qu'il n'a pas
+  reçu la réponse JS (comportement normal des composants Streamlit à
+  double sens) — ne pas le remplacer par un mécanisme qui suppose une
+  réponse synchrone.
 
 **Notes / À faire** :
 - [ ] Idée reportée par l'utilisateur : vraie base de données persistante
@@ -27,14 +31,15 @@ des noms de colonnes), nettoyage + vérification checksum IBAN (mod 97).
   et une sélection du "type de base"/métier avant import (prospection
   téléphonique vs IBAN, etc. — la structure de la base doit s'adapter).
   Gros chantier, à cadrer avant de commencer.
-- [ ] Signalé par l'utilisateur (2026-09-06) : ses colonnes maîtres se
+- [x] Signalé par l'utilisateur (2026-09-06) : ses colonnes maîtres se
   réinitialisent au démarrage d'un tri. Cause : `user_master_columns.json`
   est stocké côté serveur et remis à zéro à chaque redémarrage du
-  conteneur Streamlit Cloud (voir chantier Infra). Piste proposée mais
-  PAS encore validée par l'utilisateur : sauvegarde automatique côté
-  navigateur (`localStorage`, propre à l'ordinateur du père) qui
-  restaurerait les colonnes maîtres au chargement si le fichier serveur
-  a été réinitialisé. Ne pas implémenter sans confirmation explicite.
+  conteneur Streamlit Cloud (voir chantier Infra). Corrigé : composant
+  statique léger (`components/ls_master_columns/`, `views/_ls_sync.py`)
+  qui duplique les colonnes maîtres dans le `localStorage` du navigateur
+  et les restaure automatiquement si le fichier serveur revient aux
+  valeurs par défaut — aucune action de l'utilisateur requise. Verrouillé
+  par un test E2E (`test_master_columns_localstorage_fallback`).
 
 ---
 

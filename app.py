@@ -115,7 +115,9 @@ from trieur.persistence import (
     load_master_columns,
     load_remembered_mappings,
     load_saved_filters,
+    save_master_columns,
 )
+from views._ls_sync import sync_master_columns
 
 import views.tab1_colonnes_maitres as view_tab1
 import views.tab2_import_mapping as view_tab2
@@ -281,6 +283,20 @@ if "export_presets" not in st.session_state:
 # [12] Mapping memorise par forme de fichier (charges depuis remembered_mappings.json)
 if "remembered_mappings" not in st.session_state:
     st.session_state.remembered_mappings = load_remembered_mappings()
+
+# [15] Secours localStorage colonnes maitres (voir views/_ls_sync.py) : garde
+# le navigateur a jour et restaure automatiquement si le serveur a perdu la
+# liste (redemarrage de conteneur).
+_mc_restored = sync_master_columns(st.session_state.master_columns)
+if _mc_restored:
+    st.session_state.master_columns = _mc_restored
+    # Le widget text_area de l'onglet 1 (key="master_cols_input") garde sa
+    # propre valeur en session des qu'il a ete rendu une premiere fois : sans
+    # ceci, la restauration mettrait a jour master_columns mais le texte
+    # affiche resterait celui du tout premier rendu (valeurs par defaut).
+    st.session_state["master_cols_input"] = "\n".join(_mc_restored)
+    save_master_columns(_mc_restored)
+    st.rerun()
 
 
 col_logo, col_title = st.columns([1, 8])

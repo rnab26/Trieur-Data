@@ -1,0 +1,47 @@
+<!doctype html>
+<!--
+Composant statique minimal (pas de build JS) qui synchronise les colonnes
+maitres avec le localStorage du navigateur. Implemente directement le
+protocole de messages des composants Streamlit (v1) sans dependance :
+voir trieur/../views/_ls_sync.py pour l'explication du besoin.
+-->
+<html>
+<body>
+<script>
+(function () {
+    var STORAGE_KEY = "trieur_master_columns";
+
+    function post(type, data) {
+        var payload = Object.assign({ isStreamlitMessage: true, type: type }, data);
+        window.parent.postMessage(payload, "*");
+    }
+
+    function setValue(value) {
+        post("streamlit:setComponentValue", { value: value, dataType: "json" });
+    }
+
+    function onMessage(event) {
+        var msg = event.data;
+        if (!msg || msg.type !== "streamlit:render") return;
+        var current = (msg.args && msg.args.current) || [];
+        var currentStr = JSON.stringify(current);
+        try {
+            var stored = window.localStorage.getItem(STORAGE_KEY);
+            if (stored && stored !== currentStr) {
+                setValue(JSON.parse(stored));
+            } else {
+                window.localStorage.setItem(STORAGE_KEY, currentStr);
+                setValue(null);
+            }
+        } catch (e) {
+            setValue(null);
+        }
+    }
+
+    window.addEventListener("message", onMessage);
+    post("streamlit:componentReady", { apiVersion: 1 });
+    post("streamlit:setFrameHeight", { height: 0 });
+})();
+</script>
+</body>
+</html>

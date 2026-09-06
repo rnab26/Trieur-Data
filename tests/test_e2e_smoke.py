@@ -159,3 +159,49 @@ def test_full_pipeline_no_crash(streamlit_server):
             assert "Gerer vos colonnes maitres" in body, body
         finally:
             browser.close()
+
+
+def test_master_columns_localstorage_fallback(streamlit_server):
+    """[15] Si le fichier serveur des colonnes maitres est perdu (ex:
+    redemarrage de conteneur) mais que le navigateur a une version enregistree
+    dans le localStorage, elle doit etre restauree automatiquement, sans
+    action de l'utilisateur -- voir views/_ls_sync.py."""
+    master_config_path = REPO_ROOT / "user_master_columns.json"
+    custom_cols = ["NOM", "PRENOM", "IBAN_TEST_LS", "TELEPHONE_TEST_LS"]
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        try:
+            # Premiere visite : simule un navigateur qui a deja une liste de
+            # colonnes maitres enregistree (sauvegardee lors d'une session
+            # precedente).
+            page.goto(streamlit_server, wait_until="load", timeout=30000)
+            page.get_by_role("tab").first.wait_for(state="visible", timeout=30000)
+            page.evaluate(
+                "(cols) => window.localStorage.setItem('trieur_master_columns', JSON.stringify(cols))",
+                custom_cols,
+            )
+
+            # Simule un redemarrage de conteneur : le fichier serveur disparait.
+            if master_config_path.exists():
+                master_config_path.unlink()
+
+            # Nouvelle session (nouvelle visite) : le serveur repart des
+            # colonnes par defaut, mais le navigateur doit imposer sa version.
+            page.goto(streamlit_server, wait_until="load", timeout=30000)
+            page.get_by_role("tab").first.wait_for(state="visible", timeout=30000)
+            page.wait_for_timeout(4000)
+
+            textarea_value = page.locator("textarea").first.input_value()
+            assert textarea_value.splitlines() == custom_cols, (
+                f"colonnes maitres non restaurees depuis le localStorage : {textarea_value!r}"
+            )
+
+            # La restauration doit aussi avoir ete re-ecrite sur le fichier
+            # serveur, pour survivre aux reruns suivants de cette session.
+            assert master_config_path.exists(), "le fichier serveur n'a pas ete re-ecrit apres restauration"
+        finally:
+            browser.close()
+            if master_config_path.exists():
+                master_config_path.unlink()

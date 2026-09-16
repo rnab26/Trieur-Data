@@ -99,3 +99,82 @@ def add_chantier_message(client: Client, chantier_id: str, body: str, user_id: s
         "author": user_id,
         "body": body,
     }).execute()
+
+
+# ---------------------------------------------------------------
+# Environnements personnalisés : colonnes maîtres par organisation +
+# import avec vérification de doublon IBAN contre tout l'historique.
+# ---------------------------------------------------------------
+
+def get_org_master_columns(client: Client, org_id: str) -> list[str]:
+    res = _td(client, "organizations").select("master_columns").eq("id", org_id).limit(1).execute()
+    return (res.data[0]["master_columns"] if res.data else []) or []
+
+
+def save_org_master_columns(client: Client, org_id: str, columns: list[str]) -> None:
+    _td(client, "organizations").update({"master_columns": columns}).eq("id", org_id).execute()
+
+
+def create_import_batch(client: Client, org_id: str, source_filename: str, imported_by: str, row_count: int) -> dict:
+    res = (
+        _td(client, "import_batches")
+        .insert({
+            "org_id": org_id,
+            "source_filename": source_filename,
+            "imported_by": imported_by,
+            "row_count": row_count,
+        })
+        .execute()
+    )
+    return res.data[0]
+
+
+def find_iban_matches(client: Client, org_id: str, iban: str) -> list[dict]:
+    """Historique complet des lignes déjà en base avec ce même IBAN,
+    quel que soit le fichier ou la date d'import -- détecte les mandats
+    renvoyés sous un nom différent."""
+    res = client.postgrest.schema("trieur_data").rpc(
+        "find_iban_matches", {"p_org_id": org_id, "p_iban": iban}
+    ).execute()
+    return res.data or []
+
+
+def insert_record(client: Client, org_id: str, batch_id: str, row: dict) -> dict:
+    res = _td(client, "records").insert({
+        "org_id": org_id,
+        "batch_id": batch_id,
+        "data": row,
+    }).execute()
+    return res.data[0]
+
+
+def create_dedup_alert(client: Client, org_id: str, record_id: str, matched_record_id: str, note: str = "") -> None:
+    _td(client, "dedup_alerts").insert({
+        "org_id": org_id,
+        "record_id": record_id,
+        "matched_record_id": matched_record_id,
+        "note": note,
+    }).execute()
+
+
+def list_dedup_alerts(client: Client, org_id: str, status: str = "pending") -> list[dict]:
+    res = (
+        _td(client, "dedup_alerts")
+        .select("*, record:records!dedup_alerts_record_id_fkey(data), matched:records!dedup_alerts_matched_record_id_fkey(data)")
+        .eq("org_id", org_id)
+        .eq("status", status)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return res.data or []
+
+
+def resolve_dedup_alert(client: Client, alert_id: str, status: str, user_id: str, note: str = "") -> None:
+    from datetime import datetime, timezone
+
+    _td(client, "dedup_alerts").update({
+        "status": status,
+        "resolved_by": user_id,
+        "resolved_at": datetime.now(timezone.utc).isoformat(),
+        "note": note,
+    }).eq("id", alert_id).execute()

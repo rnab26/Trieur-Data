@@ -44,17 +44,27 @@ vérifiés en conditions réelles avec navigateur headless).
 
 **Bloquant avant mise en service réelle** (actions manuelles, aucun
 chemin API disponible pour les faire à la place de l'utilisateur) :
-1. Ajouter `trieur_data` aux "Exposed schemas" du projet Supabase
-   (Project Settings → API) — sinon le Cockpit ne peut pas lire/écrire.
-2. Coller les 2 clés Supabase (URL + clé anon, non sensibles) dans les
+1. [x] Ajouter `trieur_data` aux "Exposed schemas" du projet Supabase
+   (Project Settings → API) — fait par l'utilisateur 2026-09-16, vérifié
+   par requête REST réelle (passage de "schéma non exposé" à une erreur
+   de droits normale, signe que le schéma est bien exposé).
+2. [ ] Coller les 2 clés Supabase (URL + clé anon, non sensibles) dans les
    Secrets de l'app sur Streamlit Cloud (pas d'accès API à Streamlit
-   Cloud depuis Claude Code).
-3. Inviter les comptes (utilisateur + son père) via Supabase Auth.
+   Cloud depuis Claude Code) — valeurs données à l'utilisateur en session,
+   pas encore confirmé fait.
+3. [x] Compte utilisateur (`r.nabet26@gmail.com`, déjà existant côté
+   Jarvis, `auth.users` partagé) : profil `trieur_data` créé en
+   super-admin + membre `org_admin` des 3 organisations — même mot de
+   passe que Jarvis, rien à reconfigurer côté utilisateur. Compte du père :
+   en attente de son email (l'utilisateur a dit "pas encore").
 
 **Notes / À faire** :
-- [ ] Une fois les 3 points ci-dessus faits par l'utilisateur : vérifier
-  le login Cockpit en conditions réelles, créer les memberships (org
-  Leads / Prélèvement) pour chaque compte.
+- [ ] Une fois le point 2 fait : vérifier le login Cockpit en conditions
+  réelles (navigateur), avec le compte `r.nabet26@gmail.com`.
+- [ ] Quand l'utilisateur donne l'email du père : créer son compte
+  (Admin API Supabase, `SUPABASE_SERVICE_ROLE_KEY` déjà valide pour le
+  projet `jarvis-assistant`) + profil + membership Prélèvement (role
+  `member`, pas admin).
 - [ ] Brancher la détection de doublons par IBAN normalisé (déjà en base,
   colonne générée `records.iban_normalized`) sur le flux d'import
   existant (onglet 2) : à chaque construction de base, vérifier contre

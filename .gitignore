@@ -10,3 +10,6 @@ __pycache__/
 
 # Outils locaux
 .claude/
+
+# Secrets Streamlit (clés Supabase) — jamais versionnés
+.streamlit/secrets.toml

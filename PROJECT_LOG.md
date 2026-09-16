@@ -82,8 +82,10 @@ d'origine.
   avant tout changement lié au Cockpit. À fiabiliser un jour (attendre une
   condition réelle plutôt qu'un délai fixe) mais hors périmètre de ce
   chantier.
-- [ ] Vérifier le login Cockpit en conditions réelles (navigateur), avec
-  le compte `r.nabet26@gmail.com`, maintenant que le merge a eu lieu.
+- [x] Login Cockpit vérifié en conditions réelles par l'utilisateur
+  (navigateur mobile, 2026-09-16) : connexion avec `r.nabet26@gmail.com`
+  OK, sélecteur d'environnement (Leads/Prélèvement/Global) fonctionnel,
+  état vide correct. **Chaîne complète validée de bout en bout.**
 - [ ] Quand l'utilisateur donne l'email du père : créer son compte
   (Admin API Supabase, `SUPABASE_SERVICE_ROLE_KEY` déjà valide pour le
   projet `jarvis-assistant`) + profil + membership Prélèvement (role

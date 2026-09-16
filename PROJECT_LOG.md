@@ -6,6 +6,69 @@ en attente.
 
 ---
 
+## CRM / Base de données (Cockpit) — chantier en cours
+
+**Quoi** : base de données persistante (comptes, organisations Leads/
+Prélèvement/Global, traçabilité d'import, dédup par IBAN au niveau base
+et non plus fichier par fichier, annotations) + Cockpit (onglet 5) où
+utilisateur et Claude échangent des chantiers/demandes en continu,
+même principe que le cockpit Jarvis.
+
+**Décisions prises (2026-09-16)** :
+- Infra : schéma Postgres dédié `trieur_data` appliqué sur le projet
+  Supabase existant `jarvis-assistant` (partagé, isolé par schéma + RLS),
+  plutôt qu'un projet Supabase séparé — pour rester gratuit (limite de 2
+  projets free atteinte, l'utilisateur ne voulant pas mettre un projet en
+  pause). Si un jour le partage gêne Jarvis, migration vers un projet 100%
+  isolé possible (~25$/mois) — décision à reprendre alors avec
+  l'utilisateur (argent).
+- `auth.users` Supabase est donc partagé avec Jarvis (voulu : un même
+  compte peut ouvrir les deux outils). Toutes les autres tables (profils,
+  organisations, imports, dédup, cockpit) vivent uniquement dans
+  `trieur_data`, jamais touché aux tables `public.*` de Jarvis.
+- **La coque de base du Trieur (onglets 1 à 4) reste utilisable SANS
+  compte**, exactement comme avant — demande explicite de l'utilisateur.
+  Le login Supabase ne s'applique qu'à l'onglet 5 "Cockpit".
+- Schéma SQL : `supabase/migrations/0001_init.sql` (organisations,
+  profiles, memberships, import_batches, records (JSONB + IBAN normalisé
+  généré), dedup_alerts (jamais de suppression auto, file de validation),
+  annotations, chantiers, chantier_messages). RLS activé partout, filtrage
+  par organisation.
+
+**État** : migration appliquée sur Supabase (vérifié : 9 tables
+`trieur_data.*` créées, RLS actif, rien cassé côté Jarvis — 31 tables
+`public.*` intactes, advisors de sécurité ne remontent rien de nouveau).
+Code app (`trieur/db.py`, `views/_auth.py`, `views/tab_cockpit.py`) écrit
+et intégré. 89/89 tests passent (87 unitaires + 2 E2E Playwright,
+vérifiés en conditions réelles avec navigateur headless).
+
+**Bloquant avant mise en service réelle** (actions manuelles, aucun
+chemin API disponible pour les faire à la place de l'utilisateur) :
+1. Ajouter `trieur_data` aux "Exposed schemas" du projet Supabase
+   (Project Settings → API) — sinon le Cockpit ne peut pas lire/écrire.
+2. Coller les 2 clés Supabase (URL + clé anon, non sensibles) dans les
+   Secrets de l'app sur Streamlit Cloud (pas d'accès API à Streamlit
+   Cloud depuis Claude Code).
+3. Inviter les comptes (utilisateur + son père) via Supabase Auth.
+
+**Notes / À faire** :
+- [ ] Une fois les 3 points ci-dessus faits par l'utilisateur : vérifier
+  le login Cockpit en conditions réelles, créer les memberships (org
+  Leads / Prélèvement) pour chaque compte.
+- [ ] Brancher la détection de doublons par IBAN normalisé (déjà en base,
+  colonne générée `records.iban_normalized`) sur le flux d'import
+  existant (onglet 2) : à chaque construction de base, vérifier contre
+  l'historique complet en base, pas juste le fichier du jour — alerte,
+  jamais de suppression automatique.
+- [ ] Migrer progressivement l'historique d'import (actuellement en
+  session Streamlit uniquement, perdu à la fermeture) vers
+  `trieur_data.import_batches` / `records`.
+- [ ] Décider avec l'utilisateur du contenu précis de l'onglet "colonnes
+  maîtres" par organisation (custom Leads vs Prélèvement) une fois le
+  socle DB en service — pas encore cadré.
+
+---
+
 ## Import & Mapping (onglet 2)
 
 **Quoi** : import Excel/CSV/PDF SEPA/Google Sheets, auto-assignation vers
@@ -26,11 +89,13 @@ des noms de colonnes), nettoyage + vérification checksum IBAN (mod 97).
   réponse synchrone.
 
 **Notes / À faire** :
-- [ ] Idée reportée par l'utilisateur : vraie base de données persistante
+- [x] Idée reportée par l'utilisateur : vraie base de données persistante
   (ex. Supabase) avec comptes utilisateurs + compte maître voyant tout,
   et une sélection du "type de base"/métier avant import (prospection
   téléphonique vs IBAN, etc. — la structure de la base doit s'adapter).
-  Gros chantier, à cadrer avant de commencer.
+  Gros chantier, à cadrer avant de commencer. → Cadré et démarré
+  2026-09-16, voir nouveau chantier "CRM / Base de données (Cockpit)"
+  ci-dessous.
 - [x] Signalé par l'utilisateur (2026-09-06) : ses colonnes maîtres se
   réinitialisent au démarrage d'un tri. Cause : `user_master_columns.json`
   est stocké côté serveur et remis à zéro à chaque redémarrage du

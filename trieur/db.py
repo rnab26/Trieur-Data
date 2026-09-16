@@ -6,19 +6,28 @@
 # (qui appartient à Jarvis). Voir supabase/migrations/0001_init.sql.
 # =============================================================
 
+from __future__ import annotations
+
 import streamlit as st
-from supabase import create_client, Client
+
+# Import differe (dans la fonction, pas au niveau module) : la librairie
+# `supabase` alourdit sensiblement le temps de demarrage de l'app si elle
+# est importee pour tout le monde. Comme seul l'onglet Cockpit en a besoin,
+# on ne paie ce cout que quand quelqu'un l'ouvre reellement -- les onglets
+# 1 a 4 restent aussi legers/rapides qu'avant.
 
 
 @st.cache_resource(show_spinner=False)
-def get_client() -> Client:
+def get_client():
     """Client Supabase authentifié avec la session courante (RLS active)."""
+    from supabase import create_client
+
     url = st.secrets["supabase"]["url"]
     key = st.secrets["supabase"]["anon_key"]
     return create_client(url, key)
 
 
-def _td(client: Client, table: str):
+def _td(client, table: str):
     """Raccourci vers une table du schéma trieur_data."""
     return client.postgrest.schema("trieur_data").table(table)
 

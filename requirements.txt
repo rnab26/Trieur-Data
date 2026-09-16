@@ -1,4 +1,5 @@
 streamlit==1.61.1
+supabase
 pandas
 numpy
 xlsxwriter

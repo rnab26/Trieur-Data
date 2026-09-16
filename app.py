@@ -123,12 +123,18 @@ import views.tab1_colonnes_maitres as view_tab1
 import views.tab2_import_mapping as view_tab2
 import views.tab3_filtrage_dedup as view_tab3
 import views.tab4_export as view_tab4
+import views.tab_cockpit as view_cockpit
 
 LOGO_PATH = "assets/logo.png"
 
 st.set_page_config(page_title="Trieur de Data", page_icon=LOGO_PATH, layout="wide")
 
 APP_VERSION = "5.1"
+
+# NB : pas de login global ici. Les onglets 1 a 4 (le Trieur de Data "coeur")
+# restent utilisables sans compte, comme avant -- l'authentification
+# (Supabase) ne s'applique qu'a l'onglet 5 "Cockpit", gere localement dans
+# views/tab_cockpit.py.
 
 # -------------------------------------------------------------
 # [10] DESIGN EPURE FACON APPLE (CSS global, purement cosmetique)
@@ -314,7 +320,9 @@ st.caption(f"Import Excel ou Google Sheets → mapping colonnes → aperçu → 
 # views/tab2_import_mapping.py et views/tab3_filtrage_dedup.py), mais elle ne
 # monte le contenu QUE de l'onglet actif et cassait ainsi ce composant. Les
 # boutons "etape suivante" font donc plutot un clic JS sur l'onglet natif.
-tab1, tab2, tab3, tab4 = st.tabs(["1. Colonnes maitres", "2. Import et Mapping", "3. Filtrage & Dedup", "4. Export"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["1. Colonnes maitres", "2. Import et Mapping", "3. Filtrage & Dedup", "4. Export", "5. Cockpit"]
+)
 
 with tab1:
     view_tab1.render()
@@ -327,3 +335,6 @@ with tab3:
 
 with tab4:
     view_tab4.render()
+
+with tab5:
+    view_cockpit.render()

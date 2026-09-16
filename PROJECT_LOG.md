@@ -48,19 +48,42 @@ chemin API disponible pour les faire à la place de l'utilisateur) :
    (Project Settings → API) — fait par l'utilisateur 2026-09-16, vérifié
    par requête REST réelle (passage de "schéma non exposé" à une erreur
    de droits normale, signe que le schéma est bien exposé).
-2. [ ] Coller les 2 clés Supabase (URL + clé anon, non sensibles) dans les
-   Secrets de l'app sur Streamlit Cloud (pas d'accès API à Streamlit
-   Cloud depuis Claude Code) — valeurs données à l'utilisateur en session,
-   pas encore confirmé fait.
+2. [x] Coller les 2 clés Supabase (URL + clé anon, non sensibles) dans les
+   Secrets de l'app sur Streamlit Cloud — fait par l'utilisateur.
 3. [x] Compte utilisateur (`r.nabet26@gmail.com`, déjà existant côté
    Jarvis, `auth.users` partagé) : profil `trieur_data` créé en
    super-admin + membre `org_admin` des 3 organisations — même mot de
    passe que Jarvis, rien à reconfigurer côté utilisateur. Compte du père :
    en attente de son email (l'utilisateur a dit "pas encore").
 
+**⚠️ Piège rencontré (2026-09-16)** : le Cockpit avait été développé et
+testé sur la branche du chantier, jamais mergé sur `main` — donc jamais
+déployé (Streamlit Cloud déploie uniquement `main`). L'utilisateur a
+d'abord testé en conditions réelles ("fait") avant que le merge n'ait
+lieu, ce qui a fait perdre un aller-retour. **Leçon : sur ce projet, un
+chantier de code n'est réellement "prêt à tester par l'utilisateur" que
+merge sur `main` inclus — ne jamais dire "teste maintenant" avant le
+merge.** Mergé sur `main` le 2026-09-16 (branche gardée, non supprimée).
+
+**Régression évitée** : l'import de la librairie `supabase` au niveau
+module ralentissait le démarrage de toute l'app (mesuré : a rendu le
+test E2E `test_master_columns_localstorage_fallback` flaky, y compris
+en dehors de ce chantier — confirmé en reproduisant le même flake sur
+`main` sans aucun changement, donc préexistant, pas causé par ce
+chantier). Corrigé quand même par prudence : import de `supabase`
+repoussé à l'intérieur de `get_client()` (chargé seulement si quelqu'un
+ouvre réellement le Cockpit), les onglets 1 à 4 gardent leur poids
+d'origine.
+
 **Notes / À faire** :
-- [ ] Une fois le point 2 fait : vérifier le login Cockpit en conditions
-  réelles (navigateur), avec le compte `r.nabet26@gmail.com`.
+- [ ] `tests/test_e2e_smoke.py::test_master_columns_localstorage_fallback`
+  est flaky de façon préexistante (délai fixe de 4s parfois trop court,
+  indépendamment de ce chantier) — reproduit ~1 fois sur 4 sur `main`
+  avant tout changement lié au Cockpit. À fiabiliser un jour (attendre une
+  condition réelle plutôt qu'un délai fixe) mais hors périmètre de ce
+  chantier.
+- [ ] Vérifier le login Cockpit en conditions réelles (navigateur), avec
+  le compte `r.nabet26@gmail.com`, maintenant que le merge a eu lieu.
 - [ ] Quand l'utilisateur donne l'email du père : créer son compte
   (Admin API Supabase, `SUPABASE_SERVICE_ROLE_KEY` déjà valide pour le
   projet `jarvis-assistant`) + profil + membership Prélèvement (role

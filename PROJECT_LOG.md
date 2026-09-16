@@ -90,6 +90,34 @@ d'origine.
   (Admin API Supabase, `SUPABASE_SERVICE_ROLE_KEY` déjà valide pour le
   projet `jarvis-assistant`) + profil + membership Prélèvement (role
   `member`, pas admin).
+
+**2026-09-16 (suite) — Environnements personnalisés (Prélèvement)** :
+- Décision posée avec l'utilisateur : **un seul Cockpit**, chantiers
+  attribués par organisation via `org_id` (pas un cockpit par activité —
+  éviterait une source de vérité dupliquée).
+- Migration `0002_org_settings_and_dedup.sql` : colonne
+  `organizations.master_columns` (jsonb, propre à chaque environnement,
+  remplace le fichier JSON global partagé pour ce qui passe par le
+  Cockpit) + fonction SQL `find_iban_matches` (historique complet, pas
+  juste le fichier du jour).
+- Cockpit → nouvel onglet "Import & Dédup base" par environnement :
+  édition des colonnes maîtres de l'org, import CSV/Excel avec
+  vérification IBAN contre tout l'historique en base, file d'alertes de
+  doublon à résoudre à la main (jamais de suppression auto). Répond
+  directement au cas d'origine (Rachel Daniel / Daniel Rachel, même IBAN,
+  1 mois d'écart).
+- ⚠️ Piège évité : `st.dataframe(..., width="stretch")` aurait reproduit
+  le crash de production déjà documenté dans
+  `tests/test_e2e_smoke.py` (incompatible avec Streamlit 1.61.1) —
+  utilisé `use_container_width=True` à la place.
+- 89/89 tests passent. Mergé sur `main`.
+- [ ] **Pas encore testé en conditions réelles par l'utilisateur** (import
+  d'un vrai fichier Prélèvement, vérifier qu'une alerte de doublon
+  apparaît bien) — à faire avant de considérer ce chantier terminé.
+- [ ] Les colonnes maîtres de l'onglet 1 (mode anonyme, fichier JSON)
+  restent complètement séparées de celles de l'org en base (Cockpit) —
+  décision volontaire pour ne pas toucher à la coque de base, mais à
+  clarifier avec l'utilisateur si ça crée de la confusion à l'usage.
 - [ ] Brancher la détection de doublons par IBAN normalisé (déjà en base,
   colonne générée `records.iban_normalized`) sur le flux d'import
   existant (onglet 2) : à chaque construction de base, vérifier contre

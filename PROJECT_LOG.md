@@ -40,12 +40,48 @@ Cloud depuis cet environnement). À constater par l'utilisateur : ouvrir
 l'onglet Cockpit et voir le résumé à quatre chiffres + le bouton "Vu".
 
 **Notes / À faire** :
-- [ ] Pas de détection de doublons de chantiers ni de sections/thèmes
-  déclarés — le cahier des charges du kit les dit conditionnels au
-  volume ; à ajouter seulement si le nombre de chantiers grossit
-  vraiment.
+- [x] Sections : demandées explicitement par l'utilisateur le jour même
+  malgré la conditionnalité du kit — voir entrée suivante.
+- [ ] Pas de détection de doublons de chantiers — toujours conditionnel
+  au volume, à ajouter si le nombre de chantiers grossit vraiment.
 - [ ] Actions groupées (changer le statut de plusieurs chantiers à la
   fois) pas encore faites, même raison (peu de chantiers aujourd'hui).
+
+---
+
+## Cockpit : sections (2026-09-17, suite immédiate)
+
+L'utilisateur a testé le résumé/bandeau ci-dessus et n'a vu ni case ni
+section — sa demande explicite : les sections, il les veut MAINTENANT,
+indépendamment du volume actuel de chantiers.
+
+**Migration `0007`** : colonne `theme` (texte libre) sur `chantiers` +
+table `sections` (id, org_id, nom, position) — PAS de clé étrangère
+stricte entre les deux, volontairement (même choix que documenté sur
+Jarvis) : une FK interdirait de créer un chantier avant d'avoir déclaré
+sa section, ce qui contredirait "on annonce, on ne bloque pas".
+
+**Écran** (`views/tab_cockpit.py`) : le formulaire "Nouveau chantier"
+propose une section existante, "Sans section", ou "+ Nouvelle
+section..." (crée la section à la volée). Un expander "🗂️ Sections"
+liste les sections déclarées et permet d'en créer une VIDE (utile avant
+d'y ranger quoi que ce soit). La liste active est groupée par section
+dans l'ordre déclaré, une section vide s'affiche quand même (avec "Aucun
+chantier actif dans cette section"), et tout chantier dont le thème ne
+correspond à AUCUNE section déclarée atterrit sous "À classer" — jamais
+perdu, jamais rattaché en silence à la mauvaise section.
+
+**Vérifié RÉELLEMENT, pas supposé** : migration appliquée contre la base
+partagée (colonne + table confirmées par requête), et le cycle complet
+(créer une section → créer un chantier avec cette section → le relire
+avec son thème) rejoué avec un VRAI compte utilisateur authentifié,
+membre de l'organisation via RLS — pas la clé service_role, qui aurait
+pu masquer un problème de permission. `pytest` : 97/97 (hors le flake
+Playwright déjà documenté, ignoré ici).
+
+**Non vérifié** : le rendu réel dans le navigateur (pas d'accès
+Streamlit Cloud depuis cet environnement, l'app est derrière l'auth
+viewer de Streamlit Cloud). À toi de confirmer après redéploiement.
 
 ---
 

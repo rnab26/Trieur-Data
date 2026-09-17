@@ -21,15 +21,20 @@ from trieur.db import (
     add_chantier_message,
     add_chantier_todo,
     create_chantier,
+    create_section,
     get_derniere_visite_cockpit,
     list_chantier_messages,
     list_chantier_todos,
     list_chantiers,
+    list_sections,
     marquer_cockpit_vu,
     set_chantier_todo_done,
     update_chantier_status,
 )
 from views._auth import accessible_organizations, require_login
+
+SANS_SECTION = "— Sans section —"
+NOUVELLE_SECTION = "+ Nouvelle section..."
 
 STATUT_LABELS = {
     "a_faire": "📋 À faire",
@@ -82,21 +87,50 @@ def render():
     )
 
     chantiers = list_chantiers(client, org_id)
+    sections = list_sections(client, org_id)
 
     derniere_visite = get_derniere_visite_cockpit(client, user.id)
     _render_bandeau_depuis_derniere_visite(client, chantiers, derniere_visite)
     _render_ou_jen_suis(chantiers)
 
+    noms_sections = [s["nom"] for s in sections]
+
     with st.expander("➕ Nouveau chantier"):
         with st.form("new_chantier_form", clear_on_submit=True):
             title = st.text_input("Titre du chantier / de la demande")
             priority = st.select_slider("Priorité", options=["basse", "normale", "haute"], value="normale")
+            section_choisie = st.selectbox(
+                "Section", options=[SANS_SECTION] + noms_sections + [NOUVELLE_SECTION],
+            )
+            nouvelle_section_nom = ""
+            if section_choisie == NOUVELLE_SECTION:
+                nouvelle_section_nom = st.text_input("Nom de la nouvelle section")
             submit_new = st.form_submit_button("Créer", type="primary")
         if submit_new and title.strip():
-            create_chantier(client, org_id, title.strip(), priority, user.id)
+            if section_choisie == NOUVELLE_SECTION and nouvelle_section_nom.strip():
+                create_section(client, org_id, nouvelle_section_nom.strip())
+                theme = nouvelle_section_nom.strip()
+            elif section_choisie == SANS_SECTION:
+                theme = None
+            else:
+                theme = section_choisie
+            create_chantier(client, org_id, title.strip(), priority, user.id, theme=theme)
             st.rerun()
 
-    if not chantiers:
+    with st.expander("🗂️ Sections"):
+        if sections:
+            for s in sections:
+                st.caption(f"• {s['nom']}")
+        else:
+            st.caption("Aucune section déclarée pour l'instant.")
+        with st.form("new_section_form", clear_on_submit=True):
+            nom_section = st.text_input("Nouvelle section", placeholder="Ex. Export, Imports, Interface...")
+            submit_section = st.form_submit_button("Créer la section")
+        if submit_section and nom_section.strip():
+            create_section(client, org_id, nom_section.strip())
+            st.rerun()
+
+    if not chantiers and not sections:
         st.caption("Aucun chantier pour cet environnement pour l'instant.")
         return
 
@@ -126,15 +160,41 @@ def render():
     for ch in chantiers:
         by_status.setdefault(ch["status"], []).append(ch)
 
-    actifs_visibles = [ch for s in STATUT_ACTIFS for ch in by_status.get(s, []) if _correspond(ch)]
+    actifs = [ch for s in STATUT_ACTIFS for ch in by_status.get(s, [])]
+    actifs_visibles = [ch for ch in actifs if _correspond(ch)]
+
     if not actifs_visibles:
-        if any(by_status.get(s) for s in STATUT_ACTIFS):
+        if actifs:
             st.caption("Aucun chantier actif ne correspond à cette recherche/ce filtre.")
-        else:
+        elif not sections:
             st.caption("Aucun chantier actif — tout est terminé ou abandonné.")
 
+    # Groupés par section déclarée, dans l'ordre choisi, puis les chantiers
+    # dont le thème ne correspond à AUCUNE section déclarée (dictée à la
+    # voix ou tapée avant qu'une section existe) sous "À classer" -- jamais
+    # perdus, jamais rattachés en silence à la mauvaise section.
+    par_theme: dict[str | None, list[dict]] = {}
     for ch in actifs_visibles:
-        _render_chantier(client, ch, user)
+        par_theme.setdefault(ch.get("theme"), []).append(ch)
+
+    for section in sections:
+        chantiers_section = par_theme.pop(section["nom"], [])
+        if not chantiers_section and (recherche or filtre_statut != "tous"):
+            continue  # une section vide sous un filtre actif n'a rien à montrer
+        st.markdown(f"#### {section['nom']}")
+        if not chantiers_section:
+            st.caption("Aucun chantier actif dans cette section.")
+        for ch in chantiers_section:
+            _render_chantier(client, ch, user)
+
+    a_classer = par_theme.pop(None, []) + [
+        ch for theme, chs in par_theme.items() for ch in chs
+    ]
+    if a_classer:
+        if sections:
+            st.markdown("#### À classer")
+        for ch in a_classer:
+            _render_chantier(client, ch, user)
 
     archives = [ch for s in STATUT_ARCHIVES for ch in by_status.get(s, [])]
     if archives:

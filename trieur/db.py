@@ -64,7 +64,9 @@ def list_chantiers(client: Client, org_id: str) -> list[dict]:
     return res.data or []
 
 
-def create_chantier(client: Client, org_id: str, title: str, priority: str, user_id: str) -> dict:
+def create_chantier(
+    client: Client, org_id: str, title: str, priority: str, user_id: str, theme: str | None = None
+) -> dict:
     res = (
         _td(client, "chantiers")
         .insert({
@@ -72,7 +74,37 @@ def create_chantier(client: Client, org_id: str, title: str, priority: str, user
             "title": title,
             "priority": priority,
             "created_by": user_id,
+            "theme": theme,
         })
+        .execute()
+    )
+    return res.data[0]
+
+
+# ---------------------------------------------------------------
+# Sections (regroupement des chantiers -- cockpit-kit/FONCTIONNALITES.md,
+# point 3). `theme` sur `chantiers` reste le texte libre affiché ; cette
+# table ne porte que ce qu'un texte libre ne sait pas porter : exister
+# sans chantier, avoir un ordre.
+# ---------------------------------------------------------------
+
+def list_sections(client: Client, org_id: str) -> list[dict]:
+    res = (
+        _td(client, "sections")
+        .select("*")
+        .eq("org_id", org_id)
+        .order("position")
+        .execute()
+    )
+    return res.data or []
+
+
+def create_section(client: Client, org_id: str, nom: str) -> dict:
+    existing = list_sections(client, org_id)
+    next_pos = (max((s["position"] for s in existing), default=-1)) + 1
+    res = (
+        _td(client, "sections")
+        .insert({"org_id": org_id, "nom": nom, "position": next_pos})
         .execute()
     )
     return res.data[0]

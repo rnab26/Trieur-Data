@@ -140,6 +140,17 @@ def find_iban_matches(client: Client, org_id: str, iban: str) -> list[dict]:
     return res.data or []
 
 
+def get_sepa_sequence_type(client: Client, org_id: str, iban: str, exclude_record_id: str | None = None) -> str:
+    """FRST/RCUR pour un IBAN donné, déduit de l'historique déjà en base
+    pour cette organisation. Voir trieur/sepa.py pour la règle elle-même."""
+    from trieur.sepa import determine_sequence_type
+
+    matches = find_iban_matches(client, org_id, iban)
+    if exclude_record_id:
+        matches = [m for m in matches if m["record_id"] != exclude_record_id]
+    return determine_sequence_type(has_prior_debit=bool(matches))
+
+
 def insert_record(client: Client, org_id: str, batch_id: str, row: dict) -> dict:
     res = _td(client, "records").insert({
         "org_id": org_id,

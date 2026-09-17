@@ -88,8 +88,9 @@ d'origine.
   état vide correct. **Chaîne complète validée de bout en bout.**
 - [ ] Quand l'utilisateur donne l'email du père : créer son compte
   (Admin API Supabase, `SUPABASE_SERVICE_ROLE_KEY` déjà valide pour le
-  projet `jarvis-assistant`) + profil + membership Prélèvement (role
-  `member`, pas admin).
+  projet `jarvis-assistant`) + profil **`is_super_admin = true`** (précisé
+  par l'utilisateur le 2026-09-17 : lui et son père sont tous les deux
+  admins — pas `member`) + membership Prélèvement.
 
 **2026-09-16 (suite) — Environnements personnalisés (Prélèvement)** :
 - Décision posée avec l'utilisateur : **un seul Cockpit**, chantiers
@@ -114,10 +115,47 @@ d'origine.
 - [ ] **Pas encore testé en conditions réelles par l'utilisateur** (import
   d'un vrai fichier Prélèvement, vérifier qu'une alerte de doublon
   apparaît bien) — à faire avant de considérer ce chantier terminé.
-- [ ] Les colonnes maîtres de l'onglet 1 (mode anonyme, fichier JSON)
-  restent complètement séparées de celles de l'org en base (Cockpit) —
-  décision volontaire pour ne pas toucher à la coque de base, mais à
-  clarifier avec l'utilisateur si ça crée de la confusion à l'usage.
+- [x] Les colonnes maîtres de l'onglet 1 (mode anonyme, fichier JSON)
+  restent séparées de celles de l'org en base — clarifié le 2026-09-17 :
+  ce n'était pas la bonne architecture, voir section suivante.
+
+**2026-09-17 — Refonte navigation : Cockpit ≠ Base de données** :
+- Recadrage explicite de l'utilisateur : le **Cockpit est réservé aux
+  administrateurs** (lui + son père, jamais un futur utilisateur externe
+  à qui l'outil serait prêté) et **ne concerne QUE le développement du
+  logiciel** (chantiers, échanges avec Claude) — aucune donnée client ne
+  doit y transiter. L'import/dédup/colonnes maîtres par organisation
+  (ce qui avait été mis dans le Cockpit le 2026-09-16) était donc au
+  mauvais endroit.
+- Créé l'onglet **"Base de données"** (`views/tab_database.py`) : reprend
+  exactement ce contenu (colonnes maîtres par org, import + dédup IBAN,
+  alertes), mais accessible à **tout membre connecté** de l'organisation,
+  pas seulement aux admins. `views/tab_cockpit.py` redevient
+  chantiers-only, avec garde explicite `is_super_admin` (message "réservé
+  aux administrateurs" sinon).
+- Navigation : la barre `st.tabs()` des 4 étapes (Colonnes maîtres →
+  Import → Filtrage → Export) reste un groupe unique et intact (ne
+  JAMAIS la scinder — voir la note sur le widget `streamlit-sortables`,
+  chantier Export). Au-dessus, une barre de menu horizontale
+  (`st.segmented_control`, 3 sections : "Trieur de Data" / "Base de
+  données" / "Cockpit") remplace le 5ᵉ onglet — ce ne sont pas des étapes
+  d'un même parcours, elles ne doivent pas être mélangées visuellement
+  avec 1→4.
+- Vérifié réellement (Playwright, pas juste relu) : le sélecteur
+  `[data-testid="stTab"]` utilisé par `views/_nav.py` pour les boutons
+  "étape suivante" ne cible bien QUE les 4 onglets (0 à 3), aucune
+  interférence du `st.segmented_control`. 89/89 tests passent.
+- Refactor partagé : `views/_auth.py.accessible_organizations(ctx)`
+  centralise "quelles organisations cet utilisateur voit" (toutes si
+  `is_super_admin`, sinon ses memberships) — utilisé par Cockpit ET Base
+  de données, une seule source de vérité.
+- [ ] **Pas encore testé en conditions réelles par l'utilisateur** une
+  fois déployé.
+- [ ] Chantier A+B (persistance complète : filtres enregistrés, presets
+  d'export, mapping mémorisé, et surtout les onglets 1-4 eux-mêmes
+  devenant conscients de la connexion/organisation) — décidé le
+  2026-09-17 mais pas encore commencé, c'est le prochain chantier après
+  celui-ci.
 - [ ] Brancher la détection de doublons par IBAN normalisé (déjà en base,
   colonne générée `records.iban_normalized`) sur le flux d'import
   existant (onglet 2) : à chaque construction de base, vérifier contre

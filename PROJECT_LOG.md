@@ -1271,3 +1271,73 @@ pipeline). La CI a connu une panne côté plateforme GitHub Actions
 voir `CLAUDE.md` section "Exécution autonome".
 
 **Notes / À faire** : (rien en attente)
+
+---
+
+## Migration React (branche `feature/react-migration`, en cours)
+
+**Quoi** : bascule progressive de l'interface Streamlit vers une SPA
+React, sans toucher à l'app Streamlit actuelle (les deux tournent en
+parallèle sur la même base Supabase pendant la transition).
+
+**État (2026-09-17, scaffolding initial)** :
+- `api/main.py` : API REST FastAPI au-dessus de `trieur/db.py` (aucune
+  logique dupliquée) — orgs, tableau de bord, clients (liste paginée
+  avec recherche/filtres sur le lot chargé, lecture, modification),
+  import CSV/Excel, colonnes maîtres (lecture ouverte, écriture admin),
+  vues enregistrées (créer/lister/supprimer). Auth par jeton Supabase
+  (`Authorization: Bearer <token>`), un client Supabase neuf par
+  requête (pas le singleton `@st.cache_resource` de Streamlit — évite
+  une fuite de jeton entre requêtes concurrentes).
+- `frontend/` : Vite + React 19 + TypeScript strict + Tailwind v4,
+  composants façon shadcn/ui faits main. Auth Supabase, écran "Base de
+  données" (switcher d'organisation, recherche, tableau paginé,
+  édition d'un client en modal avec états chargement/vide/erreur).
+- Vérifié ce soir : suite de tests complète (`python -m pytest`) —
+  **169 tests**, dont les 19 nouveaux de `tests/test_api.py` (faux
+  client Supabase, aucun réseau) : tous passent. 1 test E2E
+  (`test_master_columns_localstorage_fallback`) échoue de façon
+  **intermittente** (~1 fois sur 3) — confirmé flaky **préexistant**,
+  reproduit à l'identique sur `main` (commit `e6b54c8`, code inchangé),
+  donc sans lien avec ce chantier ; pas corrigé ici, à traiter comme
+  chantier de fiabilisation des tests séparément si ça agace.
+  `cd frontend && npm run build` : succès (`tsc -b && vite build`,
+  exit 0, aucun warning).
+- Comparé `api/main.py` et `frontend/src/lib/api.ts` +
+  `screens/*.tsx` endpoint par endpoint (méthode, chemin, noms de
+  champs) : aucune incohérence trouvée.
+- Confirmé : `views/` et `app.py` (l'app Streamlit live) non touchés —
+  seuls `api/`, `frontend/`, `requirements*.txt` et `tests/test_api.py`
+  ajoutés.
+- Branche poussée sur `origin/feature/react-migration`. **Pas mergée
+  sur `main`, pas de PR** — migration en cours, pas prête à remplacer
+  le site en production.
+
+**Reste à faire (portage des écrans Streamlit vers React)** — au-delà
+du seul écran "Base de données" (liste/recherche/édition) livré ce
+soir :
+- [ ] Import CSV/Excel (mapping de colonnes, détection colonnes
+  inconnues, alertes de doublon) — endpoint API déjà prêt
+  (`POST /orgs/{id}/import`), UI React à faire.
+- [ ] Gestion des colonnes maîtres (UI d'ajout/suppression, pas
+  seulement la lecture utilisée par l'écran actuel).
+- [ ] Vues enregistrées (UI créer/lister/appliquer/supprimer) —
+  endpoints déjà prêts.
+- [ ] Tableau de bord par environnement + badge d'alertes de doublon —
+  endpoint déjà prêt (`GET /orgs/{id}/dashboard`), UI à faire.
+- [ ] Modification multiple (sélection multi-lignes) et diff au
+  réimport — pas d'équivalent côté API pour l'instant.
+- [ ] Recherche avancée façon Google Sheets (filtres par colonne
+  combinés) — l'API expose `col_filters` mais l'UI React ne s'en sert
+  pas encore.
+- [ ] Export direct depuis la base.
+- [ ] Historique court par ligne modifiée.
+- [ ] Les onglets "Trieur de Data" eux-mêmes (au-delà de la Base de
+  données) : tout ce qui vit dans les autres tabs de `app.py`/`views/`
+  et n'a pas encore d'équivalent React ni d'endpoint API dédié — à
+  auditer un par un avant de porter.
+
+**Ne pas casser** : l'app Streamlit (`app.py`, `views/`) reste la seule
+en production tant que ce chantier n'est pas fini — ne jamais merger
+`feature/react-migration` sur `main` sans validation explicite de
+l'utilisateur, migration écran par écran.

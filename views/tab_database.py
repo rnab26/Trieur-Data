@@ -97,6 +97,17 @@ def _render_alerts(client, org_id, user):
 _LIST_PAGE_SIZE = 300
 
 
+def _records_cache_key(org_id):
+    return f"db_records_cache_{org_id}"
+
+
+def invalidate_client_list_cache(org_id):
+    """A appeler avant tout st.rerun() qui suit une ecriture (import,
+    suppression) sur cet environnement -- sinon le lot mis en cache par
+    "Charger plus" (voir plus bas) continue d'afficher un etat perime."""
+    st.session_state.pop(_records_cache_key(org_id), None)
+
+
 def _render_client_list(client, org_id):
     total = count_records(client, org_id)
     st.markdown(f"##### Clients importés ({total})")
@@ -106,20 +117,21 @@ def _render_client_list(client, org_id):
         st.divider()
         return
 
-    limit_key = f"db_list_limit_{org_id}"
-    limit = st.session_state.get(limit_key, _LIST_PAGE_SIZE)
+    # Lot charge, mis en cache de session pour que "Charger plus" ne
+    # retelecharge pas depuis le debut a chaque clic (offset sur le lot
+    # deja charge -- voir trieur/db.py:list_records). Invalide par tout
+    # import ou toute suppression sur cet environnement.
+    cache_key = _records_cache_key(org_id)
+    if cache_key not in st.session_state:
+        st.session_state[cache_key] = list_records(client, org_id, limit=_LIST_PAGE_SIZE)
+    records = st.session_state[cache_key]
 
     search = st.text_input("🔎 Rechercher (nom, IBAN, email...)", key=f"search_{org_id}")
-    records = list_records(client, org_id, limit=limit)
     master_cols = get_org_master_columns(client, org_id)
 
-    rows = []
+    all_rows = []
     for r in records:
         data = r["data"] or {}
-        if search:
-            haystack = " ".join(str(v) for v in data.values()).lower()
-            if search.lower() not in haystack:
-                continue
         batch = r.get("import_batches") or {}
         # Colonnes de l'organisation d'abord, dans l'ordre defini dans les
         # reglages -- puis toute colonne presente dans la ligne mais pas
@@ -132,21 +144,25 @@ def _render_client_list(client, org_id):
                 row[key] = value
         row["Fichier source"] = batch.get("source_filename")
         row["Importé le"] = batch.get("imported_at")
-        rows.append(row)
+        all_rows.append(row)
 
-    if not rows:
-        st.caption("Aucun résultat pour cette recherche.")
-        st.divider()
-        return
-
-    # Colonnes connues sur ce lot charge (pas seulement apres recherche/
-    # filtre, pour que la liste de colonnes ne varie pas silencieusement
-    # quand on tape dans la recherche).
+    # Colonnes connues sur ce lot charge -- calculees AVANT la recherche
+    # texte et les filtres, pour que la liste de colonnes (et donc la
+    # selection "colonnes affichees") ne varie jamais silencieusement en
+    # tapant dans la recherche.
     all_cols = []
-    for row in rows:
+    for row in all_rows:
         for c in row.keys():
             if c != "_id" and c not in all_cols:
                 all_cols.append(c)
+
+    rows = all_rows
+    if search:
+        needle = search.lower()
+        rows = [
+            r for r in rows
+            if needle in " ".join(str(v) for k, v in r.items() if k != "_id" and v).lower()
+        ]
 
     with st.expander("🔎 Filtres par colonne"):
         st.caption("Chaque filtre garde les lignes qui CONTIENNENT le texte tapé (insensible à la casse). Combinés entre eux.")
@@ -163,11 +179,6 @@ def _render_client_list(client, org_id):
             r for r in rows
             if all(col_filters[c] in str(r.get(c) or "").lower() for c in col_filters)
         ]
-
-    if not rows:
-        st.caption("Aucun résultat pour ces filtres.")
-        st.divider()
-        return
 
     # Colonnes affichees : preference de session (pas encore persistee entre
     # connexions -- voir "vues enregistrees", chantier suivant). Sanitize
@@ -186,39 +197,49 @@ def _render_client_list(client, org_id):
         st.warning("⚠️ Aucune colonne sélectionnée : toutes affichées par défaut.")
         visible_cols = all_cols
 
-    df = pd.DataFrame(rows)
-    row_ids = list(df["_id"])
-    st.caption(
-        f"{len(rows)} résultat(s) affiché(s) sur {len(records)} chargé(s) "
-        f"({total} au total dans l'environnement). Clique un en-tête de "
-        "colonne pour trier ; coche des lignes pour les supprimer ensemble."
-    )
-    selection_key = f"db_table_select_{org_id}"
-    event = st.dataframe(
-        df[visible_cols],
-        use_container_width=True,
-        height=300,
-        hide_index=True,
-        key=selection_key,
-        on_select="rerun",
-        selection_mode="multi-row",
-    )
-    selected_rows = (getattr(event, "selection", None) or {}).get("rows", [])
+    if not rows:
+        st.caption("Aucun résultat pour cette recherche/ces filtres.")
+    else:
+        df = pd.DataFrame(rows)
+        row_ids = list(df["_id"])
+        st.caption(
+            f"{len(rows)} résultat(s) affiché(s) sur {len(records)} chargé(s) "
+            f"({total} au total dans l'environnement). Clique un en-tête de "
+            "colonne pour trier ; coche des lignes pour les supprimer ensemble."
+        )
+        selection_key = f"db_table_select_{org_id}"
+        event = st.dataframe(
+            df[visible_cols],
+            use_container_width=True,
+            height=300,
+            hide_index=True,
+            key=selection_key,
+            on_select="rerun",
+            selection_mode="multi-row",
+        )
+        selected_rows = (getattr(event, "selection", None) or {}).get("rows", [])
 
-    if selected_rows:
-        selected_ids = [row_ids[i] for i in selected_rows]
-        st.write(f"**{len(selected_ids)} ligne(s) sélectionnée(s).**")
-        if confirm_delete_button(f"🗑️ Supprimer la sélection ({len(selected_ids)})", key=f"bulk_delete_{org_id}"):
-            for rid in selected_ids:
-                delete_record(client, rid)
-            st.success(f"{len(selected_ids)} client(s) supprimé(s).")
-            clear_stale_widgets(f"_confirm_pending_bulk_delete_{org_id}")
-            st.rerun()
+        if selected_rows:
+            selected_ids = [row_ids[i] for i in selected_rows]
+            st.write(f"**{len(selected_ids)} ligne(s) sélectionnée(s).**")
+            if confirm_delete_button(f"🗑️ Supprimer la sélection ({len(selected_ids)})", key=f"bulk_delete_{org_id}"):
+                for rid in selected_ids:
+                    delete_record(client, rid)
+                st.success(f"{len(selected_ids)} client(s) supprimé(s).")
+                invalidate_client_list_cache(org_id)
+                # `selection_key` lui-meme : les positions selectionnees
+                # (ex: [7,8,9]) ne correspondent plus a rien apres la
+                # suppression -- sans ce nettoyage, IndexError au prochain
+                # rendu (row_ids plus court) ou pire, une selection
+                # fantome sur d'autres clients (voir clear_stale_widgets).
+                clear_stale_widgets(selection_key, f"_confirm_pending_bulk_delete_{org_id}")
+                st.rerun()
 
-    if len(records) == limit and len(records) < total:
+    if len(records) < total:
         remaining = total - len(records)
         if st.button(f"⬇️ Charger {min(_LIST_PAGE_SIZE, remaining)} client(s) de plus (sur {remaining} restants)", key=f"loadmore_{org_id}"):
-            st.session_state[limit_key] = limit + _LIST_PAGE_SIZE
+            more = list_records(client, org_id, limit=_LIST_PAGE_SIZE, offset=len(records))
+            st.session_state[cache_key] = records + more
             st.rerun()
 
     st.divider()
@@ -258,6 +279,7 @@ def _render_import(client, org_id, user):
             on_progress=lambda done, total: progress.progress(done / max(total, 1)),
         )
         st.success(f"{n_imported} lignes importées, {n_alerts} alerte(s) de doublon IBAN créée(s).")
+        invalidate_client_list_cache(org_id)
         st.rerun()
 
 

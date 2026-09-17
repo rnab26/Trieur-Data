@@ -6,6 +6,49 @@ en attente.
 
 ---
 
+## Mémoire des colonnes maîtres liée au compte (2026-09-17)
+
+**Quoi** : dans l'onglet 1, un utilisateur connecté peut enregistrer
+plusieurs jeux de colonnes maîtres nommés, les appliquer, les supprimer.
+Le dernier appliqué est retenu et **réappliqué automatiquement à la
+prochaine connexion**, quel que soit l'environnement — répond
+directement à la demande de l'utilisateur ("éviter de les retaper à la
+main"). Table `trieur_data.user_master_column_sets` + colonne
+`profiles.active_master_column_set_id`.
+
+**Distinction importante à ne jamais mélanger** :
+- Ceci = colonnes maîtres **par compte utilisateur**, pour l'onglet 1
+  (coeur du Trieur), peu importe l'organisation.
+- Les colonnes maîtres **par organisation** (`organizations.master_columns`,
+  chantier du 2026-09-16) servent à structurer l'import dans l'onglet
+  "Base de données" — usage différent, ne pas fusionner les deux.
+
+**Garde-fou respecté** (rappel explicite de l'utilisateur, 2026-09-17) :
+strictement additif — `trieur/persistence.py` (mode anonyme local +
+secours localStorage) et `views/tab3_filtrage_dedup.py` (moteur de dédup
+existant, différent du dédup IBAN base) **non touchés**. Vérifié par
+89/89 tests passant (E2E réel inclus), et par construction : la section
+compte de l'onglet 1 (`_render_account_memory`) sort immédiatement si
+`auth_session` n'est pas en session — aucun import Supabase, aucun appel
+réseau, aucun changement visuel pour un visiteur non connecté.
+
+**État** : mergé sur `main`. Le login n'a pas encore été testé en
+conditions réelles pour CETTE fonctionnalité précise (appliquer un jeu,
+se déconnecter, se reconnecter, vérifier qu'il revient automatiquement)
+— à faire par l'utilisateur.
+
+**Notes / À faire** :
+- [ ] Vérifier en conditions réelles (navigateur, avec un vrai login) :
+  enregistrer un jeu de colonnes, se déconnecter/reconnecter, confirmer
+  qu'il est réappliqué automatiquement.
+- [ ] Reste du chantier "points A+B" évoqué le 2026-09-16 (filtres
+  enregistrés, presets d'export, mapping mémorisé par forme de fichier)
+  — pas encore migré vers Supabase, toujours en fichiers JSON éphémères
+  côté serveur. Prochaine tranche si l'utilisateur confirme que ça reste
+  un problème après cette première étape.
+
+---
+
 ## CRM / Base de données (Cockpit) — chantier en cours
 
 **Quoi** : base de données persistante (comptes, organisations Leads/

@@ -21,6 +21,7 @@ import streamlit as st
 
 from trieur.db import (
     LIST_PAGE_SIZE,
+    add_org_master_columns,
     count_records,
     delete_record,
     get_org_master_columns,
@@ -36,7 +37,7 @@ from trieur.db import (
 )
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
 from views._auth import accessible_organizations, require_login
-from views._ui import clear_stale_widgets, confirm_delete_button
+from views._ui import clear_stale_widgets, confirm_delete_button, render_unknown_columns_prompt
 
 
 def render():
@@ -73,7 +74,7 @@ def render():
 
     _render_alerts(client, org_id, user)
     _render_client_list(client, org_id, org_labels[org_id], user)
-    _render_import(client, org_id, user)
+    _render_import(client, org_id, user, is_admin)
     _render_settings(client, org_id, is_admin)
 
 
@@ -420,7 +421,7 @@ def _render_client_list(client, org_id, org_name, user):
     st.divider()
 
 
-def _render_import(client, org_id, user):
+def _render_import(client, org_id, user, is_admin):
     st.markdown("##### Importer un fichier dans la base (avec vérification IBAN)")
     st.caption(
         "Chaque ligne est comparée à TOUT l'historique déjà en base pour cet "
@@ -446,7 +447,11 @@ def _render_import(client, org_id, user):
         key=f"iban_col_{org_id}",
     )
 
+    cols_to_add = render_unknown_columns_prompt(client, org_id, df.columns, is_admin, key_prefix=f"import_{org_id}")
+
     if st.button("Vérifier et importer", type="primary", key=f"import_{org_id}"):
+        if cols_to_add:
+            add_org_master_columns(client, org_id, cols_to_add)
         progress = st.progress(0.0)
         n_imported, n_alerts = import_dataframe(
             client, org_id, uploaded.name, user.id, df,

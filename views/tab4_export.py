@@ -9,7 +9,7 @@ from streamlit_sortables import sort_items
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
 from trieur.persistence import save_export_presets
 from views._auth import accessible_organizations, optional_login_ctx
-from views._ui import clear_stale_widgets, confirm_delete_button
+from views._ui import clear_stale_widgets, confirm_delete_button, render_unknown_columns_prompt
 
 
 def _render_save_to_database():
@@ -61,7 +61,15 @@ def _render_save_to_database():
             index=(["(aucune)"] + cols).index(default_iban),
             key="tab4_save_iban_col",
         )
+        cols_to_add = render_unknown_columns_prompt(
+            ctx["client"], org_id, cols, ctx["profile"].get("is_super_admin"),
+            key_prefix=f"tab4_save_{org_id}",
+        )
+
         if st.button("💾 Enregistrer dans cet environnement", type="primary", key="tab4_save_confirm"):
+            if cols_to_add:
+                from trieur.db import add_org_master_columns
+                add_org_master_columns(ctx["client"], org_id, cols_to_add)
             progress = st.progress(0.0)
             n_imported, n_alerts = import_dataframe(
                 ctx["client"], org_id, st.session_state.export_name_base or "export_trieur", ctx["user"].id, df,

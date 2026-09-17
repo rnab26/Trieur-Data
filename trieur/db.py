@@ -33,14 +33,28 @@ def _td(client, table: str):
     return client.postgrest.schema("trieur_data").table(table)
 
 
-def get_my_profile(client: Client, user_id: str) -> dict | None:
-    res = _td(client, "profiles").select("*").eq("id", user_id).limit(1).execute()
+# ---------------------------------------------------------------
+# Lectures mises en cache (TTL court) : profil, appartenances,
+# organisations, colonnes maîtres, sections -- des données qui changent
+# rarement mais qui étaient relues par requête réseau à CHAQUE clic
+# n'importe où dans l'app (require_login() les appelle sur chaque rendu
+# de Base de données/Cockpit). `_client` (underscore) : convention
+# Streamlit pour exclure un paramètre du calcul de la clé de cache --
+# l'objet client ne se hash pas de façon fiable.
+# Chaque écriture correspondante appelle .clear() explicitement : jamais
+# de données obsolètes affichées après une action de l'utilisateur.
+# ---------------------------------------------------------------
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_my_profile(_client: Client, user_id: str) -> dict | None:
+    res = _td(_client, "profiles").select("*").eq("id", user_id).limit(1).execute()
     return res.data[0] if res.data else None
 
 
-def get_my_memberships(client: Client, user_id: str) -> list[dict]:
+@st.cache_data(ttl=30, show_spinner=False)
+def get_my_memberships(_client: Client, user_id: str) -> list[dict]:
     res = (
-        _td(client, "memberships")
+        _td(_client, "memberships")
         .select("org_id, role, organizations(slug, name)")
         .eq("user_id", user_id)
         .execute()
@@ -48,8 +62,9 @@ def get_my_memberships(client: Client, user_id: str) -> list[dict]:
     return res.data or []
 
 
-def list_organizations(client: Client) -> list[dict]:
-    res = _td(client, "organizations").select("*").order("slug").execute()
+@st.cache_data(ttl=30, show_spinner=False)
+def list_organizations(_client: Client) -> list[dict]:
+    res = _td(_client, "organizations").select("*").order("slug").execute()
     return res.data or []
 
 
@@ -88,9 +103,10 @@ def create_chantier(
 # sans chantier, avoir un ordre.
 # ---------------------------------------------------------------
 
-def list_sections(client: Client, org_id: str) -> list[dict]:
+@st.cache_data(ttl=30, show_spinner=False)
+def list_sections(_client: Client, org_id: str) -> list[dict]:
     res = (
-        _td(client, "sections")
+        _td(_client, "sections")
         .select("*")
         .eq("org_id", org_id)
         .order("position")
@@ -107,6 +123,7 @@ def create_section(client: Client, org_id: str, nom: str) -> dict:
         .insert({"org_id": org_id, "nom": nom, "position": next_pos})
         .execute()
     )
+    list_sections.clear()
     return res.data[0]
 
 
@@ -201,13 +218,15 @@ def marquer_cockpit_vu(client: Client) -> str:
 # import avec vérification de doublon IBAN contre tout l'historique.
 # ---------------------------------------------------------------
 
-def get_org_master_columns(client: Client, org_id: str) -> list[str]:
-    res = _td(client, "organizations").select("master_columns").eq("id", org_id).limit(1).execute()
+@st.cache_data(ttl=30, show_spinner=False)
+def get_org_master_columns(_client: Client, org_id: str) -> list[str]:
+    res = _td(_client, "organizations").select("master_columns").eq("id", org_id).limit(1).execute()
     return (res.data[0]["master_columns"] if res.data else []) or []
 
 
 def save_org_master_columns(client: Client, org_id: str, columns: list[str]) -> None:
     _td(client, "organizations").update({"master_columns": columns}).eq("id", org_id).execute()
+    get_org_master_columns.clear()
 
 
 def create_import_batch(client: Client, org_id: str, source_filename: str, imported_by: str, row_count: int) -> dict:
@@ -352,6 +371,7 @@ def delete_user_column_set(client: Client, set_id: str) -> None:
 
 def set_active_column_set(client: Client, user_id: str, set_id: str | None) -> None:
     _td(client, "profiles").update({"active_master_column_set_id": set_id}).eq("id", user_id).execute()
+    get_my_profile.clear()
 
 
 def get_active_column_set(client: Client, profile: dict) -> dict | None:

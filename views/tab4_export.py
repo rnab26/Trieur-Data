@@ -8,6 +8,7 @@ from streamlit_sortables import sort_items
 
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
 from trieur.persistence import save_export_presets
+from views._ui import confirm_delete_button
 
 
 def render():
@@ -162,16 +163,21 @@ def render():
                                     save_export_presets(st.session_state.export_presets)
                                     st.rerun()
                         with pc4:
-                            if st.button("Supprimer", key=f"tab4_del_{i}", use_container_width=True):
+                            if confirm_delete_button("Supprimer", key=f"tab4_del_{i}"):
                                 st.session_state.export_presets.pop(i)
                                 save_export_presets(st.session_state.export_presets)
-                                # [FIX] "tab4_rn_{i}" est indexe par POSITION :
-                                # sans ce nettoyage, le preset qui glisse a
-                                # l'indice i herite du texte perime laisse par
-                                # le preset supprime (Streamlit ignore `value=`
-                                # tant que la cle existe deja en session_state).
+                                # [FIX] "tab4_rn_{i}" et le drapeau de
+                                # confirmation de confirm_delete_button
+                                # ("_confirm_pending_tab4_del_{i}") sont tous
+                                # les deux indexes par POSITION : sans ce
+                                # nettoyage, le preset qui glisse a l'indice i
+                                # herite du texte ou de l'etat "en attente de
+                                # confirmation" perimes laisses par le preset
+                                # supprime (Streamlit ignore `value=` tant que
+                                # la cle existe deja en session_state).
+                                _stale_prefixes = ("tab4_rn_", "_confirm_pending_tab4_del_")
                                 for _k in [k for k in list(st.session_state.keys())
-                                           if isinstance(k, str) and k.startswith("tab4_rn_")]:
+                                           if isinstance(k, str) and k.startswith(_stale_prefixes)]:
                                     st.session_state.pop(_k, None)
                                 st.rerun()
 

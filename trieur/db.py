@@ -103,6 +103,41 @@ def add_chantier_message(client: Client, chantier_id: str, body: str, user_id: s
 
 
 # ---------------------------------------------------------------
+# Points cochables par chantier ("journal : coche ce qui est fait
+# plutôt que de le supprimer, note les points restés ouverts").
+# ---------------------------------------------------------------
+
+def list_chantier_todos(client: Client, chantier_id: str) -> list[dict]:
+    res = (
+        _td(client, "chantier_todos")
+        .select("*")
+        .eq("chantier_id", chantier_id)
+        .order("position")
+        .execute()
+    )
+    return res.data or []
+
+
+def add_chantier_todo(client: Client, chantier_id: str, body: str) -> None:
+    existing = list_chantier_todos(client, chantier_id)
+    next_pos = (max((t["position"] for t in existing), default=-1)) + 1
+    _td(client, "chantier_todos").insert({
+        "chantier_id": chantier_id,
+        "body": body,
+        "position": next_pos,
+    }).execute()
+
+
+def set_chantier_todo_done(client: Client, todo_id: str, done: bool) -> None:
+    from datetime import datetime, timezone
+
+    _td(client, "chantier_todos").update({
+        "done": done,
+        "done_at": datetime.now(timezone.utc).isoformat() if done else None,
+    }).eq("id", todo_id).execute()
+
+
+# ---------------------------------------------------------------
 # Environnements personnalisés : colonnes maîtres par organisation +
 # import avec vérification de doublon IBAN contre tout l'historique.
 # ---------------------------------------------------------------

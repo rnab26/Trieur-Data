@@ -6,6 +6,37 @@ en attente.
 
 ---
 
+## Idées fonctionnalités Base de données — en attente de sélection (2026-09-17)
+
+**Décision en attente** : l'utilisateur a listé 4 idées pour la Base de
+données (recherche/filtre façon Google Sheets, colonnes adaptables selon
+le fichier importé, masquer des colonnes à l'affichage, historique court
+par ligne) et demandé explicitement d'en suggérer d'autres, en précisant
+qu'il testera/répondra plus tard, pas dans l'immédiat.
+
+**Fiche à remplir (fait, pas encore rempli par l'utilisateur)** :
+https://claude.ai/artifact/DYHosfZYYCWQZ12vic2nzP — ses 4 idées +
+7 suggestions supplémentaires (édition d'une ligne, actions groupées,
+export direct depuis la base, vues enregistrées nommées, pagination
+au-delà de 300 lignes, règle de doublon configurable par environnement,
+petit tableau de bord par environnement), chacune en ✅ je veux / 🕒 plus
+tard / ❌ pas besoin, enregistré automatiquement (capacité `db` de
+l'artefact) — pas besoin de revenir le dire dans le chat.
+
+**Rien n'est construit tant que la fiche n'est pas remplie** — voir les
+réponses via le MCP Supabase n'a pas de sens ici, c'est le magasin `db`
+de l'artefact lui-même (lu avec l'outil ArtifactData/Artifact
+`read_db`), pas une table `trieur_data`.
+
+**Notes / À faire** :
+- [ ] Lire les réponses de la fiche une fois remplie, prioriser avec
+  l'utilisateur, ouvrir un chantier par fonctionnalité retenue.
+- [ ] Rattaché au chantier Cockpit "Organisation de la gestion des
+  clients importés..." (id `69df5886-c639-4bc7-b063-5faf4f52d283`) —
+  voir message posté là-bas le 2026-09-17.
+
+---
+
 ## Relier le Trieur de Data au CRM : "Enregistrer dans la base de données" (2026-09-17)
 
 **Demande** : la persistance (Leads/Prélèvement, futurs environnements)

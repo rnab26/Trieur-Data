@@ -76,3 +76,12 @@ intervention.
   "Notes / À faire" du chantier concerné dans `PROJECT_LOG.md`, poussée
   directement sur `main`. Une tâche faite est cochée `[x]`, jamais
   supprimée.
+
+## Décisions en attente (fiches à remplir)
+
+- **Fonctionnalités Base de données** (2026-09-17) :
+  https://claude.ai/artifact/DYHosfZYYCWQZ12vic2nzP — l'utilisateur
+  sélectionne les fonctionnalités qu'il veut (✅/🕒/❌), enregistré
+  automatiquement dans l'artefact lui-même (capacité `db`). Lire les
+  réponses avec l'outil Artifact/ArtifactData (`read_db`), pas dans
+  Supabase. Voir `PROJECT_LOG.md` pour le détail.

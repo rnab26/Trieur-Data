@@ -6,6 +6,45 @@ en attente.
 
 ---
 
+## Base de données : point 1 (gestion des colonnes) + Cockpit restructuré (2026-09-17)
+
+**Gestion des colonnes** : dans Base de données → réglages, chaque
+colonne d'une organisation peut être renommée, réordonnée (⬆️/⬇️),
+supprimée, et on peut en ajouter — plus un simple champ texte. La liste
+"Clients importés" respecte cet ordre (colonnes déclarées d'abord, puis
+toute donnée présente mais pas déclarée, jamais masquée). Réservé aux
+admins (même règle que les autres réglages d'organisation).
+
+Point 2 du même chantier (enrichissement de clients existants à
+l'import) reste en attente : l'utilisateur a précisé qu'un client n'est
+créé qu'une fois mais peut avoir des variantes/nouvelles souscriptions
+sur ce même client — pas un simple "upsert" par clé. À trancher avec
+l'Excel de référence.
+
+**Cockpit restructuré** selon le modèle déjà écrit dans le CLAUDE.md
+global de l'utilisateur (demandé explicitement : "monte le Cockpit
+depuis CLAUDE.md", confirmé via question de clarification) :
+- Chantiers groupés par statut, ceux en `attente_retour` (⏳ attendent
+  une réponse) ressortent en premier ; `termine`/`abandonne` sont
+  archivés dans un tiroir replié, jamais supprimés.
+- Statut modifiable directement dans la liste.
+- **Points cochables par chantier** (`trieur_data.chantier_todos`,
+  migration `0005`) : "coche ce qui est fait plutôt que de le
+  supprimer, note les points restés ouverts" (citation du CLAUDE.md) —
+  volontairement pas de suppression possible, seulement cocher/décocher.
+
+Les deux vérifiés par requête réelle contre la base (200 OK) + rendu
+réel de la page avec les vrais secrets Supabase (pas de crash) avant
+merge. 98/99 tests (99e = flake préexistant déjà documenté).
+
+**Notes / À faire** :
+- [ ] Pas encore testé en conditions réelles par l'utilisateur (cocher
+  un point, réordonner une colonne, depuis le vrai navigateur).
+- [ ] Chantiers Cockpit encore en attente : Export XML SEPA (attend
+  l'ICS + l'Excel), organisation de la liste clients (attend l'Excel).
+
+---
+
 ## Cockpit : login unique + hook de démarrage automatique (2026-09-17)
 
 **Login unique** : l'utilisateur a signalé deux formulaires de connexion

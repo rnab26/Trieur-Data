@@ -30,7 +30,7 @@ nouvelles idées (n1-n8) — toutes "oui" sauf n8 "Colonnes calculées
 simples" (**plus tard**, explicitement dépriorisée). Nouvel ordre pour
 la suite, en intégrant ces réponses et leurs commentaires :
 
-5. [ ] Vues enregistrées, nommées (dépend du point 1).
+5. [x] Vues enregistrées, nommées — livré, voir section ci-dessous.
 6. [ ] Tableau de bord par environnement + badge d'alertes de doublon
    toujours visible (fusion de l'ancien point 6 et de n6 "Rappel
    visible des alertes en attente" — même famille, "vue d'ensemble en
@@ -63,6 +63,42 @@ la suite, en intégrant ces réponses et leurs commentaires :
     discuter avant d'écrire du code, pas être devinée.
 13. [ ] **Reporté par l'utilisateur** ("plus tard") : colonnes
     calculées simples (n8).
+
+---
+
+## Vues enregistrées, nommées (2026-09-17)
+
+**Fait** :
+- Migration 0009 : `trieur_data.db_saved_views` (par compte + par
+  environnement), appliquée à la base réelle.
+- `trieur/db.py` : `list_saved_views()` (mis en cache), `save_saved_view()`
+  (upsert par nom, remplace plutôt que duplique), `delete_saved_view()`.
+- Expander "👁️ Vues enregistrées" dans la Base de données : lister,
+  appliquer, enregistrer la combinaison recherche + filtres + colonnes
+  affichées actuelle, supprimer avec confirmation.
+
+**Vérifié** : `tests/test_db_saved_views.py` (4 tests, faux client).
+Suite complète (138 tests) + e2e Playwright réel verts.
+
+**Pas vérifié** : le formulaire réel avec un compte Supabase connecté
+(pas de secrets disponibles dans la session qui a fait ce chantier).
+
+**Bug de sécurité trouvé et corrigé avant merge** : la policy RLS de
+`db_saved_views` ne vérifiait que l'identité du propriétaire, jamais
+l'appartenance à l'organisation référencée — contrairement à toutes les
+autres tables du schéma qui référencent un `org_id`. Corrigé dans la
+migration et sur la base réelle (vérifié par une requête directe sur
+`pg_policy`) avant tout usage réel de la table.
+
+**Ne pas casser** :
+- Rappeler une vue doit toujours vider tous les filtres par colonne
+  existants avant de reposer ceux de la vue (sinon un filtre tapé avant
+  l'appel reste actif en silence) — voir le bloc "pending apply" en
+  tête de `_render_client_list`.
+
+**Notes / À faire** :
+- [ ] Utilisateur : tester en usage réel (enregistrer une vue, en
+  rappeler une autre, vérifier que les filtres se réinitialisent bien).
 
 ---
 

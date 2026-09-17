@@ -1,0 +1,54 @@
+<!doctype html>
+<!--
+Composant statique (meme protocole que components/ls_master_columns,
+voir views/_ls_sync.py pour l'explication du besoin) qui garde la
+session Supabase (access_token/refresh_token) dans le localStorage du
+navigateur -- pour survivre a une reconnexion WebSocket Streamlit
+(mobile qui met l'onglet en veille, reseau qui coupe...), qui efface
+sinon st.session_state et deconnecte silencieusement.
+-->
+<html>
+<body>
+<script>
+(function () {
+    var STORAGE_KEY = "trieur_auth_session";
+
+    function post(type, data) {
+        var payload = Object.assign({ isStreamlitMessage: true, type: type }, data);
+        window.parent.postMessage(payload, "*");
+    }
+
+    function setValue(value) {
+        post("streamlit:setComponentValue", { value: value, dataType: "json" });
+    }
+
+    function onMessage(event) {
+        var msg = event.data;
+        if (!msg || msg.type !== "streamlit:render") return;
+        var args = msg.args || {};
+
+        try {
+            if (args.clear) {
+                window.localStorage.removeItem(STORAGE_KEY);
+                setValue(null);
+                return;
+            }
+            if (args.current) {
+                window.localStorage.setItem(STORAGE_KEY, JSON.stringify(args.current));
+                setValue(null);
+                return;
+            }
+            var stored = window.localStorage.getItem(STORAGE_KEY);
+            setValue(stored ? JSON.parse(stored) : null);
+        } catch (e) {
+            setValue(null);
+        }
+    }
+
+    window.addEventListener("message", onMessage);
+    post("streamlit:componentReady", { apiVersion: 1 });
+    post("streamlit:setFrameHeight", { height: 0 });
+})();
+</script>
+</body>
+</html>

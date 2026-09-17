@@ -33,6 +33,7 @@ from trieur.db import (
     save_org_master_columns,
 )
 from views._auth import accessible_organizations, require_login
+from views._ui import clear_stale_widgets
 
 
 def render():
@@ -189,6 +190,16 @@ def _render_import(client, org_id, user):
         n_imported, n_alerts = 0, 0
         progress = st.progress(0.0)
         for i, row in enumerate(df.to_dict(orient="records")):
+            # [FIX] La colonne générée `records.iban_normalized` (voir
+            # supabase/migrations/0001_init.sql) lit la clé JSON fixe "iban"
+            # (minuscule) -- jamais le nom réel choisi pour la colonne IBAN
+            # dans le fichier importé (ex: "IBAN", "Référence bancaire"...).
+            # Sans cette clé recopiée, la colonne générée restait NULL pour
+            # quasi tous les imports réels et la détection de doublon IBAN
+            # (find_iban_matches, qui s'appuie sur iban_normalized) ne
+            # déclenchait jamais.
+            if iban_col != "(aucune)" and row.get(iban_col):
+                row["iban"] = row[iban_col]
             record = insert_record(client, org_id, batch["id"], row)
             n_imported += 1
             if iban_col != "(aucune)" and row.get(iban_col):
@@ -236,16 +247,19 @@ def _render_settings(client, org_id, is_admin):
                 if i > 0 and st.button("⬆️", key=f"up_{org_id}_{i}"):
                     cols[i - 1], cols[i] = cols[i], cols[i - 1]
                     save_org_master_columns(client, org_id, cols)
+                    clear_stale_widgets(f"colname_{org_id}_")
                     st.rerun()
             with c_down:
                 if i < len(cols) - 1 and st.button("⬇️", key=f"down_{org_id}_{i}"):
                     cols[i + 1], cols[i] = cols[i], cols[i + 1]
                     save_org_master_columns(client, org_id, cols)
+                    clear_stale_widgets(f"colname_{org_id}_")
                     st.rerun()
             with c_del:
                 if st.button("🗑️", key=f"del_{org_id}_{i}"):
                     cols.pop(i)
                     save_org_master_columns(client, org_id, cols)
+                    clear_stale_widgets(f"colname_{org_id}_")
                     st.rerun()
 
         st.divider()

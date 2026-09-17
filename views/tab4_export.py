@@ -8,6 +8,7 @@ from streamlit_sortables import sort_items
 
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
 from trieur.persistence import save_export_presets
+from views._ui import clear_stale_widgets, confirm_delete_button
 
 
 def render():
@@ -162,9 +163,10 @@ def render():
                                     save_export_presets(st.session_state.export_presets)
                                     st.rerun()
                         with pc4:
-                            if st.button("Supprimer", key=f"tab4_del_{i}", use_container_width=True):
+                            if confirm_delete_button("Supprimer", key=f"tab4_del_{i}"):
                                 st.session_state.export_presets.pop(i)
                                 save_export_presets(st.session_state.export_presets)
+                                clear_stale_widgets("tab4_rn_", "_confirm_pending_tab4_del_")
                                 st.rerun()
 
                 selected_col_order = st.session_state[included_key]

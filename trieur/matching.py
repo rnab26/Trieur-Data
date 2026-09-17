@@ -648,59 +648,6 @@ def auto_assign_columns_fast(real_columns, master_columns, sheet_df=None):
 
     return mapping
 
-def find_best_master_col(src_col, master_cols, already_used=None):
-    """Trouver la meilleure colonne maître pour une colonne source"""
-    if already_used is None:
-        already_used = []
-
-    src_norm = normalize_text(src_col)
-
-    if not src_norm or src_norm == "(nonassigne)":
-        return None
-
-    # 1. Correspondance EXACTE normalisée - PRIORITÉ ABSOLUE
-    for master in master_cols:
-        if master not in already_used:
-            master_norm = normalize_text(master)
-            if master_norm == src_norm:
-                return master
-
-    # 2. Correspondance via synonymes (priorité haute)
-    for master in master_cols:
-        if master not in already_used:
-            synonyms = SYNONYMES.get(master, [])
-            for syn in synonyms:
-                if normalize_text(syn) == src_norm:
-                    return master
-
-    # 3. Fuzzy matching avec seuil modéré
-    best_master = None
-    best_score = 0.65
-    for master in master_cols:
-        if master not in already_used:
-            master_norm = normalize_text(master)
-            score = SequenceMatcher(None, src_norm, master_norm).ratio()
-            if score > best_score:
-                best_score = score
-                best_master = master
-
-    if best_master:
-        return best_master
-
-    return None
-
-def auto_assign_single_sheet(sheet_key, sheet_df, master_columns):
-    """
-    Auto-assigner une seule feuille.
-    Retourne un dictionnaire {src_col: master_col} et le nombre de colonnes assignées.
-    """
-    real_columns = [c for c in sheet_df.columns if c not in ["__source_file__", "__source_sheet__"]]
-    # [1] on passe le dataframe pour permettre la detection tel par contenu
-    new_mapping = auto_assign_columns_fast(real_columns, master_columns, sheet_df=sheet_df)
-    matched_count = sum(1 for v in new_mapping.values() if v != "(non assigne)")
-
-    return new_mapping, matched_count, len(real_columns)
-
 
 # =============================================================
 # [12] MEMOIRE DU MAPPING PAR "FORME" DE FICHIER
@@ -774,8 +721,8 @@ def auto_assign_with_memory(real_columns, master_columns, sheet_df=None, remembe
 
 
 def auto_assign_single_sheet_with_memory(sheet_key, sheet_df, master_columns, remembered_for_shape=None):
-    """Variante de auto_assign_single_sheet qui tient compte du mapping
-    memorise pour cette forme de fichier (voir auto_assign_with_memory)."""
+    """Assigne une seule feuille en tenant compte du mapping memorise pour
+    cette forme de fichier (voir auto_assign_with_memory)."""
     real_columns = [c for c in sheet_df.columns if c not in ["__source_file__", "__source_sheet__"]]
     new_mapping = auto_assign_with_memory(real_columns, master_columns, sheet_df=sheet_df,
                                           remembered_for_shape=remembered_for_shape)

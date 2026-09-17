@@ -5,6 +5,7 @@ import streamlit as st
 
 from trieur.matching import DEFAULT_MASTER_COLUMNS
 from trieur.persistence import save_master_columns
+from views._ui import confirm_delete_button
 
 
 def _render_account_memory():
@@ -75,8 +76,9 @@ def _render_account_memory():
                     st.success(f"Jeu « {chosen['name']} » appliqué et retenu pour ta prochaine connexion.")
                     st.rerun()
             with col_delete:
-                if st.button("🗑️ Supprimer ce jeu", key="delete_user_col_set"):
+                if confirm_delete_button("🗑️ Supprimer ce jeu", key="delete_user_col_set"):
                     delete_user_column_set(client, chosen_id)
+                    st.success("Jeu de colonnes supprimé.")
                     st.rerun()
         else:
             st.caption("Aucun jeu de colonnes enregistré sur ton compte pour l'instant.")

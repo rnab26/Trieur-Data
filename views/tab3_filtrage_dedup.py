@@ -15,6 +15,7 @@ from trieur.filters import (
 )
 from trieur.persistence import decode_filters_code, encode_filters_code, save_saved_filters
 from views._nav import goto_native_tab
+from views._ui import clear_stale_widgets, confirm_delete_button
 
 # Au-dela de ce nombre de GROUPES de doublons, la revue manuelle groupe par
 # groupe (aperçu + choix de la ligne a garder) devient impraticable -> on
@@ -253,9 +254,10 @@ def render():
                                 save_saved_filters(st.session_state.saved_filters)
                                 st.rerun()
                     with c4:
-                        if st.button("Supprimer", key=f"tab3_del_{i}", use_container_width=True):
+                        if confirm_delete_button("Supprimer", key=f"tab3_del_{i}"):
                             st.session_state.saved_filters.pop(i)
                             save_saved_filters(st.session_state.saved_filters)
+                            clear_stale_widgets("tab3_rn_", "_confirm_pending_tab3_del_")
                             st.rerun()
 
                 # [14] Sauvegarde texte : les filtres ne vivent que sur le serveur

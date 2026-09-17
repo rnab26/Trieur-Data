@@ -108,6 +108,33 @@ def require_login() -> dict:
     return {"client": client, "user": user, "profile": profile, "memberships": memberships}
 
 
+def optional_login_ctx() -> dict | None:
+    """Comme `require_login()`, mais ne bloque JAMAIS le rendu (pas de
+    `st.stop()`) : renvoie `None` si Supabase n'est pas configuré, si
+    personne n'est connecté, ou si le compte connecté n'a pas de profil.
+    Pour les sections ADDITIVES d'un onglet qui reste 100% utilisable
+    sans compte (colonnes maîtres liées au compte dans l'onglet 1,
+    bouton "Enregistrer dans la base de données" dans l'onglet Export)."""
+    try:
+        configured = "supabase" in st.secrets
+    except Exception:
+        configured = False
+    if not configured or "auth_session" not in st.session_state:
+        return None
+
+    client = get_client()
+    session = st.session_state["auth_session"]
+    client.auth.set_session(session.access_token, session.refresh_token)
+    user = session.user
+
+    profile = get_my_profile(client, user.id)
+    if not profile:
+        return None
+
+    memberships = get_my_memberships(client, user.id)
+    return {"client": client, "user": user, "profile": profile, "memberships": memberships}
+
+
 def accessible_organizations(ctx: dict) -> list[dict]:
     """Organisations que l'utilisateur connecté peut voir : toutes pour un
     super-admin, seulement celles où il est membre sinon."""

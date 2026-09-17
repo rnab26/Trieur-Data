@@ -8,7 +8,70 @@ from streamlit_sortables import sort_items
 
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
 from trieur.persistence import save_export_presets
+from views._auth import accessible_organizations, optional_login_ctx
 from views._ui import clear_stale_widgets, confirm_delete_button
+
+
+def _render_save_to_database():
+    """Section ADDITIVE, visible seulement si deja connecte (aucun login
+    force ici -- le Trieur de Data reste 100% utilisable sans compte,
+    inchange). Enregistre la base DEJA nettoyee/filtree (onglet 3) dans
+    l'environnement (Leads, Prelevement...) choisi -- jamais en
+    automatique : sans ce clic explicite et ce choix d'environnement,
+    rien ne quitte la session. C'est le seul chemin qui relie le Trieur
+    de Data au CRM persistant ; l'upload brut de l'onglet Base de
+    donnees reste disponible a part pour charger un fichier sans
+    repasser par tout le pipeline mapping/filtre."""
+    ctx = optional_login_ctx()
+    if ctx is None:
+        return
+
+    orgs = accessible_organizations(ctx)
+    if not orgs:
+        return
+
+    from trieur.db import import_dataframe
+
+    df = st.session_state.filtered_df
+    if df is None or len(df) == 0:
+        return
+
+    with st.expander("💾 Enregistrer dans la base de données (CRM)"):
+        st.caption(
+            "Enregistre les " + str(len(df)) + " ligne(s) de la base filtrée "
+            "(pas seulement les colonnes de l'export ci-dessus) dans "
+            "l'environnement choisi, avec la même vérification de doublon "
+            "IBAN que l'import direct de l'onglet Base de données. Si un "
+            "fichier mélange plusieurs activités, filtre-le d'abord dans "
+            "l'onglet précédent, enregistre, puis refais une passe pour "
+            "l'autre activité."
+        )
+        org_labels = {o["id"]: o["name"] for o in orgs}
+        org_id = st.selectbox(
+            "Environnement de destination",
+            options=list(org_labels.keys()),
+            format_func=lambda oid: org_labels[oid],
+            key="tab4_save_org_select",
+        )
+        cols = list(df.columns)
+        default_iban = next((c for c in cols if c.strip().upper() == "IBAN"), "(aucune)")
+        iban_col = st.selectbox(
+            "Quelle colonne contient l'IBAN ? (optionnel, pour la vérification de doublon)",
+            options=["(aucune)"] + cols,
+            index=(["(aucune)"] + cols).index(default_iban),
+            key="tab4_save_iban_col",
+        )
+        if st.button("💾 Enregistrer dans cet environnement", type="primary", key="tab4_save_confirm"):
+            progress = st.progress(0.0)
+            n_imported, n_alerts = import_dataframe(
+                ctx["client"], org_id, st.session_state.export_name_base or "export_trieur", ctx["user"].id, df,
+                iban_col=iban_col if iban_col != "(aucune)" else None,
+                on_progress=lambda done, total: progress.progress(done / max(total, 1)),
+            )
+            st.success(
+                f"{n_imported} ligne(s) enregistrée(s) dans « {org_labels[org_id]} », "
+                f"{n_alerts} alerte(s) de doublon IBAN créée(s)."
+            )
 
 
 def render():
@@ -237,6 +300,9 @@ def render():
 
                 st.markdown("---")
                 st.info("ℹ️ Les fichiers sont encodés en UTF-8. Pour les très gros volumes, préfère le CSV.")
+
+                st.markdown("---")
+                _render_save_to_database()
     except Exception:
         st.error("\u274c Une erreur est survenue dans cet onglet. Copie-colle le detail ci-dessous pour diagnostic.")
         st.code(traceback.format_exc(), language="text")

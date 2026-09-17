@@ -107,6 +107,7 @@ def _render_client_list(client, org_id):
 
     search = st.text_input("🔎 Rechercher (nom, IBAN, email...)", key=f"search_{org_id}")
     records = list_records(client, org_id)
+    master_cols = get_org_master_columns(client, org_id)
 
     rows = []
     for r in records:
@@ -116,12 +117,18 @@ def _render_client_list(client, org_id):
             if search.lower() not in haystack:
                 continue
         batch = r.get("import_batches") or {}
-        rows.append({
-            "_id": r["id"],
-            **data,
-            "Fichier source": batch.get("source_filename"),
-            "Importé le": batch.get("imported_at"),
-        })
+        # Colonnes de l'organisation d'abord, dans l'ordre defini dans les
+        # reglages -- puis toute colonne presente dans la ligne mais pas
+        # (encore) declaree, pour ne jamais masquer de donnee.
+        row = {"_id": r["id"]}
+        for col in master_cols:
+            row[col] = data.get(col)
+        for key, value in data.items():
+            if key not in master_cols:
+                row[key] = value
+        row["Fichier source"] = batch.get("source_filename")
+        row["Importé le"] = batch.get("imported_at")
+        rows.append(row)
 
     if not rows:
         st.caption("Aucun résultat pour cette recherche.")
@@ -133,7 +140,10 @@ def _render_client_list(client, org_id):
     st.dataframe(df.drop(columns=["_id"]), use_container_width=True, height=300)
 
     with st.expander("🗑️ Supprimer un client"):
-        options = {r["_id"]: " ".join(str(v) for v in r.items() if v)[:80] for r in rows}
+        options = {
+            r["_id"]: " ".join(str(v) for k, v in r.items() if k != "_id" and v)[:80]
+            for r in rows
+        }
         to_delete = st.selectbox(
             "Choisir la ligne à supprimer",
             options=list(options.keys()),
@@ -197,20 +207,56 @@ def _render_import(client, org_id, user):
 
 
 def _render_settings(client, org_id, is_admin):
-    with st.expander("⚙️ Réglages de l'environnement (colonnes maîtres)"):
-        current_cols = get_org_master_columns(client, org_id)
-        cols_text = st.text_area(
-            "Une colonne par ligne",
-            value="\n".join(current_cols),
-            key=f"org_cols_{org_id}",
-            height=120,
-            disabled=not is_admin,
+    with st.expander("⚙️ Réglages de l'environnement (colonnes)"):
+        cols = list(get_org_master_columns(client, org_id))
+
+        if not is_admin:
+            st.caption("Colonnes de cet environnement, modifiables par un administrateur uniquement.")
+            for c in cols:
+                st.write(f"• {c}")
+            return
+
+        st.caption(
+            "Crée, renomme, réordonne ou supprime les colonnes de cet "
+            "environnement. Les clients déjà importés ne sont pas modifiés — "
+            "seuls l'affichage et le prochain import s'adaptent."
         )
-        if is_admin:
-            if st.button("Enregistrer les colonnes maîtres", key=f"save_cols_{org_id}"):
-                new_cols = [c.strip() for c in cols_text.splitlines() if c.strip()]
-                save_org_master_columns(client, org_id, new_cols)
-                st.success("Colonnes maîtres enregistrées.")
+
+        for i, col_name in enumerate(cols):
+            c_name, c_up, c_down, c_del = st.columns([6, 1, 1, 1])
+            with c_name:
+                new_name = st.text_input(
+                    "Nom", value=col_name, key=f"colname_{org_id}_{i}", label_visibility="collapsed"
+                )
+                if new_name.strip() and new_name.strip() != col_name:
+                    cols[i] = new_name.strip()
+                    save_org_master_columns(client, org_id, cols)
+                    st.rerun()
+            with c_up:
+                if i > 0 and st.button("⬆️", key=f"up_{org_id}_{i}"):
+                    cols[i - 1], cols[i] = cols[i], cols[i - 1]
+                    save_org_master_columns(client, org_id, cols)
+                    st.rerun()
+            with c_down:
+                if i < len(cols) - 1 and st.button("⬇️", key=f"down_{org_id}_{i}"):
+                    cols[i + 1], cols[i] = cols[i], cols[i + 1]
+                    save_org_master_columns(client, org_id, cols)
+                    st.rerun()
+            with c_del:
+                if st.button("🗑️", key=f"del_{org_id}_{i}"):
+                    cols.pop(i)
+                    save_org_master_columns(client, org_id, cols)
+                    st.rerun()
+
+        st.divider()
+        new_col = st.text_input("Nouvelle colonne", key=f"newcol_{org_id}")
+        if st.button("➕ Ajouter une colonne", key=f"addcol_{org_id}"):
+            name = new_col.strip()
+            if not name:
+                st.error("Donne un nom à la nouvelle colonne.")
+            elif name in cols:
+                st.error("Cette colonne existe déjà.")
+            else:
+                cols.append(name)
+                save_org_master_columns(client, org_id, cols)
                 st.rerun()
-        else:
-            st.caption("Réglage de l'organisation, modifiable par un administrateur uniquement.")

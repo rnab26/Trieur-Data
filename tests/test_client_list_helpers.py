@@ -134,7 +134,10 @@ def test_filter_by_columns_combines_with_and():
         {"_id": "r2", "NOM": "Dupont", "VILLE": "Lyon"},
         {"_id": "r3", "NOM": "Martin", "VILLE": "Paris"},
     ]
-    result = _filter_by_columns(rows, {"NOM": "dupont", "VILLE": "paris"})
+    result = _filter_by_columns(rows, {
+        "NOM": {"op": "contient", "value": "dupont"},
+        "VILLE": {"op": "contient", "value": "paris"},
+    })
     assert [r["_id"] for r in result] == ["r1"]
 
 
@@ -145,4 +148,60 @@ def test_filter_by_columns_empty_filters_is_noop():
 
 def test_filter_by_columns_missing_value_does_not_crash():
     rows = [{"_id": "r1", "NOM": None}]
-    assert _filter_by_columns(rows, {"NOM": "x"}) == []
+    assert _filter_by_columns(rows, {"NOM": {"op": "contient", "value": "x"}}) == []
+
+
+def test_filter_by_columns_operator_egal_a():
+    rows = [{"_id": "r1", "VILLE": "Paris"}, {"_id": "r2", "VILLE": "Paris 15"}]
+    result = _filter_by_columns(rows, {"VILLE": {"op": "égal à", "value": "paris"}})
+    assert [r["_id"] for r in result] == ["r1"]
+
+
+def test_filter_by_columns_operator_ne_contient_pas():
+    rows = [{"_id": "r1", "VILLE": "Paris"}, {"_id": "r2", "VILLE": "Lyon"}]
+    result = _filter_by_columns(rows, {"VILLE": {"op": "ne contient pas", "value": "paris"}})
+    assert [r["_id"] for r in result] == ["r2"]
+
+
+def test_filter_by_columns_operator_vide_et_non_vide():
+    rows = [{"_id": "r1", "EMAIL": ""}, {"_id": "r2", "EMAIL": "a@b.com"}, {"_id": "r3", "EMAIL": None}]
+    vides = _filter_by_columns(rows, {"EMAIL": {"op": "vide", "value": ""}})
+    assert sorted(r["_id"] for r in vides) == ["r1", "r3"]
+    non_vides = _filter_by_columns(rows, {"EMAIL": {"op": "non vide", "value": ""}})
+    assert [r["_id"] for r in non_vides] == ["r2"]
+
+
+def test_diff_rows_flags_differing_fields():
+    from views.tab_database import diff_rows
+
+    rows = diff_rows({"NOM": "Dupont", "VILLE": "Paris"}, {"NOM": "Dupont", "VILLE": "Lyon"})
+    by_field = {r["Champ"]: r for r in rows}
+    assert by_field["NOM"]["Différent"] == ""
+    assert by_field["VILLE"]["Différent"] == "⚠️"
+
+
+def test_diff_rows_includes_fields_only_on_one_side():
+    from views.tab_database import diff_rows
+
+    rows = diff_rows({"NOM": "Dupont"}, {"NOM": "Dupont", "IBAN": "FR76"})
+    fields = {r["Champ"] for r in rows}
+    assert fields == {"NOM", "IBAN"}
+
+
+def test_diff_rows_handles_none_inputs():
+    from views.tab_database import diff_rows
+    assert diff_rows(None, None) == []
+
+
+def test_filter_by_columns_vide_does_not_treat_zero_as_empty():
+    rows = [{"_id": "r1", "MONTANT": 0}, {"_id": "r2", "MONTANT": None}]
+    vides = _filter_by_columns(rows, {"MONTANT": {"op": "vide", "value": ""}})
+    assert [r["_id"] for r in vides] == ["r2"]
+    non_vides = _filter_by_columns(rows, {"MONTANT": {"op": "non vide", "value": ""}})
+    assert [r["_id"] for r in non_vides] == ["r1"]
+
+
+def test_diff_rows_does_not_treat_zero_as_equal_to_empty():
+    from views.tab_database import diff_rows
+    rows = diff_rows({"MONTANT": 0}, {"MONTANT": None})
+    assert rows[0]["Différent"] == "⚠️"

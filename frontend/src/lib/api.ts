@@ -69,7 +69,7 @@ export type RecordsPage = {
 export type Dashboard = {
   total_records: number
   alerts_pending: number
-  last_import: { filename: string; created_at: string } | null
+  last_import: { source_filename: string; imported_at: string } | null
 }
 
 export function listOrgs() {
@@ -80,14 +80,25 @@ export function getDashboard(orgId: string) {
   return request<Dashboard>(`/orgs/${orgId}/dashboard`)
 }
 
+// Opérateurs de filtre par colonne, "façon Google Sheets" -- même liste
+// que views/tab_database.py:FILTER_OPERATORS, ne pas laisser diverger.
+export const FILTER_OPERATORS = ['contient', 'ne contient pas', 'égal à', 'vide', 'non vide'] as const
+export type FilterOperator = (typeof FILTER_OPERATORS)[number]
+
+export type ColFilter = { op: FilterOperator; value: string }
+export type ColFilters = Record<string, ColFilter>
+
 export function listRecords(
   orgId: string,
-  opts: { page?: number; pageSize?: number; search?: string } = {},
+  opts: { page?: number; pageSize?: number; search?: string; colFilters?: ColFilters } = {},
 ) {
   const params = new URLSearchParams()
   params.set('page', String(opts.page ?? 1))
   params.set('page_size', String(opts.pageSize ?? 50))
   if (opts.search) params.set('search', opts.search)
+  if (opts.colFilters && Object.keys(opts.colFilters).length > 0) {
+    params.set('col_filters', JSON.stringify(opts.colFilters))
+  }
   return request<RecordsPage>(`/orgs/${orgId}/records?${params.toString()}`)
 }
 
@@ -167,6 +178,40 @@ async function importRequest<T>(
     throw new ApiError(res.status, detail)
   }
   return res.json() as Promise<T>
+}
+
+export type SavedView = {
+  id: string
+  name: string
+  search: string
+  col_filters: ColFilters
+  visible_cols: string[]
+  [key: string]: unknown
+}
+
+export function listSavedViews(orgId: string) {
+  return request<SavedView[]>(`/orgs/${orgId}/saved-views`)
+}
+
+export function saveSavedView(
+  orgId: string,
+  body: { name: string; search: string; colFilters: ColFilters; visibleCols: string[] },
+) {
+  return request<SavedView>(`/orgs/${orgId}/saved-views`, {
+    method: 'POST',
+    body: JSON.stringify({
+      name: body.name,
+      search: body.search,
+      col_filters: body.colFilters,
+      visible_cols: body.visibleCols,
+    }),
+  })
+}
+
+export function deleteSavedView(orgId: string, viewId: string) {
+  return request<{ id: string; deleted: boolean }>(`/orgs/${orgId}/saved-views/${viewId}`, {
+    method: 'DELETE',
+  })
 }
 
 export function previewImport(orgId: string, file: File) {

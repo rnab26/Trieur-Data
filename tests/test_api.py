@@ -3,6 +3,7 @@ même esprit que tests/test_db_saved_views.py, injecté via
 app.dependency_overrides plutôt qu'en remplaçant trieur.db lui-même :
 les endpoints appellent les VRAIES fonctions de trieur/db.py, avec un
 faux client Supabase en entrée."""
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -338,6 +339,64 @@ def test_records_invalid_col_filters_json_is_400(client_factory):
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 400
+
+
+def test_records_col_filters_operators(client_factory):
+    """`col_filters` façon Google Sheets (contient/égal à/vide/non vide),
+    combinés en ET -- reroute vers views/tab_database.py:_filter_by_columns
+    (voir api/main.py:list_org_records), pas une logique dupliquée côté
+    API. Vérifie aussi le piège connu du projet : une valeur falsy (0)
+    n'est pas confondue avec un champ "vide"."""
+    records = [
+        {**_record(1), "data": {"NOM": "Dupont", "ENFANTS": 0}},
+        {**_record(2), "data": {"NOM": "Martin", "ENFANTS": 2}},
+        {**_record(3), "data": {"NOM": "Durand", "ENFANTS": None}},
+    ]
+    fake = _make_client(records=records)
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+
+    # "égal à" sur une colonne texte.
+    res = tc.get(
+        "/orgs/org-1/records",
+        params={"col_filters": json.dumps({"NOM": {"op": "égal à", "value": "dupont"}})},
+        headers=headers,
+    )
+    rows = res.json()["rows"]
+    assert [r["NOM"] for r in rows] == ["Dupont"]
+
+    # "non vide" sur ENFANTS : la ligne à 0 doit rester incluse (valeur
+    # falsy mais réelle), seule la ligne à None (jamais renseignée) doit
+    # être exclue.
+    res = tc.get(
+        "/orgs/org-1/records",
+        params={"col_filters": json.dumps({"ENFANTS": {"op": "non vide", "value": ""}})},
+        headers=headers,
+    )
+    rows = res.json()["rows"]
+    assert {r["NOM"] for r in rows} == {"Dupont", "Martin"}
+
+    # "vide" : seule la ligne jamais renseignée (None) doit apparaître --
+    # pas celle à 0.
+    res = tc.get(
+        "/orgs/org-1/records",
+        params={"col_filters": json.dumps({"ENFANTS": {"op": "vide", "value": ""}})},
+        headers=headers,
+    )
+    rows = res.json()["rows"]
+    assert [r["NOM"] for r in rows] == ["Durand"]
+
+    # Deux filtres combinés en ET : aucune ligne ne correspond aux deux.
+    res = tc.get(
+        "/orgs/org-1/records",
+        params={
+            "col_filters": json.dumps(
+                {"NOM": {"op": "contient", "value": "dupont"}, "ENFANTS": {"op": "égal à", "value": "2"}}
+            )
+        },
+        headers=headers,
+    )
+    assert res.json()["rows"] == []
 
 
 # ---------------------------------------------------------------

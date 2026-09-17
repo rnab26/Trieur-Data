@@ -189,6 +189,16 @@ def _render_import(client, org_id, user):
         n_imported, n_alerts = 0, 0
         progress = st.progress(0.0)
         for i, row in enumerate(df.to_dict(orient="records")):
+            # [FIX] La colonne générée `records.iban_normalized` (voir
+            # supabase/migrations/0001_init.sql) lit la clé JSON fixe "iban"
+            # (minuscule) -- jamais le nom réel choisi pour la colonne IBAN
+            # dans le fichier importé (ex: "IBAN", "Référence bancaire"...).
+            # Sans cette clé recopiée, la colonne générée restait NULL pour
+            # quasi tous les imports réels et la détection de doublon IBAN
+            # (find_iban_matches, qui s'appuie sur iban_normalized) ne
+            # déclenchait jamais.
+            if iban_col != "(aucune)" and row.get(iban_col):
+                row["iban"] = row[iban_col]
             record = insert_record(client, org_id, batch["id"], row)
             n_imported += 1
             if iban_col != "(aucune)" and row.get(iban_col):
@@ -204,6 +214,21 @@ def _render_import(client, org_id, user):
             progress.progress((i + 1) / max(len(df), 1))
         st.success(f"{n_imported} lignes importées, {n_alerts} alerte(s) de doublon IBAN créée(s).")
         st.rerun()
+
+
+def _clear_colname_widgets(org_id):
+    """[FIX] Les champs de renommage sont indexes par POSITION
+    (`colname_{org_id}_{i}`), pas par colonne : sans ce nettoyage, un
+    reordonnancement ou une suppression laisse en session_state la valeur
+    saisie pour l'ANCIENNE colonne a cet indice -- au prochain rendu ce
+    texte perime est repris tel quel (Streamlit ignore alors `value=`), et
+    comme il differe du nouveau nom a cet indice, la colonne qui a glisse a
+    cette position se retrouve renommee EN SILENCE d'apres ce texte perime.
+    On vide donc ces cles a chaque changement d'ordre/de longueur de la
+    liste, pour forcer leur reinitialisation propre au prochain rendu."""
+    prefix = f"colname_{org_id}_"
+    for key in [k for k in list(st.session_state.keys()) if isinstance(k, str) and k.startswith(prefix)]:
+        st.session_state.pop(key, None)
 
 
 def _render_settings(client, org_id, is_admin):
@@ -236,16 +261,19 @@ def _render_settings(client, org_id, is_admin):
                 if i > 0 and st.button("⬆️", key=f"up_{org_id}_{i}"):
                     cols[i - 1], cols[i] = cols[i], cols[i - 1]
                     save_org_master_columns(client, org_id, cols)
+                    _clear_colname_widgets(org_id)
                     st.rerun()
             with c_down:
                 if i < len(cols) - 1 and st.button("⬇️", key=f"down_{org_id}_{i}"):
                     cols[i + 1], cols[i] = cols[i], cols[i + 1]
                     save_org_master_columns(client, org_id, cols)
+                    _clear_colname_widgets(org_id)
                     st.rerun()
             with c_del:
                 if st.button("🗑️", key=f"del_{org_id}_{i}"):
                     cols.pop(i)
                     save_org_master_columns(client, org_id, cols)
+                    _clear_colname_widgets(org_id)
                     st.rerun()
 
         st.divider()

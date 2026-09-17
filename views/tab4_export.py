@@ -165,6 +165,14 @@ def render():
                             if st.button("Supprimer", key=f"tab4_del_{i}", use_container_width=True):
                                 st.session_state.export_presets.pop(i)
                                 save_export_presets(st.session_state.export_presets)
+                                # [FIX] "tab4_rn_{i}" est indexe par POSITION :
+                                # sans ce nettoyage, le preset qui glisse a
+                                # l'indice i herite du texte perime laisse par
+                                # le preset supprime (Streamlit ignore `value=`
+                                # tant que la cle existe deja en session_state).
+                                for _k in [k for k in list(st.session_state.keys())
+                                           if isinstance(k, str) and k.startswith("tab4_rn_")]:
+                                    st.session_state.pop(_k, None)
                                 st.rerun()
 
                 selected_col_order = st.session_state[included_key]

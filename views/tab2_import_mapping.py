@@ -509,7 +509,16 @@ def render():
                         st.error("❌ Aucun onglet avec assignation trouvé.")
                     else:
                         final_df = pd.concat(rows, ignore_index=True)
-                        final_df = final_df.dropna(how="all")
+                        # [FIX] "Source Data" est toujours renseignee (voir
+                        # ci-dessus), donc un simple dropna(how="all") ne
+                        # supprimait plus JAMAIS une ligne : une ligne vide
+                        # du fichier source (aucune colonne mappee remplie)
+                        # restait dans la base finale avec pour seul contenu
+                        # son "Source Data". On ignore cette colonne pour
+                        # juger si une ligne est reellement vide.
+                        _cols_hors_source = [c for c in final_df.columns if c != "Source Data"]
+                        if _cols_hors_source:
+                            final_df = final_df.dropna(how="all", subset=_cols_hors_source)
                         # [4] Retire les colonnes maitres jamais assignees sur
                         # aucun fichier fusionne (colonnes "en brut" 100% vides).
                         final_df = final_df[[c for c in final_df.columns if c in used_master_cols]]

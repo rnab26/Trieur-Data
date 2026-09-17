@@ -256,6 +256,14 @@ def render():
                         if st.button("Supprimer", key=f"tab3_del_{i}", use_container_width=True):
                             st.session_state.saved_filters.pop(i)
                             save_saved_filters(st.session_state.saved_filters)
+                            # [FIX] "tab3_rn_{i}" est indexe par POSITION : sans
+                            # ce nettoyage, le filtre qui glisse a l'indice i
+                            # herite du texte perime laisse par le filtre
+                            # supprime (Streamlit ignore `value=` tant que la
+                            # cle existe deja en session_state).
+                            for _k in [k for k in list(st.session_state.keys())
+                                       if isinstance(k, str) and k.startswith("tab3_rn_")]:
+                                st.session_state.pop(_k, None)
                             st.rerun()
 
                 # [14] Sauvegarde texte : les filtres ne vivent que sur le serveur

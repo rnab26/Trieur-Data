@@ -42,12 +42,106 @@ une architecture backend + frontend séparés (React, stack par défaut de
 l'utilisateur) — un vrai chantier à part, pas une rustine.
 
 **Notes / À faire** :
-- [ ] Confirmer avec l'utilisateur que les déconnexions ont cessé après
-  ce correctif.
+- [x] Confirmer avec l'utilisateur que les déconnexions ont cessé après
+  ce correctif. → migration complète d'hébergement décidée à la place
+  (voir section suivante), le correctif localStorage reste actif.
 - [ ] Si l'utilisateur veut ouvrir plusieurs sessions Claude en parallèle
   sur ce dépôt à l'avenir, envisager de les faire travailler sur des
   chantiers différents (branches différentes) plutôt que sur le même
   chantier Cockpit, pour éviter les merges qui se chevauchent.
+
+---
+
+## Migration d'hébergement Streamlit Cloud → Render (2026-09-17)
+
+**Pourquoi** : instabilité persistante (déconnexions, plantages, reboots
+manuels) malgré le correctif localStorage ci-dessus — "tous mes autres
+projets fonctionnent, à part celui-là". Théorie retenue après 3 incidents
+`ImportError` en production juste après un push (chacun reproductible
+comme "le code est correct localement") : le redéploiement à chaud de
+Streamlit Cloud entre en conflit avec la synchronisation multi-fichiers
+Git, ce que Render (déploiement conteneur complet, pas de hot-reload)
+n'a pas.
+
+**Fait** : migration vers Render (palier gratuit) sans toucher au
+fonctionnement de l'app :
+- `render_start.sh` génère `.streamlit/secrets.toml` depuis les variables
+  d'environnement Render (`SUPABASE_URL`, `SUPABASE_ANON_KEY`) au
+  démarrage du conteneur, puis lance `streamlit run` normalement.
+- `.github/workflows/keepalive.yml` : ping toutes les 10 min pour éviter
+  la mise en veille du palier gratuit (15 min d'inactivité) — gratuit et
+  illimité car le dépôt est public (vérifié : un cron Render gratuit
+  n'existe pas, contrairement à ce qu'indiquait le schéma de l'outil).
+- Déploiement Render vérifié "live" (logs de démarrage propres) + la
+  page réelle récupérée par `curl` (10951 octets, contenu Streamlit
+  valide, après avoir écarté un faux "Not Found" dû à un cache Cloudflare
+  périmé).
+- **Limite honnête** : pas de vérification Playwright complète de l'URL
+  Render en HTTPS depuis cet environnement (le proxy sortant réémet son
+  propre certificat TLS, non reconnu par défaut par Chromium/Playwright
+  — je n'ai pas contourné la vérification TLS, c'est une règle non
+  négociable). Les logs Render + le `curl` sont la preuve dont je
+  dispose ; **pas encore testé par l'utilisateur en usage réel**.
+
+**Notes / À faire** :
+- [ ] Utilisateur : confirmer en usage réel (ouverture depuis le
+  téléphone sur plusieurs jours) que l'instabilité a disparu.
+- [ ] Décommissionner l'ancien déploiement Streamlit Cloud une fois
+  Render confirmé stable (proposé, pas encore décidé).
+
+---
+
+## Performance : mise en cache des lectures Supabase rarement modifiées (2026-09-17)
+
+**Demande** : "améliorer nettement le chargement de la page et des
+différents onglets."
+
+**Cause** : `require_login()` (appelé à chaque rendu de Base de données
+et du Cockpit) relit le profil et les appartenances par requête réseau
+Supabase à CHAQUE interaction, même quand rien n'a changé — pareil pour
+la liste des organisations, les sections du Cockpit et les colonnes
+maîtres d'une organisation. Streamlit réexécute tout le script à chaque
+clic (comportement structurel, pas un bug), donc ces allers-retours
+réseau se répétaient inutilement à chaque interaction.
+
+**Fait** (`trieur/db.py`, branche `claude/perf-cache-lectures`,
+mergée sur `main`) : `st.cache_data(ttl=30)` sur `get_my_profile`,
+`get_my_memberships`, `list_organizations`, `list_sections`,
+`get_org_master_columns` — données qui changent rarement. Chaque
+écriture correspondante (`save_org_master_columns`, `create_section`,
+`set_active_column_set`) appelle `.clear()` explicitement juste après
+pour ne jamais afficher de donnée périmée après une action utilisateur.
+Les données qui changent souvent (clients importés, chantiers, alertes
+de doublon) ne sont **pas** mises en cache — pas de risque de retard
+d'affichage là où ça compte.
+
+**Vérifié** : suite de tests complète (99 tests) — 98 passent, 1 échec
+préexistant et sans lien (`test_master_columns_localstorage_fallback`,
+confirmé en échec identique sur le code non modifié, avant ce chantier).
+
+**Limite honnête** : pas de test Playwright avec vrai jeton Supabase
+dans cette session (pas de `.streamlit/secrets.toml` disponible ici) —
+la logique d'invalidation a été relue point par point (chaque fonction
+d'écriture qui touche une table lue en cache a son `.clear()`), mais
+n'a pas été observée en conditions réelles avec un vrai compte.
+
+**Ne pas casser** :
+- Toute nouvelle fonction de lecture ajoutée sur une table déjà cachée
+  (profiles, organizations, sections) doit soit être mise en cache avec
+  le même TTL, soit rester consciente qu'une autre lecture cachée peut
+  afficher une version différente pendant jusqu'à 30s après une
+  écriture ailleurs.
+- Toute nouvelle écriture sur `profiles`, `organizations` ou `sections`
+  doit appeler `.clear()` sur la fonction de lecture correspondante,
+  sinon régression de donnée périmée.
+
+**Notes / À faire** :
+- [ ] Utilisateur : confirmer en usage réel que le chargement est perçu
+  comme plus rapide.
+- [ ] Si la lenteur persiste malgré ça, le vrai plafond est structurel à
+  Streamlit (script entier réexécuté à chaque clic) — la seule vraie
+  solution serait une architecture backend + frontend séparés (déjà
+  noté plus haut), pas une rustine de plus.
 
 ---
 

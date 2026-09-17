@@ -6,6 +6,51 @@ en attente.
 
 ---
 
+## Instabilité signalée par l'utilisateur (déconnexions, "ça plante") — 2026-09-17
+
+**Cause racine trouvée et corrigée (vérifiée en conditions réelles)** :
+Streamlit efface `st.session_state` à chaque reconnexion WebSocket
+(mobile qui met l'onglet en veille, réseau qui coupe un instant) — la
+session de connexion n'était jamais sauvegardée côté navigateur, donc
+déconnexion silencieuse en permanence même si le jeton Supabase restait
+valable des semaines. Corrigé avec le même mécanisme de secours
+localStorage que les colonnes maîtres (`views/_ls_auth_sync.py` +
+`components/ls_auth_session/`) — testé avec un vrai jeton généré via
+l'API admin (sans mot de passe), injecté dans le localStorage, page
+rechargée : la session revient automatiquement, sans repasser par le
+formulaire.
+
+**Deuxième cause, probable, à surveiller** : **deux sessions Claude ont
+travaillé sur ce même dépôt en parallèle aujourd'hui** (repéré via
+`git log` — une autre session a ajouté le résumé "où j'en suis", le
+bandeau "depuis ta dernière visite" et les sections du Cockpit,
+référençant un fichier `cockpit-kit/FONCTIONNALITES.md` d'un autre
+dépôt de l'utilisateur). Chaque merge sur `main` déclenche un
+redéploiement Streamlit Cloud (~1-2 min d'indisponibilité) — avec deux
+sessions qui poussent en parallèle, le nombre de redéploiements dans la
+journée a été anormalement élevé. Ce n'est probablement pas un vrai bug
+Streamlit mais le rythme de développement du jour ; à confirmer si
+l'instabilité persiste une fois le rythme de merges redescendu.
+
+**Vraie limite de Streamlit, pas corrigible par du code** : chaque
+interaction (clic, saisie) réexécute tout le script de haut en bas —
+c'est le modèle même de Streamlit, pas un bug. Sur mobile avec un réseau
+irrégulier, ça peut donner une sensation de rechargement fréquent. Si
+après ce correctif + la fin du rythme de merges intense la sensation de
+lenteur/instabilité persiste, la vraie solution serait de migrer vers
+une architecture backend + frontend séparés (React, stack par défaut de
+l'utilisateur) — un vrai chantier à part, pas une rustine.
+
+**Notes / À faire** :
+- [ ] Confirmer avec l'utilisateur que les déconnexions ont cessé après
+  ce correctif.
+- [ ] Si l'utilisateur veut ouvrir plusieurs sessions Claude en parallèle
+  sur ce dépôt à l'avenir, envisager de les faire travailler sur des
+  chantiers différents (branches différentes) plutôt que sur le même
+  chantier Cockpit, pour éviter les merges qui se chevauchent.
+
+---
+
 ## Cockpit : résumé "où j'en suis" + bandeau "depuis ta dernière visite" (2026-09-17)
 
 Le Cockpit se limitait à une liste de chantiers (statut, todos, fil de

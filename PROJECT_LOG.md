@@ -31,9 +31,10 @@ simples" (**plus tard**, explicitement dépriorisée). Nouvel ordre pour
 la suite, en intégrant ces réponses et leurs commentaires :
 
 5. [x] Vues enregistrées, nommées — livré, voir section ci-dessous.
-6. [ ] Tableau de bord par environnement + badge d'alertes de doublon
-   toujours visible (fusion de l'ancien point 6 et de n6 "Rappel
-   visible des alertes en attente" — même famille, "vue d'ensemble en
+6. [x] Tableau de bord par environnement + badge d'alertes de doublon
+   toujours visible — livré, voir section ci-dessous (fusion de
+   l'ancien point 6 et de n6 "Rappel visible des alertes en attente" —
+   même famille, "vue d'ensemble en
    arrivant").
 7. [ ] Étiquettes libres sur un client (n1).
 8. [ ] Annuler un import entier en un clic (n3).
@@ -63,6 +64,37 @@ la suite, en intégrant ces réponses et leurs commentaires :
     discuter avant d'écrire du code, pas être devinée.
 13. [ ] **Reporté par l'utilisateur** ("plus tard") : colonnes
     calculées simples (n8).
+
+---
+
+## Tableau de bord par environnement + badge d'alertes (2026-09-17)
+
+**Fait** :
+- `trieur/db.py:get_last_import_batch()` — fichier + date du dernier
+  import pour un environnement.
+- `views/tab_database.py:_render_dashboard()` — 3 indicateurs en haut
+  de la Base de données : clients, alertes de doublon en attente
+  (visible dès l'arrivée sur l'environnement, pas seulement à
+  l'import), dernier import.
+
+**Vérifié** : `tests/test_db_dashboard.py` (3 tests, faux client).
+Suite complète (141 tests) + e2e Playwright réel verts (un échec isolé
+du test pipeline complet confirmé flaky par relances répétées, sans
+lien avec ce commit).
+
+**Pas vérifié** : le rendu réel avec un compte Supabase connecté (pas
+de secrets disponibles dans la session qui a fait ce chantier).
+
+**Ne pas casser** : `total` (nombre de clients) et `alerts` (alertes en
+attente) sont calculés UNE fois dans `render()` et partagés entre
+`_render_dashboard`/`_render_alerts`/`_render_client_list` — ne jamais
+réintroduire un `count_records()`/`list_dedup_alerts()` local dans l'un
+de ces trois sans vérifier que ce n'est pas déjà calculé plus haut.
+
+**Notes / À faire** :
+- [ ] Utilisateur : tester en usage réel (vérifier que les 3 chiffres
+  du tableau de bord correspondent bien à la réalité de
+  l'environnement).
 
 ---
 

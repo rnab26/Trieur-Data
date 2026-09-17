@@ -326,17 +326,19 @@ def count_records(client: Client, org_id: str) -> int:
     return res.count or 0
 
 
-def list_records(client: Client, org_id: str, limit: int = 300) -> list[dict]:
-    """Derniers clients importés pour cet environnement, avec le fichier et
-    la date d'import d'origine -- vue "liste" simple (recherche/filtre côté
-    Python pour l'instant, le format final dépendra du modèle réel une fois
-    l'Excel de référence reçu)."""
+def list_records(client: Client, org_id: str, limit: int = 300, offset: int = 0) -> list[dict]:
+    """Clients de cet environnement, du plus récent au plus ancien, avec le
+    fichier et la date d'import d'origine -- vue "liste" simple
+    (recherche/filtre côté Python pour l'instant, le format final dépendra
+    du modèle réel une fois l'Excel de référence reçu). `offset` permet de
+    charger la suite au-delà de `limit` (bouton "charger plus" côté UI)."""
     res = (
         _td(client, "records")
         .select("id, data, created_at, import_batches(source_filename, imported_at)")
         .eq("org_id", org_id)
         .order("created_at", desc=True)
         .limit(limit)
+        .offset(offset)
         .execute()
     )
     return res.data or []

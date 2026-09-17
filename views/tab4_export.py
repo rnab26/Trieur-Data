@@ -72,6 +72,8 @@ def _render_save_to_database():
                 f"{n_imported} ligne(s) enregistrée(s) dans « {org_labels[org_id]} », "
                 f"{n_alerts} alerte(s) de doublon IBAN créée(s)."
             )
+            from views.tab_database import invalidate_client_list_cache
+            invalidate_client_list_cache(org_id)
 
 
 def render():

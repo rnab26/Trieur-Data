@@ -17,9 +17,9 @@ pas encore priorisées, en attente.
 
 **Ordre proposé et retenu** :
 1. [x] Refonte de la liste clients (recherche par colonne, tri,
-   masquer des colonnes, sélection multiple, pagination) — livré,
-   voir section ci-dessous.
-2. [ ] Export direct depuis la Base de données.
+   masquer des colonnes, sélection multiple, pagination) — livré.
+2. [x] Export direct depuis la Base de données — livré, voir section
+   ci-dessous.
 3. [ ] Modifier une ligne directement + historique court par ligne.
 4. [ ] Colonnes adaptables selon le fichier importé.
 5. [ ] Vues enregistrées, nommées (dépend du point 1).
@@ -29,6 +29,65 @@ pas encore priorisées, en attente.
    sur l'Excel de référence (voir chantier CRM/Base de données).
 8. [ ] Les 8 nouvelles idées (n1-n8) — pas encore de réponse sur la
    fiche, à reprioriser une fois répondues.
+
+---
+
+## Export direct depuis la Base de données (2026-09-17)
+
+**Fait** (`trieur/db.py`, `views/tab_database.py`) :
+- `list_all_records()` : ramène TOUT l'historique d'un environnement en
+  enchaînant les pages (jamais seulement le lot paginé affiché à
+  l'écran), en avançant de la taille réellement renvoyée par chaque
+  page plutôt que de la taille demandée — une limite serveur
+  silencieuse plus petite ne tronque donc jamais le résultat.
+- Bouton "💾 Exporter ces résultats" : CSV/Excel de tout l'environnement,
+  avec la même recherche/les mêmes filtres par colonne qu'à l'écran.
+  Une colonne masquée EXPLICITEMENT par l'utilisateur reste masquée à
+  l'export ; une colonne jamais vue à l'écran (dans une ligne pas
+  encore chargée) est incluse quand même, pour ne jamais perdre de
+  donnée en silence.
+- Refactoring : aplatissement des lignes et filtrage (recherche,
+  colonnes) extraits en fonctions pures partagées entre l'affichage et
+  l'export (`_build_rows`, `_filter_by_search`, `_filter_by_columns`).
+- `LIST_PAGE_SIZE` (300) unifié dans `trieur/db.py` — une seule source
+  de vérité, plus de "300" dupliqué entre deux fichiers.
+
+**Vérifié** : `tests/test_db_pagination.py` (limite serveur plus petite
+que la page demandée, accumulation multi-pages, filtrage par
+organisation) + `tests/test_client_list_helpers.py` (aplatissement,
+recherche, filtres par colonne) — 10 tests nouveaux, faux client
+Supabase, pas de réseau. Suite complète (113 tests) + e2e Playwright
+réel verts avant et après merge sur `main`. Logique colonnes
+masquées/jamais-vues revérifiée dans un script Python autonome.
+
+**Pas vérifié** : le téléchargement réel avec un compte Supabase
+connecté (pas de secrets disponibles dans la session qui a fait ce
+chantier).
+
+**Limite connue, documentée dans le code, pas corrigée** : pagination
+par offset dans `list_all_records` — un import concurrent PENDANT un
+export peut en théorie décaler les pages suivantes (dupliquer ou
+sauter des lignes). Même risque déjà présent pour "Charger plus", juste
+sur une fenêtre plus longue ici. Pas de pagination par curseur pour
+l'instant, le volume réel actuel ne le justifie pas.
+
+**Incident de process (auto-signalé)** : ce chantier a été commencé
+directement sur `main` par erreur, avant d'être déplacé sur sa propre
+branche (`claude/export-depuis-base-de-donnees`) juste avant le premier
+commit — donc rien n'a été poussé sur `main` en dehors du merge normal
+à la fin. Aucune conséquence réelle, mais la règle "chaque chantier a sa
+branche dès le départ" n'a pas été respectée à la lettre pour celui-ci.
+
+**Ne pas casser** :
+- La logique de colonnes "masquée explicitement" vs "jamais vue" dans
+  `_render_export` dépend de recevoir `all_cols` (pas seulement
+  `visible_cols`) — ne pas simplifier cette signature sans repenser le
+  cas des colonnes découvertes seulement par "Charger plus" ou par
+  l'export lui-même.
+
+**Notes / À faire** :
+- [ ] Utilisateur : tester en usage réel (export CSV et Excel, avec et
+  sans filtre actif, avec une colonne masquée).
 
 **Notes / À faire** :
 - [ ] Continuer dans cet ordre au point 2 une fois le point 1 confirmé

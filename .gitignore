@@ -8,8 +8,13 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
-# Outils locaux
-.claude/
+# Outils locaux (mais PAS .claude/hooks/ ni settings.json : versionnes
+# expres pour que le hook de demarrage Cockpit s'applique a toute
+# nouvelle session sur ce depot, voir PROJECT_LOG.md)
+.claude/*
+!.claude/hooks/
+!.claude/hooks/**
+!.claude/settings.json
 
 # Secrets Streamlit (clés Supabase) — jamais versionnés
 .streamlit/secrets.toml

@@ -6,6 +6,99 @@ en attente.
 
 ---
 
+## Priorisation des 19 fonctionnalités validées (2026-09-17)
+
+**Décision** : l'utilisateur a rempli la fiche
+(https://claude.ai/artifact/DYHosfZYYCWQZ12vic2nzP) en mettant "oui"
+sur les 19 cases existantes, et a demandé de proposer un ordre de
+priorité moi-même et de commencer par le haut. Les 8 nouvelles idées
+(n1-n8) ajoutées à la fiche après coup n'ont pas encore de réponse —
+pas encore priorisées, en attente.
+
+**Ordre proposé et retenu** :
+1. [x] Refonte de la liste clients (recherche par colonne, tri,
+   masquer des colonnes, sélection multiple, pagination) — livré,
+   voir section ci-dessous.
+2. [ ] Export direct depuis la Base de données.
+3. [ ] Modifier une ligne directement + historique court par ligne.
+4. [ ] Colonnes adaptables selon le fichier importé.
+5. [ ] Vues enregistrées, nommées (dépend du point 1).
+6. [ ] Petit tableau de bord par environnement.
+7. [ ] Règle de doublon configurable par activité — **en attente**,
+   liée à la question "nouvelle souscription vs doublon" déjà bloquée
+   sur l'Excel de référence (voir chantier CRM/Base de données).
+8. [ ] Les 8 nouvelles idées (n1-n8) — pas encore de réponse sur la
+   fiche, à reprioriser une fois répondues.
+
+**Notes / À faire** :
+- [ ] Continuer dans cet ordre au point 2 une fois le point 1 confirmé
+  par l'utilisateur en usage réel.
+
+---
+
+## Refonte de la liste clients : filtre, tri, colonnes, sélection multiple, pagination (2026-09-17)
+
+**Fait** (`views/tab_database.py`, `trieur/db.py`) :
+- Filtre par colonne (texte "contient", combinés en ET) dans un tiroir
+  "Filtres par colonne".
+- Tri : natif à `st.dataframe` (clic sur un en-tête) — rien à
+  construire, juste documenté dans l'aide à l'écran.
+- Masquer des colonnes : multiselect "Colonnes affichées" — préférence
+  de session pour l'instant, pas encore persistée entre connexions
+  (ce sera le rôle des "vues enregistrées", point 5 de la priorisation
+  ci-dessus).
+- Sélection multiple + suppression groupée :
+  `st.dataframe(on_select="rerun", selection_mode="multi-row")`.
+  Remplace l'ancien tiroir "Supprimer un client" (menu déroulant, un
+  seul à la fois) — retiré pour ne pas garder deux façons de faire la
+  même chose.
+- Pagination : bouton "Charger plus" par pas de 300, avec un vrai cache
+  de session (`trieur/db.py:list_records` gagne un paramètre `offset`,
+  réel — vérifié sur l'API installée avant de l'utiliser) pour ne pas
+  retélécharger tout depuis le début à chaque clic. Invalidé après
+  chaque import ou suppression sur l'environnement, y compris depuis le
+  bouton "Enregistrer dans la base de données" de l'onglet Export.
+
+**Vérifié** :
+- Une revue `/code-review` (high) sur le commit initial a trouvé 4 bugs
+  réels, tous corrigés et revérifiés avant merge : la liste des
+  colonnes se recalculait après le filtre de recherche (des colonnes
+  disparaissaient de "Colonnes affichées" en tapant une recherche, et y
+  restaient effacées) ; le bouton "Charger plus" devenait injoignable
+  dès qu'une recherche ne donnait aucun résultat sur le lot déjà
+  chargé ; le paramètre `offset` n'était jamais utilisé (retéléchargeait
+  tout à chaque clic) ; la suppression groupée ne vidait pas l'état de
+  sélection du tableau (risque de sélection fantôme sur d'autres
+  clients au rendu suivant).
+- Logique de colonnes/recherche/pagination/alignement des identifiants
+  vérifiée dans des scripts Python autonomes (sans Streamlit ni
+  Supabase).
+- Suite complète (103 tests) + e2e Playwright réel (pipeline complet)
+  verts avant et après merge sur `main`.
+
+**Pas vérifié** : le rendu réel avec un compte Supabase connecté (pas
+de secrets disponibles dans la session qui a fait ce chantier) — la
+sélection/suppression groupée et le "Charger plus" n'ont pas été
+observés dans un vrai navigateur avec de vraies données.
+
+**Ne pas casser** :
+- Toute écriture (import, suppression) sur `trieur_data.records` pour
+  un environnement doit appeler
+  `views/tab_database.py:invalidate_client_list_cache(org_id)` avant
+  son `st.rerun()`, sinon la liste affiche un lot périmé après "Charger
+  plus".
+- `all_cols` (colonnes connues, filtres, colonnes affichées) doit
+  toujours être calculée sur le lot chargé AVANT tout filtre/recherche
+  — jamais après, sinon la liste de colonnes varie silencieusement en
+  tapant une recherche.
+
+**Notes / À faire** :
+- [ ] Utilisateur : tester en usage réel (recherche, filtre par
+  colonne, tri en cliquant un en-tête, masquer une colonne, sélection
+  multiple + suppression groupée, "charger plus" au-delà de 300).
+
+---
+
 ## Idées fonctionnalités Base de données — en attente de sélection (2026-09-17)
 
 **Décision en attente** : l'utilisateur a listé 4 idées pour la Base de

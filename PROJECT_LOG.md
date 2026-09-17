@@ -22,7 +22,8 @@ pas encore priorisées, en attente.
    ci-dessous.
 3. [x] Modifier une ligne directement + historique court par ligne —
    livré, voir section ci-dessous.
-4. [ ] Colonnes adaptables selon le fichier importé.
+4. [x] Colonnes adaptables selon le fichier importé — livré, voir
+   section ci-dessous.
 5. [ ] Vues enregistrées, nommées (dépend du point 1).
 6. [ ] Petit tableau de bord par environnement.
 7. [ ] Règle de doublon configurable par activité — **en attente**,
@@ -30,6 +31,41 @@ pas encore priorisées, en attente.
    sur l'Excel de référence (voir chantier CRM/Base de données).
 8. [ ] Les 8 nouvelles idées (n1-n8) — pas encore de réponse sur la
    fiche, à reprioriser une fois répondues.
+
+---
+
+## Colonnes adaptables selon le fichier importé (2026-09-17)
+
+**Fait** :
+- `views/_ui.py:unknown_columns()` — colonnes d'un fichier absentes des
+  colonnes maîtres de l'environnement (insensible à la casse).
+- `views/_ui.py:render_unknown_columns_prompt()` — signale ces colonnes
+  avant l'import et propose de les ajouter (admin uniquement, même
+  règle que les réglages ; un membre simple voit un message informatif,
+  l'import continue, aucune donnée n'est jamais perdue). Partagé entre
+  l'upload direct (Base de données) et "Enregistrer dans la base de
+  données" (Export) — un seul comportement.
+- `trieur/db.py:add_org_master_columns()` — ajoute les colonnes
+  choisies, jamais de doublon même sous une casse différente.
+
+**Vérifié** : `tests/test_ui_helpers.py` (6 tests) +
+`tests/test_db_master_columns.py` (3 tests, faux client). Suite
+complète (134 tests) + e2e Playwright réel verts.
+
+**Pas vérifié** : le formulaire réel avec un compte Supabase connecté
+(pas de secrets disponibles dans la session qui a fait ce chantier).
+
+**Ne pas casser** :
+- Les deux chemins d'import (upload direct, "Enregistrer dans la base
+  de données") doivent continuer à passer par
+  `render_unknown_columns_prompt()` + `add_org_master_columns()` — ne
+  jamais réintroduire une logique locale d'ajout de colonnes dans l'un
+  des deux sans l'autre.
+
+**Notes / À faire** :
+- [ ] Utilisateur : tester en usage réel (importer un fichier avec une
+  colonne inconnue de l'environnement, vérifier la proposition
+  d'ajout).
 
 ---
 

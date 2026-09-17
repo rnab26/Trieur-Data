@@ -6,6 +6,50 @@ en attente.
 
 ---
 
+## Export XML SEPA (pain.008) — Prélèvement (2026-09-17)
+
+**Contexte** (donné par l'utilisateur) : le père gère les prélèvements
+via un CRM tiers imparfait (doublons, vendeurs qui renvoient d'anciens
+contrats comme nouveaux) et compense avec un Excel truffé de formules de
+contrôle (dont la vérif IBAN/nom inversé qui a lancé tout ce chantier
+CRM). But : télécharger depuis l'onglet Base de données un fichier XML
+conforme au format bancaire (ISO 20022, pain.008), pas juste CSV/Excel.
+
+**Suivi vivant : chantier créé dans le Cockpit** (environnement
+Prélèvement, statut "attente_retour") — table `trieur_data.chantiers`,
+avec le contexte complet en message. Le mettre à jour là-bas en plus
+d'ici quand ça avance.
+
+**Bloquant (jamais deviner un format bancaire)** — en attente de
+l'utilisateur :
+1. [ ] Un exemple réel de fichier XML actuellement accepté par la banque
+   du père (données bidons OK) — pour la version exacte du schéma.
+2. [ ] L'ICS (Identifiant Créancier SEPA) de l'organisme.
+
+**Déjà fait sans attendre** (ne dépend pas du format bancaire exact) :
+- [x] `trieur/sepa.py` : déduction FRST (premier prélèvement) / RCUR
+  (récurrent) à partir de l'historique IBAN déjà en base
+  (`find_iban_matches`, chantier du 2026-09-16). Logique pure, testée
+  unitairement, séparée de l'accès base.
+- [x] `trieur.db.get_sepa_sequence_type(client, org_id, iban)` — le
+  branchement DB.
+
+**Champs pain.008 encore manquants dans le modèle de données**, à
+ajouter une fois le point bloquant levé : ICS (fixe, niveau
+organisation), RUM/référence de mandat (stable par contrat), date de
+signature du mandat, date d'échéance demandée. BIC probablement
+optionnel (règle IBAN seul en zone SEPA) — à confirmer sur l'échantillon
+réel, pas supposer.
+
+**Second objectif du même chantier** (mentionné, à cadrer plus tard) :
+étudier l'Excel de contrôle du père une fois reçu pour en extraire les
+règles métier restantes et les brancher comme vérifications
+supplémentaires sur l'environnement Prélèvement — **pas un moteur
+séparé** : des règles en plus sur le moteur unique du Trieur de Data
+(décision explicite de l'utilisateur, 2026-09-17).
+
+---
+
 ## Mémoire des colonnes maîtres liée au compte (2026-09-17)
 
 **Quoi** : dans l'onglet 1, un utilisateur connecté peut enregistrer

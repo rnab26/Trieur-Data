@@ -21,12 +21,9 @@ import streamlit as st
 
 from trieur.db import (
     count_records,
-    create_dedup_alert,
-    create_import_batch,
     delete_record,
-    find_iban_matches,
     get_org_master_columns,
-    insert_record,
+    import_dataframe,
     list_dedup_alerts,
     list_records,
     resolve_dedup_alert,
@@ -186,33 +183,12 @@ def _render_import(client, org_id, user):
     )
 
     if st.button("Vérifier et importer", type="primary", key=f"import_{org_id}"):
-        batch = create_import_batch(client, org_id, uploaded.name, user.id, len(df))
-        n_imported, n_alerts = 0, 0
         progress = st.progress(0.0)
-        for i, row in enumerate(df.to_dict(orient="records")):
-            # [FIX] La colonne générée `records.iban_normalized` (voir
-            # supabase/migrations/0001_init.sql) lit la clé JSON fixe "iban"
-            # (minuscule) -- jamais le nom réel choisi pour la colonne IBAN
-            # dans le fichier importé (ex: "IBAN", "Référence bancaire"...).
-            # Sans cette clé recopiée, la colonne générée restait NULL pour
-            # quasi tous les imports réels et la détection de doublon IBAN
-            # (find_iban_matches, qui s'appuie sur iban_normalized) ne
-            # déclenchait jamais.
-            if iban_col != "(aucune)" and row.get(iban_col):
-                row["iban"] = row[iban_col]
-            record = insert_record(client, org_id, batch["id"], row)
-            n_imported += 1
-            if iban_col != "(aucune)" and row.get(iban_col):
-                matches = find_iban_matches(client, org_id, str(row[iban_col]))
-                matches = [m for m in matches if m["record_id"] != record["id"]]
-                if matches:
-                    for m in matches:
-                        create_dedup_alert(
-                            client, org_id, record["id"], m["record_id"],
-                            note=f"IBAN déjà vu dans {m['source_filename']} ({m['imported_at']})",
-                        )
-                    n_alerts += 1
-            progress.progress((i + 1) / max(len(df), 1))
+        n_imported, n_alerts = import_dataframe(
+            client, org_id, uploaded.name, user.id, df,
+            iban_col=iban_col if iban_col != "(aucune)" else None,
+            on_progress=lambda done, total: progress.progress(done / max(total, 1)),
+        )
         st.success(f"{n_imported} lignes importées, {n_alerts} alerte(s) de doublon IBAN créée(s).")
         st.rerun()
 

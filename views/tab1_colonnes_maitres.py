@@ -5,6 +5,7 @@ import streamlit as st
 
 from trieur.matching import DEFAULT_MASTER_COLUMNS
 from trieur.persistence import save_master_columns
+from views._auth import optional_login_ctx
 from views._ui import confirm_delete_button
 
 
@@ -14,32 +15,20 @@ def _render_account_memory():
     Permet de retrouver un jeu de colonnes maitres nomme, lie au compte,
     quel que soit l'environnement -- distinct des colonnes par
     organisation (onglet Base de donnees)."""
-    if "auth_session" not in st.session_state:
-        return
-
-    try:
-        configured = "supabase" in st.secrets
-    except Exception:
-        configured = False
-    if not configured:
+    ctx = optional_login_ctx()
+    if ctx is None:
         return
 
     from trieur.db import (
-        get_client,
-        get_my_profile,
         list_user_column_sets,
         save_user_column_set,
         delete_user_column_set,
         set_active_column_set,
     )
 
-    client = get_client()
-    session = st.session_state["auth_session"]
-    client.auth.set_session(session.access_token, session.refresh_token)
-    user = session.user
-    profile = get_my_profile(client, user.id)
-    if not profile:
-        return
+    client = ctx["client"]
+    user = ctx["user"]
+    profile = ctx["profile"]
 
     # Applique UNE FOIS par session le dernier jeu actif enregistre sur le
     # compte, exactement comme le secours localStorage (app.py) le fait deja

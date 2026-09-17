@@ -273,6 +273,54 @@ def insert_record(client: Client, org_id: str, batch_id: str, row: dict) -> dict
     return res.data[0]
 
 
+def import_dataframe(
+    client: Client,
+    org_id: str,
+    source_filename: str,
+    imported_by: str,
+    df,
+    iban_col: str | None = None,
+    on_progress=None,
+) -> tuple[int, int]:
+    """Importe chaque ligne de `df` dans l'environnement `org_id`, avec
+    vérification de doublon IBAN contre TOUT l'historique déjà en base
+    (pas seulement ce fichier) -- unique chemin d'import, que ce soit
+    depuis l'upload direct de l'onglet Base de données ou depuis le
+    bouton "Enregistrer dans la base de données" du Trieur de Data
+    (onglet Export), pour ne jamais avoir deux logiques de dédoublonnage
+    qui divergent. Retourne (n_imported, n_alerts)."""
+    batch = create_import_batch(client, org_id, source_filename, imported_by, len(df))
+    rows = df.to_dict(orient="records")
+    n_imported, n_alerts = 0, 0
+    for i, row in enumerate(rows):
+        # Une cellule vide devient NaN (float) cote pandas -- vrai en
+        # booleen (`if row.get(...)`) et non serialisable en JSON standard
+        # (jsonb Postgres refuse le token NaN) : converti en None avant tout
+        # usage, sinon l'import plante sur la premiere colonne vide venue.
+        row = {k: (None if isinstance(v, float) and v != v else v) for k, v in row.items()}
+        # La colonne générée `records.iban_normalized` (voir
+        # supabase/migrations/0001_init.sql) lit la clé JSON fixe "iban"
+        # (minuscule) -- jamais le nom réel choisi pour la colonne IBAN
+        # dans le fichier importé (ex: "IBAN", "Référence bancaire"...).
+        if iban_col and row.get(iban_col):
+            row["iban"] = row[iban_col]
+        record = insert_record(client, org_id, batch["id"], row)
+        n_imported += 1
+        if iban_col and row.get(iban_col):
+            matches = find_iban_matches(client, org_id, str(row[iban_col]))
+            matches = [m for m in matches if m["record_id"] != record["id"]]
+            if matches:
+                for m in matches:
+                    create_dedup_alert(
+                        client, org_id, record["id"], m["record_id"],
+                        note=f"IBAN déjà vu dans {m['source_filename']} ({m['imported_at']})",
+                    )
+                n_alerts += 1
+        if on_progress:
+            on_progress(i + 1, len(rows))
+    return n_imported, n_alerts
+
+
 def count_records(client: Client, org_id: str) -> int:
     res = _td(client, "records").select("id", count="exact").eq("org_id", org_id).limit(1).execute()
     return res.count or 0

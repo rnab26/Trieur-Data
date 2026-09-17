@@ -1,24 +1,34 @@
 # =============================================================
 # Base de données : mémoire persistante du Trieur de Data, par
-# organisation (Leads / Prélèvement) -- colonnes maîtres propres à
-# l'environnement, import avec vérification de doublon IBAN contre
+# organisation (Leads / Prélèvement) -- liste des clients importés
+# (avec recherche), import avec vérification de doublon IBAN contre
 # tout l'historique en base, file d'alertes à résoudre à la main.
+# Les réglages (colonnes maîtres de l'environnement) sont dans un
+# tiroir séparé, discret -- ce n'est pas le contenu principal de cet
+# onglet.
 #
 # Accessible à tout membre connecté de l'organisation (pas réservé aux
 # administrateurs -- contrairement au Cockpit, qui lui ne concerne que
 # le développement du logiciel).
+#
+# Vue provisoire : le format définitif (colonnes affichées, filtres)
+# sera revu une fois un exemple réel (Excel Prélèvement) reçu -- voir
+# le chantier Cockpit correspondant.
 # =============================================================
 
 import pandas as pd
 import streamlit as st
 
 from trieur.db import (
+    count_records,
     create_dedup_alert,
     create_import_batch,
+    delete_record,
     find_iban_matches,
     get_org_master_columns,
     insert_record,
     list_dedup_alerts,
+    list_records,
     resolve_dedup_alert,
     save_org_master_columns,
 )
@@ -42,6 +52,7 @@ def render():
     ctx = require_login()
     client = ctx["client"]
     user = ctx["user"]
+    is_admin = ctx["profile"].get("is_super_admin")
 
     all_orgs = accessible_organizations(ctx)
     if not all_orgs:
@@ -56,77 +67,18 @@ def render():
         key="db_org_select",
     )
 
-    st.markdown("##### Colonnes maîtres de cet environnement")
-    current_cols = get_org_master_columns(client, org_id)
-    is_admin = ctx["profile"].get("is_super_admin")
-    cols_text = st.text_area(
-        "Une colonne par ligne",
-        value="\n".join(current_cols),
-        key=f"org_cols_{org_id}",
-        height=150,
-        disabled=not is_admin,
-    )
-    if is_admin:
-        if st.button("Enregistrer les colonnes maîtres", key=f"save_cols_{org_id}"):
-            new_cols = [c.strip() for c in cols_text.splitlines() if c.strip()]
-            save_org_master_columns(client, org_id, new_cols)
-            st.success("Colonnes maîtres enregistrées.")
-            st.rerun()
-    else:
-        st.caption("Réglage de l'organisation, modifiable par un administrateur uniquement.")
+    _render_alerts(client, org_id, user)
+    _render_client_list(client, org_id)
+    _render_import(client, org_id, user)
+    _render_settings(client, org_id, is_admin)
 
-    st.divider()
-    st.markdown("##### Importer un fichier dans la base (avec vérification IBAN)")
-    st.caption(
-        "Chaque ligne est comparée à TOUT l'historique déjà en base pour cet "
-        "environnement (pas juste ce fichier) — un même IBAN déjà vu, même "
-        "sous un autre nom, déclenche une alerte au lieu d'être importé en "
-        "double silencieusement."
-    )
 
-    uploaded = st.file_uploader("Fichier CSV ou Excel", type=["csv", "xlsx"], key=f"upload_{org_id}")
-    if uploaded is not None:
-        try:
-            df = pd.read_csv(uploaded) if uploaded.name.endswith(".csv") else pd.read_excel(uploaded)
-        except Exception as exc:
-            st.error(f"Impossible de lire le fichier : {exc}")
-            return
-
-        st.dataframe(df.head(10), use_container_width=True)
-        iban_col = st.selectbox(
-            "Quelle colonne contient l'IBAN ?",
-            options=["(aucune)"] + list(df.columns),
-            key=f"iban_col_{org_id}",
-        )
-
-        if st.button("Vérifier et importer", type="primary", key=f"import_{org_id}"):
-            batch = create_import_batch(client, org_id, uploaded.name, user.id, len(df))
-            n_imported, n_alerts = 0, 0
-            progress = st.progress(0.0)
-            for i, row in enumerate(df.to_dict(orient="records")):
-                record = insert_record(client, org_id, batch["id"], row)
-                n_imported += 1
-                if iban_col != "(aucune)" and row.get(iban_col):
-                    matches = find_iban_matches(client, org_id, str(row[iban_col]))
-                    matches = [m for m in matches if m["record_id"] != record["id"]]
-                    if matches:
-                        for m in matches:
-                            create_dedup_alert(
-                                client, org_id, record["id"], m["record_id"],
-                                note=f"IBAN déjà vu dans {m['source_filename']} ({m['imported_at']})",
-                            )
-                        n_alerts += 1
-                progress.progress((i + 1) / max(len(df), 1))
-            st.success(f"{n_imported} lignes importées, {n_alerts} alerte(s) de doublon IBAN créée(s).")
-            st.rerun()
-
-    st.divider()
-    st.markdown("##### Alertes de doublon en attente")
+def _render_alerts(client, org_id, user):
     alerts = list_dedup_alerts(client, org_id, status="pending")
     if not alerts:
-        st.caption("Aucune alerte en attente.")
         return
 
+    st.warning(f"⚠️ {len(alerts)} alerte(s) de doublon IBAN en attente")
     for alert in alerts:
         with st.container(border=True):
             st.write("**Nouvelle ligne :**", alert["record"]["data"])
@@ -141,3 +93,124 @@ def render():
                 if st.button("Ce sont 2 personnes différentes", key=f"ok_{alert['id']}"):
                     resolve_dedup_alert(client, alert["id"], "confirmed_different", user.id)
                     st.rerun()
+    st.divider()
+
+
+def _render_client_list(client, org_id):
+    total = count_records(client, org_id)
+    st.markdown(f"##### Clients importés ({total})")
+
+    if total == 0:
+        st.caption("Aucun client importé pour l'instant dans cet environnement.")
+        st.divider()
+        return
+
+    search = st.text_input("🔎 Rechercher (nom, IBAN, email...)", key=f"search_{org_id}")
+    records = list_records(client, org_id)
+
+    rows = []
+    for r in records:
+        data = r["data"] or {}
+        if search:
+            haystack = " ".join(str(v) for v in data.values()).lower()
+            if search.lower() not in haystack:
+                continue
+        batch = r.get("import_batches") or {}
+        rows.append({
+            "_id": r["id"],
+            **data,
+            "Fichier source": batch.get("source_filename"),
+            "Importé le": batch.get("imported_at"),
+        })
+
+    if not rows:
+        st.caption("Aucun résultat pour cette recherche.")
+        st.divider()
+        return
+
+    df = pd.DataFrame(rows)
+    st.caption(f"{len(rows)} résultat(s) affiché(s) (300 plus récents max, avant recherche).")
+    st.dataframe(df.drop(columns=["_id"]), use_container_width=True, height=300)
+
+    with st.expander("🗑️ Supprimer un client"):
+        options = {r["_id"]: " ".join(str(v) for v in r.items() if v)[:80] for r in rows}
+        to_delete = st.selectbox(
+            "Choisir la ligne à supprimer",
+            options=list(options.keys()),
+            format_func=lambda rid: options[rid],
+            key=f"delete_select_{org_id}",
+        )
+        if st.button("Confirmer la suppression", key=f"delete_confirm_{org_id}"):
+            delete_record(client, to_delete)
+            st.success("Client supprimé.")
+            st.rerun()
+
+    st.divider()
+
+
+def _render_import(client, org_id, user):
+    st.markdown("##### Importer un fichier dans la base (avec vérification IBAN)")
+    st.caption(
+        "Chaque ligne est comparée à TOUT l'historique déjà en base pour cet "
+        "environnement (pas juste ce fichier) — un même IBAN déjà vu, même "
+        "sous un autre nom, déclenche une alerte au lieu d'être importé en "
+        "double silencieusement."
+    )
+
+    uploaded = st.file_uploader("Fichier CSV ou Excel", type=["csv", "xlsx"], key=f"upload_{org_id}")
+    if uploaded is None:
+        return
+
+    try:
+        df = pd.read_csv(uploaded) if uploaded.name.endswith(".csv") else pd.read_excel(uploaded)
+    except Exception as exc:
+        st.error(f"Impossible de lire le fichier : {exc}")
+        return
+
+    st.dataframe(df.head(10), use_container_width=True)
+    iban_col = st.selectbox(
+        "Quelle colonne contient l'IBAN ?",
+        options=["(aucune)"] + list(df.columns),
+        key=f"iban_col_{org_id}",
+    )
+
+    if st.button("Vérifier et importer", type="primary", key=f"import_{org_id}"):
+        batch = create_import_batch(client, org_id, uploaded.name, user.id, len(df))
+        n_imported, n_alerts = 0, 0
+        progress = st.progress(0.0)
+        for i, row in enumerate(df.to_dict(orient="records")):
+            record = insert_record(client, org_id, batch["id"], row)
+            n_imported += 1
+            if iban_col != "(aucune)" and row.get(iban_col):
+                matches = find_iban_matches(client, org_id, str(row[iban_col]))
+                matches = [m for m in matches if m["record_id"] != record["id"]]
+                if matches:
+                    for m in matches:
+                        create_dedup_alert(
+                            client, org_id, record["id"], m["record_id"],
+                            note=f"IBAN déjà vu dans {m['source_filename']} ({m['imported_at']})",
+                        )
+                    n_alerts += 1
+            progress.progress((i + 1) / max(len(df), 1))
+        st.success(f"{n_imported} lignes importées, {n_alerts} alerte(s) de doublon IBAN créée(s).")
+        st.rerun()
+
+
+def _render_settings(client, org_id, is_admin):
+    with st.expander("⚙️ Réglages de l'environnement (colonnes maîtres)"):
+        current_cols = get_org_master_columns(client, org_id)
+        cols_text = st.text_area(
+            "Une colonne par ligne",
+            value="\n".join(current_cols),
+            key=f"org_cols_{org_id}",
+            height=120,
+            disabled=not is_admin,
+        )
+        if is_admin:
+            if st.button("Enregistrer les colonnes maîtres", key=f"save_cols_{org_id}"):
+                new_cols = [c.strip() for c in cols_text.splitlines() if c.strip()]
+                save_org_master_columns(client, org_id, new_cols)
+                st.success("Colonnes maîtres enregistrées.")
+                st.rerun()
+        else:
+            st.caption("Réglage de l'organisation, modifiable par un administrateur uniquement.")

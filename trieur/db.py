@@ -160,6 +160,31 @@ def insert_record(client: Client, org_id: str, batch_id: str, row: dict) -> dict
     return res.data[0]
 
 
+def count_records(client: Client, org_id: str) -> int:
+    res = _td(client, "records").select("id", count="exact").eq("org_id", org_id).limit(1).execute()
+    return res.count or 0
+
+
+def list_records(client: Client, org_id: str, limit: int = 300) -> list[dict]:
+    """Derniers clients importés pour cet environnement, avec le fichier et
+    la date d'import d'origine -- vue "liste" simple (recherche/filtre côté
+    Python pour l'instant, le format final dépendra du modèle réel une fois
+    l'Excel de référence reçu)."""
+    res = (
+        _td(client, "records")
+        .select("id, data, created_at, import_batches(source_filename, imported_at)")
+        .eq("org_id", org_id)
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return res.data or []
+
+
+def delete_record(client: Client, record_id: str) -> None:
+    _td(client, "records").delete().eq("id", record_id).execute()
+
+
 def create_dedup_alert(client: Client, org_id: str, record_id: str, matched_record_id: str, note: str = "") -> None:
     _td(client, "dedup_alerts").insert({
         "org_id": org_id,

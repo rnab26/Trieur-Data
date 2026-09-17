@@ -20,15 +20,18 @@ import pandas as pd
 import streamlit as st
 
 from trieur.db import (
+    LIST_PAGE_SIZE,
     count_records,
     delete_record,
     get_org_master_columns,
     import_dataframe,
+    list_all_records,
     list_dedup_alerts,
     list_records,
     resolve_dedup_alert,
     save_org_master_columns,
 )
+from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
 from views._auth import accessible_organizations, require_login
 from views._ui import clear_stale_widgets, confirm_delete_button
 
@@ -66,7 +69,7 @@ def render():
     )
 
     _render_alerts(client, org_id, user)
-    _render_client_list(client, org_id)
+    _render_client_list(client, org_id, org_labels[org_id])
     _render_import(client, org_id, user)
     _render_settings(client, org_id, is_admin)
 
@@ -94,9 +97,6 @@ def _render_alerts(client, org_id, user):
     st.divider()
 
 
-_LIST_PAGE_SIZE = 300
-
-
 def _records_cache_key(org_id):
     return f"db_records_cache_{org_id}"
 
@@ -108,28 +108,12 @@ def invalidate_client_list_cache(org_id):
     st.session_state.pop(_records_cache_key(org_id), None)
 
 
-def _render_client_list(client, org_id):
-    total = count_records(client, org_id)
-    st.markdown(f"##### Clients importés ({total})")
-
-    if total == 0:
-        st.caption("Aucun client importé pour l'instant dans cet environnement.")
-        st.divider()
-        return
-
-    # Lot charge, mis en cache de session pour que "Charger plus" ne
-    # retelecharge pas depuis le debut a chaque clic (offset sur le lot
-    # deja charge -- voir trieur/db.py:list_records). Invalide par tout
-    # import ou toute suppression sur cet environnement.
-    cache_key = _records_cache_key(org_id)
-    if cache_key not in st.session_state:
-        st.session_state[cache_key] = list_records(client, org_id, limit=_LIST_PAGE_SIZE)
-    records = st.session_state[cache_key]
-
-    search = st.text_input("🔎 Rechercher (nom, IBAN, email...)", key=f"search_{org_id}")
-    master_cols = get_org_master_columns(client, org_id)
-
-    all_rows = []
+def _build_rows(records, master_cols):
+    """Aplati les lignes brutes Supabase (data jsonb + fichier d'import)
+    en dictionnaires plats -- partagé entre l'affichage paginé et l'export
+    complet pour ne jamais avoir deux logiques de mise en forme qui
+    divergent."""
+    rows = []
     for r in records:
         data = r["data"] or {}
         batch = r.get("import_batches") or {}
@@ -144,7 +128,125 @@ def _render_client_list(client, org_id):
                 row[key] = value
         row["Fichier source"] = batch.get("source_filename")
         row["Importé le"] = batch.get("imported_at")
-        all_rows.append(row)
+        rows.append(row)
+    return rows
+
+
+def _filter_by_search(rows, search):
+    if not search:
+        return rows
+    needle = search.lower()
+    return [
+        r for r in rows
+        if needle in " ".join(str(v) for k, v in r.items() if k != "_id" and v).lower()
+    ]
+
+
+def _filter_by_columns(rows, col_filters):
+    if not col_filters:
+        return rows
+    return [
+        r for r in rows
+        if all(col_filters[c] in str(r.get(c) or "").lower() for c in col_filters)
+    ]
+
+
+def _render_export(client, org_id, org_name, total, search, col_filters, all_cols, visible_cols, master_cols):
+    with st.expander("💾 Exporter ces résultats"):
+        st.caption(
+            "Exporte TOUT l'environnement (pas seulement le lot déjà chargé "
+            "à l'écran), avec la même recherche et les mêmes filtres par "
+            "colonne qu'en ce moment. Une colonne que tu as explicitement "
+            "masquée à l'écran reste masquée ; une colonne pas encore vue "
+            "à l'écran (hors du lot chargé) est incluse quand même, pour "
+            "ne jamais perdre de donnée en silence."
+        )
+        sig = (org_id, search, tuple(sorted(col_filters.items())), tuple(visible_cols), total)
+        file_base = sanitize_filename(org_name, default="export_base")
+
+        def _export_df():
+            # Colonnes explicitement masquees par l'utilisateur (presentes
+            # dans le lot affiche mais retirees de "Colonnes affichees") --
+            # celles-ci restent hors export. Toute AUTRE colonne, meme
+            # jamais vue a l'ecran (hors du lot deja charge), est incluse :
+            # sinon un fichier plus ancien avec une colonne non encore
+            # decouverte perdrait cette donnee en silence a l'export.
+            all_records = list_all_records(client, org_id)
+            rows = _filter_by_columns(_filter_by_search(_build_rows(all_records, master_cols), search), col_filters)
+            full_cols = []
+            for row in rows:
+                for c in row.keys():
+                    if c != "_id" and c not in full_cols:
+                        full_cols.append(c)
+            explicitly_hidden = set(all_cols) - set(visible_cols)
+            export_cols = [c for c in full_cols if c not in explicitly_hidden] or full_cols
+            df = pd.DataFrame(rows) if rows else pd.DataFrame()
+            for c in export_cols:
+                if c not in df.columns:
+                    df[c] = None
+            return df[export_cols] if export_cols else df
+
+        def _cached_export_df():
+            # Un seul fetch complet partage entre CSV et Excel -- sans ce
+            # cache, cliquer les deux boutons relancerait deux fois le
+            # meme scan paginé de tout l'environnement.
+            cache_key = f"_db_export_df_{org_id}"
+            cached = st.session_state.get(cache_key)
+            if cached and cached[0] == sig:
+                return cached[1]
+            df = _export_df()
+            st.session_state[cache_key] = (sig, df)
+            return df
+
+        col_csv, col_xlsx = st.columns(2)
+        with col_csv:
+            if st.button("⚙️ Préparer le CSV", key=f"db_export_csv_prep_{org_id}"):
+                with st.spinner("Récupération de tout l'environnement..."):
+                    st.session_state[f"_db_export_csv_{org_id}"] = (sig, export_csv_safe(_cached_export_df()))
+            cached = st.session_state.get(f"_db_export_csv_{org_id}")
+            if cached and cached[0] == sig and cached[1]:
+                st.download_button(
+                    "💾 Télécharger CSV", data=cached[1],
+                    file_name=f"{file_base}.csv",
+                    mime="text/csv", key=f"db_export_csv_dl_{org_id}",
+                )
+        with col_xlsx:
+            if st.button("⚙️ Préparer l'Excel", key=f"db_export_xlsx_prep_{org_id}"):
+                with st.spinner("Récupération de tout l'environnement..."):
+                    buf = export_excel_safe(_cached_export_df())
+                    st.session_state[f"_db_export_xlsx_{org_id}"] = (sig, buf.getvalue() if buf else None)
+            cachedx = st.session_state.get(f"_db_export_xlsx_{org_id}")
+            if cachedx and cachedx[0] == sig and cachedx[1]:
+                st.download_button(
+                    "💾 Télécharger Excel", data=cachedx[1],
+                    file_name=f"{file_base}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"db_export_xlsx_dl_{org_id}",
+                )
+
+
+def _render_client_list(client, org_id, org_name):
+    total = count_records(client, org_id)
+    st.markdown(f"##### Clients importés ({total})")
+
+    if total == 0:
+        st.caption("Aucun client importé pour l'instant dans cet environnement.")
+        st.divider()
+        return
+
+    # Lot charge, mis en cache de session pour que "Charger plus" ne
+    # retelecharge pas depuis le debut a chaque clic (offset sur le lot
+    # deja charge -- voir trieur/db.py:list_records). Invalide par tout
+    # import ou toute suppression sur cet environnement.
+    cache_key = _records_cache_key(org_id)
+    if cache_key not in st.session_state:
+        st.session_state[cache_key] = list_records(client, org_id, limit=LIST_PAGE_SIZE)
+    records = st.session_state[cache_key]
+
+    search = st.text_input("🔎 Rechercher (nom, IBAN, email...)", key=f"search_{org_id}")
+    master_cols = get_org_master_columns(client, org_id)
+
+    all_rows = _build_rows(records, master_cols)
 
     # Colonnes connues sur ce lot charge -- calculees AVANT la recherche
     # texte et les filtres, pour que la liste de colonnes (et donc la
@@ -156,13 +258,7 @@ def _render_client_list(client, org_id):
             if c != "_id" and c not in all_cols:
                 all_cols.append(c)
 
-    rows = all_rows
-    if search:
-        needle = search.lower()
-        rows = [
-            r for r in rows
-            if needle in " ".join(str(v) for k, v in r.items() if k != "_id" and v).lower()
-        ]
+    rows = _filter_by_search(all_rows, search)
 
     with st.expander("🔎 Filtres par colonne"):
         st.caption("Chaque filtre garde les lignes qui CONTIENNENT le texte tapé (insensible à la casse). Combinés entre eux.")
@@ -174,11 +270,7 @@ def _render_client_list(client, org_id):
                 if val.strip():
                     col_filters[col] = val.strip().lower()
 
-    if col_filters:
-        rows = [
-            r for r in rows
-            if all(col_filters[c] in str(r.get(c) or "").lower() for c in col_filters)
-        ]
+    rows = _filter_by_columns(rows, col_filters)
 
     # Colonnes affichees : preference de session (pas encore persistee entre
     # connexions -- voir "vues enregistrees", chantier suivant). Sanitize
@@ -237,10 +329,12 @@ def _render_client_list(client, org_id):
 
     if len(records) < total:
         remaining = total - len(records)
-        if st.button(f"⬇️ Charger {min(_LIST_PAGE_SIZE, remaining)} client(s) de plus (sur {remaining} restants)", key=f"loadmore_{org_id}"):
-            more = list_records(client, org_id, limit=_LIST_PAGE_SIZE, offset=len(records))
+        if st.button(f"⬇️ Charger {min(LIST_PAGE_SIZE, remaining)} client(s) de plus (sur {remaining} restants)", key=f"loadmore_{org_id}"):
+            more = list_records(client, org_id, limit=LIST_PAGE_SIZE, offset=len(records))
             st.session_state[cache_key] = records + more
             st.rerun()
+
+    _render_export(client, org_id, org_name, total, search, col_filters, all_cols, visible_cols, master_cols)
 
     st.divider()
 

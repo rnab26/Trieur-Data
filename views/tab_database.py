@@ -30,7 +30,7 @@ from trieur.db import (
     save_org_master_columns,
 )
 from views._auth import accessible_organizations, require_login
-from views._ui import clear_stale_widgets
+from views._ui import clear_stale_widgets, confirm_delete_button
 
 
 def render():
@@ -94,6 +94,9 @@ def _render_alerts(client, org_id, user):
     st.divider()
 
 
+_LIST_PAGE_SIZE = 300
+
+
 def _render_client_list(client, org_id):
     total = count_records(client, org_id)
     st.markdown(f"##### Clients importés ({total})")
@@ -103,8 +106,11 @@ def _render_client_list(client, org_id):
         st.divider()
         return
 
+    limit_key = f"db_list_limit_{org_id}"
+    limit = st.session_state.get(limit_key, _LIST_PAGE_SIZE)
+
     search = st.text_input("🔎 Rechercher (nom, IBAN, email...)", key=f"search_{org_id}")
-    records = list_records(client, org_id)
+    records = list_records(client, org_id, limit=limit)
     master_cols = get_org_master_columns(client, org_id)
 
     rows = []
@@ -133,24 +139,86 @@ def _render_client_list(client, org_id):
         st.divider()
         return
 
-    df = pd.DataFrame(rows)
-    st.caption(f"{len(rows)} résultat(s) affiché(s) (300 plus récents max, avant recherche).")
-    st.dataframe(df.drop(columns=["_id"]), use_container_width=True, height=300)
+    # Colonnes connues sur ce lot charge (pas seulement apres recherche/
+    # filtre, pour que la liste de colonnes ne varie pas silencieusement
+    # quand on tape dans la recherche).
+    all_cols = []
+    for row in rows:
+        for c in row.keys():
+            if c != "_id" and c not in all_cols:
+                all_cols.append(c)
 
-    with st.expander("🗑️ Supprimer un client"):
-        options = {
-            r["_id"]: " ".join(str(v) for k, v in r.items() if k != "_id" and v)[:80]
-            for r in rows
-        }
-        to_delete = st.selectbox(
-            "Choisir la ligne à supprimer",
-            options=list(options.keys()),
-            format_func=lambda rid: options[rid],
-            key=f"delete_select_{org_id}",
-        )
-        if st.button("Confirmer la suppression", key=f"delete_confirm_{org_id}"):
-            delete_record(client, to_delete)
-            st.success("Client supprimé.")
+    with st.expander("🔎 Filtres par colonne"):
+        st.caption("Chaque filtre garde les lignes qui CONTIENNENT le texte tapé (insensible à la casse). Combinés entre eux.")
+        col_filters = {}
+        filt_cols = st.columns(2)
+        for i, col in enumerate(all_cols):
+            with filt_cols[i % 2]:
+                val = st.text_input(col, key=f"colfilter_{org_id}_{col}", placeholder="contient...")
+                if val.strip():
+                    col_filters[col] = val.strip().lower()
+
+    if col_filters:
+        rows = [
+            r for r in rows
+            if all(col_filters[c] in str(r.get(c) or "").lower() for c in col_filters)
+        ]
+
+    if not rows:
+        st.caption("Aucun résultat pour ces filtres.")
+        st.divider()
+        return
+
+    # Colonnes affichees : preference de session (pas encore persistee entre
+    # connexions -- voir "vues enregistrees", chantier suivant). Sanitize
+    # d'abord une selection perimee (colonne qui n'existe plus dans ce lot)
+    # pour ne jamais faire planter le multiselect.
+    visible_key = f"db_visible_cols_{org_id}"
+    if visible_key in st.session_state:
+        st.session_state[visible_key] = [c for c in st.session_state[visible_key] if c in all_cols]
+    visible_cols = st.multiselect(
+        "Colonnes affichées",
+        options=all_cols,
+        default=all_cols,
+        key=visible_key,
+    )
+    if not visible_cols:
+        st.warning("⚠️ Aucune colonne sélectionnée : toutes affichées par défaut.")
+        visible_cols = all_cols
+
+    df = pd.DataFrame(rows)
+    row_ids = list(df["_id"])
+    st.caption(
+        f"{len(rows)} résultat(s) affiché(s) sur {len(records)} chargé(s) "
+        f"({total} au total dans l'environnement). Clique un en-tête de "
+        "colonne pour trier ; coche des lignes pour les supprimer ensemble."
+    )
+    selection_key = f"db_table_select_{org_id}"
+    event = st.dataframe(
+        df[visible_cols],
+        use_container_width=True,
+        height=300,
+        hide_index=True,
+        key=selection_key,
+        on_select="rerun",
+        selection_mode="multi-row",
+    )
+    selected_rows = (getattr(event, "selection", None) or {}).get("rows", [])
+
+    if selected_rows:
+        selected_ids = [row_ids[i] for i in selected_rows]
+        st.write(f"**{len(selected_ids)} ligne(s) sélectionnée(s).**")
+        if confirm_delete_button(f"🗑️ Supprimer la sélection ({len(selected_ids)})", key=f"bulk_delete_{org_id}"):
+            for rid in selected_ids:
+                delete_record(client, rid)
+            st.success(f"{len(selected_ids)} client(s) supprimé(s).")
+            clear_stale_widgets(f"_confirm_pending_bulk_delete_{org_id}")
+            st.rerun()
+
+    if len(records) == limit and len(records) < total:
+        remaining = total - len(records)
+        if st.button(f"⬇️ Charger {min(_LIST_PAGE_SIZE, remaining)} client(s) de plus (sur {remaining} restants)", key=f"loadmore_{org_id}"):
+            st.session_state[limit_key] = limit + _LIST_PAGE_SIZE
             st.rerun()
 
     st.divider()

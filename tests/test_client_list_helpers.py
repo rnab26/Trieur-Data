@@ -1,8 +1,13 @@
 """Teste les fonctions pures extraites de views/tab_database.py
-(_build_rows, _filter_by_search, _filter_by_columns) : partagées entre
-l'affichage paginé de la liste clients et l'export complet -- un bug ici
-casse les deux en même temps."""
-from views.tab_database import _build_rows, _filter_by_columns, _filter_by_search
+(_build_rows, _filter_by_search, _filter_by_columns, _resolve_modifier_names)
+: partagées entre l'affichage paginé de la liste clients et l'export
+complet -- un bug ici casse les deux en même temps."""
+from views.tab_database import (
+    _build_rows,
+    _filter_by_columns,
+    _filter_by_search,
+    _resolve_modifier_names,
+)
 
 
 def test_build_rows_master_columns_first_then_extras():
@@ -22,13 +27,91 @@ def test_build_rows_master_columns_first_then_extras():
         "EXTRA": "z",
         "Fichier source": "a.csv",
         "Importé le": "2026-01-01",
+        "Modifié le": None,
+        "_modifie_par_id": None,
     }]
 
 
 def test_build_rows_missing_data_or_batch_does_not_crash():
     records = [{"id": "r1", "data": None, "import_batches": None}]
     rows = _build_rows(records, master_cols=["NOM"])
-    assert rows == [{"_id": "r1", "NOM": None, "Fichier source": None, "Importé le": None}]
+    assert rows == [{
+        "_id": "r1", "NOM": None, "Fichier source": None, "Importé le": None,
+        "Modifié le": None, "_modifie_par_id": None,
+    }]
+
+
+def test_build_rows_surfaces_raw_update_fields():
+    records = [{
+        "id": "r1", "data": {}, "import_batches": {},
+        "updated_at": "2026-02-01T10:00:00Z", "updated_by": "user-1",
+    }]
+    rows = _build_rows(records, master_cols=[])
+    assert rows[0]["Modifié le"] == "2026-02-01T10:00:00Z"
+    assert rows[0]["_modifie_par_id"] == "user-1"
+
+
+class _FakeClientForNames:
+    """Faux client minimal pour _resolve_modifier_names : seul
+    get_profiles_map (trieur.db) l'utilise, via .postgrest.schema(...)
+    .table("profiles").select(...).in_(...).execute()."""
+
+    class _Table:
+        def __init__(self, profiles):
+            self._profiles = profiles
+            self._ids = None
+
+        def select(self, *_a, **_k):
+            return self
+
+        def in_(self, _field, ids):
+            self._ids = set(ids)
+            return self
+
+        def execute(self):
+            from types import SimpleNamespace
+            return SimpleNamespace(data=[p for p in self._profiles if p["id"] in self._ids])
+
+    class _Postgrest:
+        def __init__(self, profiles):
+            self._profiles = profiles
+
+        def schema(self, _name):
+            return self
+
+        def table(self, _name):
+            return _FakeClientForNames._Table(self._profiles)
+
+    def __init__(self, profiles):
+        self.postgrest = self._Postgrest(profiles)
+
+
+def test_resolve_modifier_names_replaces_id_with_full_name():
+    client = _FakeClientForNames(profiles=[{"id": "user-1", "full_name": "Alice"}])
+    rows = [{"_id": "r1", "_modifie_par_id": "user-1"}]
+
+    result = _resolve_modifier_names(client, rows)
+
+    assert result[0]["Modifié par"] == "Alice"
+    assert "_modifie_par_id" not in result[0]
+
+
+def test_resolve_modifier_names_unresolvable_id_becomes_quelquun():
+    client = _FakeClientForNames(profiles=[])
+    rows = [{"_id": "r1", "_modifie_par_id": "user-unknown"}]
+
+    result = _resolve_modifier_names(client, rows)
+
+    assert result[0]["Modifié par"] == "quelqu'un"
+
+
+def test_resolve_modifier_names_never_modified_stays_none():
+    client = _FakeClientForNames(profiles=[])
+    rows = [{"_id": "r1", "_modifie_par_id": None}]
+
+    result = _resolve_modifier_names(client, rows)
+
+    assert result[0]["Modifié par"] is None
 
 
 def test_filter_by_search_is_case_insensitive_and_ignores_id():

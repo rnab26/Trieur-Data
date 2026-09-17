@@ -20,26 +20,37 @@ Prélèvement, statut "attente_retour") — table `trieur_data.chantiers`,
 avec le contexte complet en message. Le mettre à jour là-bas en plus
 d'ici quand ça avance.
 
-**Bloquant (jamais deviner un format bancaire)** — en attente de
-l'utilisateur :
-1. [ ] Un exemple réel de fichier XML actuellement accepté par la banque
-   du père (données bidons OK) — pour la version exacte du schéma.
-2. [ ] L'ICS (Identifiant Créancier SEPA) de l'organisme.
+**2026-09-17 (suite) — Échantillon réel reçu et analysé** :
+- [x] L'utilisateur a fourni un vrai fichier XML accepté par la banque du
+  père — **contenait de vraies données personnelles/bancaires**, jamais
+  copié dans ce dépôt. Une tentative de script pour en tirer
+  automatiquement une version anonymisée a été bloquée par un garde-fou
+  de la plateforme ("Sensitive-Source Provenance") — pas de détour
+  cherché, la référence a été réécrite à la main à partir de la
+  structure observée (`tests/fixtures/pain008_sample_reference.xml`,
+  100% fictif).
+- Confirmé sur l'échantillon réel : schéma **pain.008.001.08**,
+  regroupement en blocs `<PmtInf>` par (date de prélèvement, FRST/RCUR).
+  **Le BIC débiteur est bien exigé par cette banque** (pas de règle
+  "IBAN seul" appliquée ici) — donc le BIC doit venir des données
+  source, jamais dérivé ou deviné depuis l'IBAN.
+- [x] `trieur/sepa.py.build_pain008_xml()` écrit et testé (10 tests,
+  structure comparée à la référence). Lève `SepaXmlError` plutôt que de
+  générer un fichier avec un champ manquant/deviné.
+- [ ] **Toujours en attente** : l'ICS de l'organisme (pas transmis avec
+  le fichier), et l'Excel du père (règles de contrôle, second volet du
+  chantier).
+- [ ] Pas encore branché à l'interface (onglet Base de données) : reste
+  à décider les noms de colonnes Prélèvement pour IBAN/BIC/ICS créancier
+  (config organisation), et BIC débiteur/RUM/montant/date de signature
+  par ligne (probablement dans l'Excel du père, pas encore reçu) + la
+  date de prélèvement demandée (saisie manuelle ou déduite).
 
-**Déjà fait sans attendre** (ne dépend pas du format bancaire exact) :
-- [x] `trieur/sepa.py` : déduction FRST (premier prélèvement) / RCUR
-  (récurrent) à partir de l'historique IBAN déjà en base
-  (`find_iban_matches`, chantier du 2026-09-16). Logique pure, testée
-  unitairement, séparée de l'accès base.
-- [x] `trieur.db.get_sepa_sequence_type(client, org_id, iban)` — le
-  branchement DB.
-
-**Champs pain.008 encore manquants dans le modèle de données**, à
-ajouter une fois le point bloquant levé : ICS (fixe, niveau
-organisation), RUM/référence de mandat (stable par contrat), date de
-signature du mandat, date d'échéance demandée. BIC probablement
-optionnel (règle IBAN seul en zone SEPA) — à confirmer sur l'échantillon
-réel, pas supposer.
+**Déjà fait avant l'échantillon** (fondation indépendante du format) :
+- [x] `trieur/sepa.py.determine_sequence_type` : FRST/RCUR à partir de
+  l'historique IBAN déjà en base (`find_iban_matches`, chantier du
+  2026-09-16).
+- [x] `trieur.db.get_sepa_sequence_type(client, org_id, iban)`.
 
 **Second objectif du même chantier** (mentionné, à cadrer plus tard) :
 étudier l'Excel de contrôle du père une fois reçu pour en extraire les

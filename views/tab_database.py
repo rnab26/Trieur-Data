@@ -24,6 +24,7 @@ from trieur.db import (
     add_org_master_columns,
     count_records,
     delete_record,
+    delete_saved_view,
     get_org_master_columns,
     get_profiles_map,
     get_record,
@@ -31,8 +32,10 @@ from trieur.db import (
     list_all_records,
     list_dedup_alerts,
     list_records,
+    list_saved_views,
     resolve_dedup_alert,
     save_org_master_columns,
+    save_saved_view,
     update_record,
 )
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
@@ -304,6 +307,57 @@ def _render_edit_form(client, org_id, record_id, master_cols, user):
                 st.error("Ce client n'existe plus (supprimé entre-temps) : rien n'a été enregistré.")
 
 
+def _render_saved_views(client, org_id, user, search, all_cols, visible_cols):
+    """Enregistrer/rappeler une combinaison recherche + filtres par
+    colonne + colonnes affichées, sous un nom -- même principe que les
+    filtres enregistrés du Trieur de Data (onglet Filtrage), liée au
+    compte (chaque utilisateur garde ses propres vues)."""
+    views = list_saved_views(client, user.id, org_id)
+
+    with st.expander("👁️ Vues enregistrées", expanded=False):
+        if views:
+            st.markdown("**Vues enregistrées :**")
+        for v in views:
+            c_name, c_apply, c_del = st.columns([4, 1.3, 1.3])
+            with c_name:
+                st.write(v["name"])
+            with c_apply:
+                if st.button("Appliquer", key=f"dbview_apply_{v['id']}", use_container_width=True):
+                    st.session_state[f"_apply_db_view_{org_id}"] = {
+                        "search": v.get("search") or "",
+                        "col_filters": v.get("col_filters") or {},
+                        "visible_cols": v.get("visible_cols") or [],
+                    }
+                    st.rerun()
+            with c_del:
+                if confirm_delete_button("Supprimer", key=f"dbview_del_{v['id']}"):
+                    delete_saved_view(client, v["id"])
+                    st.success(f"Vue « {v['name']} » supprimée.")
+                    st.rerun()
+
+        st.divider()
+        st.caption("Enregistre la recherche, les filtres par colonne et les colonnes affichées actuels.")
+        new_name = st.text_input("Nom de la vue", key=f"dbview_new_name_{org_id}")
+        if st.button("💾 Enregistrer la vue actuelle", key=f"dbview_save_{org_id}"):
+            name = new_name.strip()
+            if not name:
+                st.error("Donne un nom à cette vue.")
+            else:
+                # Valeurs brutes des filtres par colonne (pas la version en
+                # minuscules utilisee pour filtrer) : sinon la case affiche
+                # une version en minuscules apres avoir rappele la vue,
+                # meme si le filtre fonctionne toujours (comparaison
+                # insensible a la casse cote _filter_by_columns).
+                raw_col_filters = {
+                    c: st.session_state.get(f"colfilter_{org_id}_{c}", "").strip()
+                    for c in all_cols
+                    if st.session_state.get(f"colfilter_{org_id}_{c}", "").strip()
+                }
+                save_saved_view(client, user.id, org_id, name, search, raw_col_filters, list(visible_cols))
+                st.success(f"Vue « {name} » enregistrée.")
+                st.rerun()
+
+
 def _render_client_list(client, org_id, org_name, user):
     total = count_records(client, org_id)
     st.markdown(f"##### Clients importés ({total})")
@@ -321,6 +375,25 @@ def _render_client_list(client, org_id, org_name, user):
     if cache_key not in st.session_state:
         st.session_state[cache_key] = list_records(client, org_id, limit=LIST_PAGE_SIZE)
     records = st.session_state[cache_key]
+
+    # Application d'une vue enregistree : positionner AVANT les widgets
+    # (recherche, filtres par colonne, colonnes affichees) concernes --
+    # meme logique que le "pending filter"/"pending preset" des onglets
+    # Filtrage et Export. Les filtres par colonne visent des cles
+    # position-par-NOM (colfilter_{org_id}_{col}) : en poser une pour une
+    # colonne qui n'existe plus dans ce lot est sans effet, pas une
+    # erreur.
+    pending_view = st.session_state.pop(f"_apply_db_view_{org_id}", None)
+    if pending_view is not None:
+        st.session_state[f"search_{org_id}"] = pending_view.get("search") or ""
+        # Vide TOUS les filtres par colonne actuels avant de reposer ceux
+        # de la vue -- sinon un filtre tape avant de rappeler une vue qui
+        # ne le mentionne pas continue de s'appliquer apres, et le
+        # resultat affiche ne correspond plus a ce qui a ete enregistre.
+        clear_stale_widgets(f"colfilter_{org_id}_")
+        for col, val in (pending_view.get("col_filters") or {}).items():
+            st.session_state[f"colfilter_{org_id}_{col}"] = val
+        st.session_state[f"db_visible_cols_{org_id}"] = list(pending_view.get("visible_cols") or [])
 
     search = st.text_input("🔎 Rechercher (nom, IBAN, email...)", key=f"search_{org_id}")
     master_cols = get_org_master_columns(client, org_id)
@@ -351,10 +424,11 @@ def _render_client_list(client, org_id, org_name, user):
 
     rows = _filter_by_columns(rows, col_filters)
 
-    # Colonnes affichees : preference de session (pas encore persistee entre
-    # connexions -- voir "vues enregistrees", chantier suivant). Sanitize
-    # d'abord une selection perimee (colonne qui n'existe plus dans ce lot)
-    # pour ne jamais faire planter le multiselect.
+    # Colonnes affichees : preference de session par defaut, mais peut
+    # etre rappelee/enregistree via une vue nommee (voir
+    # _render_saved_views plus bas). Sanitize d'abord une selection
+    # perimee (colonne qui n'existe plus dans ce lot) pour ne jamais
+    # faire planter le multiselect.
     visible_key = f"db_visible_cols_{org_id}"
     if visible_key in st.session_state:
         st.session_state[visible_key] = [c for c in st.session_state[visible_key] if c in all_cols]
@@ -367,6 +441,8 @@ def _render_client_list(client, org_id, org_name, user):
     if not visible_cols:
         st.warning("⚠️ Aucune colonne sélectionnée : toutes affichées par défaut.")
         visible_cols = all_cols
+
+    _render_saved_views(client, org_id, user, search, all_cols, visible_cols)
 
     if not rows:
         st.caption("Aucun résultat pour cette recherche/ces filtres.")

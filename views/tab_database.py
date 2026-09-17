@@ -24,12 +24,15 @@ from trieur.db import (
     count_records,
     delete_record,
     get_org_master_columns,
+    get_profiles_map,
+    get_record,
     import_dataframe,
     list_all_records,
     list_dedup_alerts,
     list_records,
     resolve_dedup_alert,
     save_org_master_columns,
+    update_record,
 )
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
 from views._auth import accessible_organizations, require_login
@@ -69,7 +72,7 @@ def render():
     )
 
     _render_alerts(client, org_id, user)
-    _render_client_list(client, org_id, org_labels[org_id])
+    _render_client_list(client, org_id, org_labels[org_id], user)
     _render_import(client, org_id, user)
     _render_settings(client, org_id, is_admin)
 
@@ -128,7 +131,32 @@ def _build_rows(records, master_cols):
                 row[key] = value
         row["Fichier source"] = batch.get("source_filename")
         row["Importé le"] = batch.get("imported_at")
+        # Historique court (migration 0008) : quand/par qui APRES import --
+        # volontairement minimal, pas un journal des valeurs changees.
+        # "_modifie_par_id" est l'identifiant brut (uuid), resolu en nom
+        # d'affichage a part (voir _resolve_modifier_names) : _build_rows
+        # reste une fonction pure, sans appel reseau.
+        row["Modifié le"] = r.get("updated_at")
+        row["_modifie_par_id"] = r.get("updated_by")
         rows.append(row)
+    return rows
+
+
+def _resolve_modifier_names(client, rows):
+    """Remplace la cle brute "_modifie_par_id" (uuid, posee par
+    _build_rows) par une colonne d'affichage "Modifié par" -- seul
+    endroit qui fait l'appel reseau necessaire (_build_rows reste pur).
+    Un identifiant non resolvable (RLS -- voir get_profiles_map) devient
+    "quelqu'un" plutot qu'une erreur ou un uuid brut a l'ecran."""
+    ids = tuple(r.get("_modifie_par_id") for r in rows)
+    profiles = get_profiles_map(client, ids)
+    for r in rows:
+        uid = r.pop("_modifie_par_id", None)
+        if not uid:
+            r["Modifié par"] = None
+        else:
+            profile = profiles.get(uid)
+            r["Modifié par"] = (profile or {}).get("full_name") or "quelqu'un"
     return rows
 
 
@@ -172,7 +200,8 @@ def _render_export(client, org_id, org_name, total, search, col_filters, all_col
             # sinon un fichier plus ancien avec une colonne non encore
             # decouverte perdrait cette donnee en silence a l'export.
             all_records = list_all_records(client, org_id)
-            rows = _filter_by_columns(_filter_by_search(_build_rows(all_records, master_cols), search), col_filters)
+            rows = _resolve_modifier_names(client, _build_rows(all_records, master_cols))
+            rows = _filter_by_columns(_filter_by_search(rows, search), col_filters)
             full_cols = []
             for row in rows:
                 for c in row.keys():
@@ -225,7 +254,56 @@ def _render_export(client, org_id, org_name, total, search, col_filters, all_col
                 )
 
 
-def _render_client_list(client, org_id, org_name):
+def _render_edit_form(client, org_id, record_id, master_cols, user):
+    """Modifier un client déjà importé, un seul à la fois (sélection
+    multiple = suppression groupée seulement, pas d'édition en masse --
+    des valeurs différentes par ligne n'ont pas de "nouvelle valeur"
+    commune qui aurait un sens). Limites connues, non traitées :
+    - Si le champ IBAN visible est modifié ici, la clé interne "iban" qui
+      alimente la détection de doublon (voir trieur/db.py:import_dataframe)
+      n'est PAS resynchronisée -- laquelle des colonnes de l'environnement
+      est "la" colonne IBAN n'est choisie qu'au moment de l'import, pas
+      stockée par la suite. Lié à la règle de doublon configurable par
+      activité, déjà en attente de l'Excel de référence (voir
+      PROJECT_LOG.md).
+    - Dernière écriture gagne : aucune détection si un autre membre a
+      modifié ce même client entre l'ouverture du formulaire et
+      l'enregistrement (voir trieur/db.py:update_record)."""
+    # Valeur fraiche (pas le lot mis en cache de session, potentiellement
+    # perime) au moment d'OUVRIR le formulaire -- reduit, sans l'eliminer,
+    # le risque d'ecraser une modification faite par quelqu'un d'autre
+    # entre-temps.
+    raw = get_record(client, record_id)
+    if raw is None:
+        st.warning("Ce client n'existe plus (supprimé entre-temps).")
+        return
+
+    with st.expander("✏️ Modifier cette ligne", expanded=False):
+        current_data = dict(raw.get("data") or {})
+        field_names = list(master_cols) + [k for k in current_data if k not in master_cols]
+        new_values = {}
+        for field in field_names:
+            # Une valeur "fausse" (0, False) est une vraie valeur, pas une
+            # case vide -- `... or ""` l'aurait effacee a l'affichage puis
+            # a l'enregistrement (voir revue de code).
+            existing = current_data.get(field)
+            display_value = "" if existing is None else str(existing)
+            new_values[field] = st.text_input(
+                field, value=display_value,
+                key=f"edit_{org_id}_{record_id}_{field}",
+            )
+        if st.button("💾 Enregistrer les modifications", key=f"edit_save_{org_id}_{record_id}"):
+            cleaned = {k: (v.strip() or None) for k, v in new_values.items()}
+            if update_record(client, record_id, cleaned, user.id):
+                st.success("Client modifié.")
+                invalidate_client_list_cache(org_id)
+                clear_stale_widgets(f"edit_{org_id}_{record_id}_")
+                st.rerun()
+            else:
+                st.error("Ce client n'existe plus (supprimé entre-temps) : rien n'a été enregistré.")
+
+
+def _render_client_list(client, org_id, org_name, user):
     total = count_records(client, org_id)
     st.markdown(f"##### Clients importés ({total})")
 
@@ -246,7 +324,7 @@ def _render_client_list(client, org_id, org_name):
     search = st.text_input("🔎 Rechercher (nom, IBAN, email...)", key=f"search_{org_id}")
     master_cols = get_org_master_columns(client, org_id)
 
-    all_rows = _build_rows(records, master_cols)
+    all_rows = _resolve_modifier_names(client, _build_rows(records, master_cols))
 
     # Colonnes connues sur ce lot charge -- calculees AVANT la recherche
     # texte et les filtres, pour que la liste de colonnes (et donc la
@@ -326,6 +404,9 @@ def _render_client_list(client, org_id, org_name):
                 # fantome sur d'autres clients (voir clear_stale_widgets).
                 clear_stale_widgets(selection_key, f"_confirm_pending_bulk_delete_{org_id}")
                 st.rerun()
+
+            if len(selected_ids) == 1:
+                _render_edit_form(client, org_id, selected_ids[0], master_cols, user)
 
     if len(records) < total:
         remaining = total - len(records)

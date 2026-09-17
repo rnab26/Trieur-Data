@@ -52,6 +52,25 @@ def get_my_profile(_client: Client, user_id: str) -> dict | None:
 
 
 @st.cache_data(ttl=30, show_spinner=False)
+def get_profiles_map(_client: Client, user_ids: tuple[str, ...]) -> dict[str, dict]:
+    """Nom (si connu) pour un lot d'identifiants -- affichage "modifié par
+    X" dans l'historique court par ligne. La RLS (migration 0001) limite
+    la lecture du profil d'un AUTRE utilisateur aux super-admins : pour un
+    membre simple, un identifiant qui n'est pas le sien reste absent du
+    résultat (comportement RLS existant, pas une erreur) -- l'appelant
+    doit donc traiter une clé manquante comme "quelqu'un", pas comme un
+    échec. `user_ids` en tuple (pas liste) : requis pour la mise en cache
+    (clé hashable) -- sinon un appel a chaque rerun (ex: chaque clic de
+    selection dans la liste), pour une info qui ne change quasiment
+    jamais."""
+    ids = tuple(sorted({uid for uid in user_ids if uid}))
+    if not ids:
+        return {}
+    res = _td(_client, "profiles").select("id, full_name").in_("id", ids).execute()
+    return {p["id"]: p for p in (res.data or [])}
+
+
+@st.cache_data(ttl=30, show_spinner=False)
 def get_my_memberships(_client: Client, user_id: str) -> list[dict]:
     res = (
         _td(_client, "memberships")
@@ -340,7 +359,7 @@ def list_records(client: Client, org_id: str, limit: int = LIST_PAGE_SIZE, offse
     charger la suite au-delà de `limit` (bouton "charger plus" côté UI)."""
     res = (
         _td(client, "records")
-        .select("id, data, created_at, import_batches(source_filename, imported_at)")
+        .select("id, data, created_at, updated_at, updated_by, import_batches(source_filename, imported_at)")
         .eq("org_id", org_id)
         .order("created_at", desc=True)
         .limit(limit)
@@ -378,6 +397,38 @@ def list_all_records(client: Client, org_id: str, page_size: int = LIST_PAGE_SIZ
         all_rows.extend(page)
         offset += len(page)
     return all_rows
+
+
+def get_record(client: Client, record_id: str) -> dict | None:
+    """Une seule ligne, valeur fraîche -- utilisé pour ouvrir le
+    formulaire d'édition sans dépendre du lot mis en cache de session
+    (potentiellement périmé si quelqu'un d'autre a importé/modifié
+    depuis)."""
+    res = _td(client, "records").select("id, data").eq("id", record_id).limit(1).execute()
+    return res.data[0] if res.data else None
+
+
+def update_record(client: Client, record_id: str, data: dict, user_id: str) -> bool:
+    """Modifie le contenu d'un client déjà importé (`data` remplace
+    entièrement le jsonb existant -- l'appelant doit donc partir du
+    contenu actuel, pas d'un sous-ensemble). Trace `updated_at`/
+    `updated_by` (migration 0008) -- historique court, volontairement
+    minimal : juste de quoi savoir quand/par qui, pas un journal complet
+    des valeurs changées. Retourne False si `record_id` n'existe plus
+    (ex: supprimé par quelqu'un d'autre entre l'ouverture du formulaire
+    et l'enregistrement) -- l'appelant doit alors prévenir plutôt
+    qu'annoncer un succès qui n'a pas eu lieu. Limite connue, non
+    traitée : la dernière écriture gagne sans détection de conflit --
+    une modification concurrente par un autre membre sur le même client
+    peut être silencieusement écrasée."""
+    from datetime import datetime, timezone
+
+    res = _td(client, "records").update({
+        "data": data,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_by": user_id,
+    }).eq("id", record_id).execute()
+    return bool(res.data)
 
 
 def delete_record(client: Client, record_id: str) -> None:

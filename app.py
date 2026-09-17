@@ -123,6 +123,7 @@ import views.tab1_colonnes_maitres as view_tab1
 import views.tab2_import_mapping as view_tab2
 import views.tab3_filtrage_dedup as view_tab3
 import views.tab4_export as view_tab4
+import views.tab_database as view_database
 import views.tab_cockpit as view_cockpit
 
 LOGO_PATH = "assets/logo.png"
@@ -312,29 +313,55 @@ with col_title:
     st.title("Trieur de Data")
 st.caption(f"Import Excel ou Google Sheets → mapping colonnes → aperçu → filtrage → export · v{APP_VERSION}")
 
-# [14] st.tabs() natif : conserve TOUS les onglets montes dans le DOM (juste
-# masques). C'est important pour les composants custom (ex: streamlit-sortables
-# dans l'onglet Export) dont la detection de hauteur ne se declenche fiablement
-# QUE dans ce mode -- une barre d'onglets "maison" pilotee par session_state
-# avait ete tentee pour permettre les boutons "etape suivante" (voir
-# views/tab2_import_mapping.py et views/tab3_filtrage_dedup.py), mais elle ne
-# monte le contenu QUE de l'onglet actif et cassait ainsi ce composant. Les
-# boutons "etape suivante" font donc plutot un clic JS sur l'onglet natif.
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["1. Colonnes maitres", "2. Import et Mapping", "3. Filtrage & Dedup", "4. Export", "5. Cockpit"]
+# [16] Barre de menu en haut : sections independantes, pas des etapes d'un
+# meme parcours. "Trieur de Data" reste l'usage courant sans compte ; "Base
+# de donnees" et "Cockpit" sont deux choses distinctes qui necessitent un
+# compte -- respectivement la memoire persistante des donnees clients
+# (accessible a tout membre de l'organisation) et le suivi des chantiers de
+# developpement du logiciel (reserve aux administrateurs). Ne pas les
+# fusionner : le Cockpit ne doit jamais afficher de donnee client.
+if "top_menu" not in st.session_state:
+    st.session_state.top_menu = "Trieur de Data"
+
+st.segmented_control(
+    "Section",
+    options=["Trieur de Data", "Base de données", "Cockpit"],
+    key="top_menu",
+    label_visibility="collapsed",
 )
 
-with tab1:
-    view_tab1.render()
+st.divider()
 
-with tab2:
-    view_tab2.render()
+if st.session_state.top_menu == "Trieur de Data":
+    # [14] st.tabs() natif : conserve TOUS les onglets montes dans le DOM
+    # (juste masques). C'est important pour les composants custom (ex:
+    # streamlit-sortables dans l'onglet Export) dont la detection de hauteur
+    # ne se declenche fiablement QUE dans ce mode -- une barre d'onglets
+    # "maison" pilotee par session_state avait ete tentee pour permettre les
+    # boutons "etape suivante" (voir views/tab2_import_mapping.py et
+    # views/tab3_filtrage_dedup.py), mais elle ne monte le contenu QUE de
+    # l'onglet actif et cassait ainsi ce composant. Les boutons "etape
+    # suivante" font donc plutot un clic JS sur l'onglet natif. Les 4 onglets
+    # doivent rester groupes dans UN SEUL st.tabs() -- ne pas les repartir
+    # entre plusieurs sections de la barre de menu.
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["1. Colonnes maitres", "2. Import et Mapping", "3. Filtrage & Dedup", "4. Export"]
+    )
 
-with tab3:
-    view_tab3.render()
+    with tab1:
+        view_tab1.render()
 
-with tab4:
-    view_tab4.render()
+    with tab2:
+        view_tab2.render()
 
-with tab5:
+    with tab3:
+        view_tab3.render()
+
+    with tab4:
+        view_tab4.render()
+
+elif st.session_state.top_menu == "Base de données":
+    view_database.render()
+
+elif st.session_state.top_menu == "Cockpit":
     view_cockpit.render()

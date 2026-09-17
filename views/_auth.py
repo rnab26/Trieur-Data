@@ -6,7 +6,7 @@
 
 import streamlit as st
 
-from trieur.db import get_client, get_my_memberships, get_my_profile
+from trieur.db import get_client, get_my_memberships, get_my_profile, list_organizations
 
 
 def _login_form():
@@ -62,3 +62,11 @@ def require_login() -> dict:
             st.rerun()
 
     return {"client": client, "user": user, "profile": profile, "memberships": memberships}
+
+
+def accessible_organizations(ctx: dict) -> list[dict]:
+    """Organisations que l'utilisateur connecté peut voir : toutes pour un
+    super-admin, seulement celles où il est membre sinon."""
+    if ctx["profile"].get("is_super_admin"):
+        return list_organizations(ctx["client"])
+    return [m["organizations"] | {"id": m["org_id"]} for m in ctx["memberships"]]

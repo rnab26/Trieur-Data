@@ -41,7 +41,12 @@ from trieur.db import (
 )
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
 from views._auth import accessible_organizations, require_login
-from views._ui import clear_stale_widgets, confirm_delete_button, render_unknown_columns_prompt
+from views._ui import (
+    clear_stale_widgets,
+    confirm_action_button,
+    confirm_delete_button,
+    render_unknown_columns_prompt,
+)
 
 
 def render():
@@ -116,6 +121,29 @@ def _render_dashboard(client, org_id, total, alerts):
     st.divider()
 
 
+def diff_rows(new_data, matched_data):
+    """Comparaison champ par champ entre une ligne nouvellement importée
+    et celle déjà en base avec laquelle elle a été rapprochée -- demande
+    explicite : "donner des informations pour comprendre d'où vient le
+    doublon" avant de décider, plutôt que deux blocs de données brutes
+    à comparer à l'œil. Pure, testée sans Streamlit."""
+    keys = list(dict.fromkeys(list(new_data or {}) + list(matched_data or {})))
+    rows = []
+    for k in keys:
+        nv = (new_data or {}).get(k)
+        mv = (matched_data or {}).get(k)
+        rows.append({
+            "Champ": k,
+            "Nouvelle ligne": nv,
+            "Déjà en base": mv,
+            # `nv or ""`/`mv or ""` confondrait une vraie valeur "fausse"
+            # (0, False) avec un champ vide -- comparaison sur la valeur
+            # normalisee en chaine SANS ecraser les valeurs falsy.
+            "Différent": "⚠️" if str(nv if nv is not None else "") != str(mv if mv is not None else "") else "",
+        })
+    return rows
+
+
 def _render_alerts(client, org_id, user, alerts):
     if not alerts:
         return
@@ -123,8 +151,10 @@ def _render_alerts(client, org_id, user, alerts):
     st.warning(f"⚠️ {len(alerts)} alerte(s) de doublon IBAN en attente")
     for alert in alerts:
         with st.container(border=True):
-            st.write("**Nouvelle ligne :**", alert["record"]["data"])
-            st.write("**Déjà en base :**", alert["matched"]["data"])
+            st.dataframe(
+                pd.DataFrame(diff_rows(alert["record"]["data"], alert["matched"]["data"])),
+                use_container_width=True, hide_index=True,
+            )
             st.caption(alert.get("note") or "")
             col_dup, col_ok = st.columns(2)
             with col_dup:
@@ -208,12 +238,36 @@ def _filter_by_search(rows, search):
     ]
 
 
+FILTER_OPERATORS = ["contient", "ne contient pas", "égal à", "vide", "non vide"]
+
+
+def _matches_filter(value, op, needle):
+    # "vide"/"non vide" jugent sur l'ABSENCE reelle (None/champ jamais
+    # rempli), pas sur `... or ""` -- une valeur "fausse" (0, False) est
+    # une vraie valeur, pas une case vide (meme bug deja corrige dans
+    # _render_edit_form).
+    if op == "vide":
+        return value is None or value == ""
+    if op == "non vide":
+        return not (value is None or value == "")
+    val = str(value if value is not None else "").lower()
+    if op == "égal à":
+        return val == needle
+    if op == "ne contient pas":
+        return needle not in val
+    return needle in val  # "contient" par defaut
+
+
 def _filter_by_columns(rows, col_filters):
+    """`col_filters` : {colonne: {"op": ..., "value": ...}} (voir
+    FILTER_OPERATORS) -- rapproche des filtres avancés type Google
+    Sheets (contient/ne contient pas/égal/vide/non vide), demande
+    explicite de l'utilisateur."""
     if not col_filters:
         return rows
     return [
         r for r in rows
-        if all(col_filters[c] in str(r.get(c) or "").lower() for c in col_filters)
+        if all(_matches_filter(r.get(c), f["op"], f["value"]) for c, f in col_filters.items())
     ]
 
 
@@ -290,6 +344,38 @@ def _render_export(client, org_id, org_name, total, search, col_filters, all_col
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key=f"db_export_xlsx_dl_{org_id}",
                 )
+
+
+def _render_bulk_edit_form(client, org_id, selected_ids, master_cols, user, selection_key):
+    """Modification en masse : un seul champ, une seule nouvelle valeur,
+    appliquée à toute la sélection -- demande explicite ("modifications
+    multiples ... via un bouton"). Limité aux colonnes DECLAREES de
+    l'environnement (`master_cols`), pas aux colonnes d'affichage
+    dérivées ("Fichier source", "Modifié le"...) qui ne sont pas de
+    vraies clés du jsonb `data` -- les y écrire les polluerait en
+    silence. Même limite que l'édition d'une seule ligne : dernière
+    écriture gagne, pas de détection de conflit."""
+    with st.expander(f"✏️ Modifier un champ pour les {len(selected_ids)} lignes sélectionnées"):
+        field = st.selectbox("Champ à modifier", options=master_cols, key=f"bulk_edit_field_{org_id}")
+        new_value = st.text_input("Nouvelle valeur (laisser vide pour effacer le champ)", key=f"bulk_edit_value_{org_id}")
+        if confirm_action_button(
+            f"Appliquer à {len(selected_ids)} ligne(s)",
+            key=f"bulk_edit_{org_id}",
+            warning=f"Remplace « {field} » pour {len(selected_ids)} client(s), sans annulation possible après coup.",
+        ):
+            n_done = 0
+            for rid in selected_ids:
+                raw = get_record(client, rid)
+                if raw is None:
+                    continue
+                data = dict(raw.get("data") or {})
+                data[field] = new_value.strip() or None
+                if update_record(client, rid, data, user.id):
+                    n_done += 1
+            st.success(f"{n_done}/{len(selected_ids)} client(s) modifié(s).")
+            invalidate_client_list_cache(org_id)
+            clear_stale_widgets(selection_key, f"_confirm_pending_bulk_edit_{org_id}")
+            st.rerun()
 
 
 def _render_edit_form(client, org_id, record_id, master_cols, user):
@@ -382,11 +468,12 @@ def _render_saved_views(client, org_id, user, search, all_cols, visible_cols):
                 # une version en minuscules apres avoir rappele la vue,
                 # meme si le filtre fonctionne toujours (comparaison
                 # insensible a la casse cote _filter_by_columns).
-                raw_col_filters = {
-                    c: st.session_state.get(f"colfilter_{org_id}_{c}", "").strip()
-                    for c in all_cols
-                    if st.session_state.get(f"colfilter_{org_id}_{c}", "").strip()
-                }
+                raw_col_filters = {}
+                for c in all_cols:
+                    op = st.session_state.get(f"colfilter_op_{org_id}_{c}", "contient")
+                    val = st.session_state.get(f"colfilter_{org_id}_{c}", "").strip()
+                    if op in ("vide", "non vide") or val:
+                        raw_col_filters[c] = {"op": op, "value": val}
                 save_saved_view(client, user.id, org_id, name, search, raw_col_filters, list(visible_cols))
                 st.success(f"Vue « {name} » enregistrée.")
                 st.rerun()
@@ -423,9 +510,14 @@ def _render_client_list(client, org_id, org_name, user, total):
         # de la vue -- sinon un filtre tape avant de rappeler une vue qui
         # ne le mentionne pas continue de s'appliquer apres, et le
         # resultat affiche ne correspond plus a ce qui a ete enregistre.
-        clear_stale_widgets(f"colfilter_{org_id}_")
-        for col, val in (pending_view.get("col_filters") or {}).items():
-            st.session_state[f"colfilter_{org_id}_{col}"] = val
+        clear_stale_widgets(f"colfilter_{org_id}_", f"colfilter_op_{org_id}_")
+        for col, f in (pending_view.get("col_filters") or {}).items():
+            # Compat vues enregistrees avant l'ajout des operateurs (valeur
+            # = simple chaine, pas encore {"op":..., "value":...}).
+            if isinstance(f, str):
+                f = {"op": "contient", "value": f}
+            st.session_state[f"colfilter_op_{org_id}_{col}"] = f.get("op", "contient")
+            st.session_state[f"colfilter_{org_id}_{col}"] = f.get("value", "")
         st.session_state[f"db_visible_cols_{org_id}"] = list(pending_view.get("visible_cols") or [])
 
     search = st.text_input("🔎 Rechercher (nom, IBAN, email...)", key=f"search_{org_id}")
@@ -446,14 +538,24 @@ def _render_client_list(client, org_id, org_name, user, total):
     rows = _filter_by_search(all_rows, search)
 
     with st.expander("🔎 Filtres par colonne"):
-        st.caption("Chaque filtre garde les lignes qui CONTIENNENT le texte tapé (insensible à la casse). Combinés entre eux.")
+        st.caption("Filtres façon Google Sheets, combinés entre eux (insensible à la casse).")
         col_filters = {}
-        filt_cols = st.columns(2)
-        for i, col in enumerate(all_cols):
-            with filt_cols[i % 2]:
-                val = st.text_input(col, key=f"colfilter_{org_id}_{col}", placeholder="contient...")
-                if val.strip():
-                    col_filters[col] = val.strip().lower()
+        for col in all_cols:
+            c_op, c_val = st.columns([1.3, 3])
+            with c_op:
+                op = st.selectbox(
+                    col, options=FILTER_OPERATORS, key=f"colfilter_op_{org_id}_{col}",
+                    label_visibility="visible",
+                )
+            with c_val:
+                needs_value = op not in ("vide", "non vide")
+                val = st.text_input(
+                    "valeur", key=f"colfilter_{org_id}_{col}",
+                    label_visibility="collapsed", disabled=not needs_value,
+                    placeholder=col if needs_value else "(aucune valeur nécessaire)",
+                )
+            if op in ("vide", "non vide") or val.strip():
+                col_filters[col] = {"op": op, "value": val.strip().lower()}
 
     rows = _filter_by_columns(rows, col_filters)
 
@@ -517,6 +619,8 @@ def _render_client_list(client, org_id, org_name, user, total):
 
             if len(selected_ids) == 1:
                 _render_edit_form(client, org_id, selected_ids[0], master_cols, user)
+            elif len(selected_ids) >= 2:
+                _render_bulk_edit_form(client, org_id, selected_ids, master_cols, user, selection_key)
 
     if len(records) < total:
         remaining = total - len(records)

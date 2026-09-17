@@ -5,12 +5,12 @@
 import streamlit as st
 
 
-def confirm_delete_button(label: str, key: str) -> bool:
-    """Bouton de suppression à deux étapes : le premier clic affiche un
-    avertissement et un vrai bouton "Oui, supprimer" ; seul ce second clic
+def confirm_action_button(label: str, key: str, warning: str, confirm_label: str = "✅ Confirmer") -> bool:
+    """Bouton à deux étapes, générique : le premier clic affiche un
+    avertissement et un vrai bouton de confirmation ; seul ce second clic
     renvoie True. Un clic isolé (mauvaise visée sur mobile, notamment) ne
-    supprime donc jamais rien — règle globale : jamais de suppression sans
-    confirmation."""
+    déclenche donc jamais rien -- règle globale : jamais d'action
+    délicate (suppression, modification en masse...) sans confirmation."""
     pending_key = f"_confirm_pending_{key}"
 
     if not st.session_state.get(pending_key):
@@ -19,10 +19,10 @@ def confirm_delete_button(label: str, key: str) -> bool:
             st.rerun()
         return False
 
-    st.warning("Suppression définitive, impossible à annuler après coup.")
+    st.warning(warning)
     col_yes, col_cancel = st.columns(2)
     with col_yes:
-        confirmed = st.button("✅ Oui, supprimer", key=f"{key}_yes", type="primary")
+        confirmed = st.button(confirm_label, key=f"{key}_yes", type="primary")
     with col_cancel:
         if st.button("Annuler", key=f"{key}_cancel"):
             st.session_state[pending_key] = False
@@ -32,6 +32,16 @@ def confirm_delete_button(label: str, key: str) -> bool:
         st.session_state[pending_key] = False
         return True
     return False
+
+
+def confirm_delete_button(label: str, key: str) -> bool:
+    """Suppression à deux étapes -- règle globale : jamais de suppression
+    sans confirmation."""
+    return confirm_action_button(
+        label, key,
+        warning="Suppression définitive, impossible à annuler après coup.",
+        confirm_label="✅ Oui, supprimer",
+    )
 
 
 def unknown_columns(columns, master_cols) -> list:

@@ -248,6 +248,23 @@ def save_org_master_columns(client: Client, org_id: str, columns: list[str]) -> 
     get_org_master_columns.clear()
 
 
+def add_org_master_columns(client: Client, org_id: str, new_cols: list[str]) -> None:
+    """Ajoute des colonnes aux colonnes maîtres existantes d'un
+    environnement -- utilisé quand un import détecte des colonnes que
+    l'environnement ne connaît pas encore (voir
+    views/_ui.py:render_unknown_columns_prompt), depuis les deux chemins
+    d'import (upload direct et bouton "Enregistrer dans la base de
+    données") : UNE seule fonction, pour que les deux ne divergent
+    jamais. Insensible à la casse (même convention que
+    views/tab1_colonnes_maitres.py) -- une colonne déjà présente sous
+    une autre casse n'est jamais dupliquée."""
+    existing = get_org_master_columns(client, org_id)
+    existing_lower = {c.lower() for c in existing}
+    to_add = [c for c in new_cols if c.lower() not in existing_lower]
+    if to_add:
+        save_org_master_columns(client, org_id, existing + to_add)
+
+
 def create_import_batch(client: Client, org_id: str, source_filename: str, imported_by: str, row_count: int) -> dict:
     res = (
         _td(client, "import_batches")

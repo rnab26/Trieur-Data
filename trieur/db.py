@@ -265,6 +265,55 @@ def add_org_master_columns(client: Client, org_id: str, new_cols: list[str]) -> 
         save_org_master_columns(client, org_id, existing + to_add)
 
 
+# ---------------------------------------------------------------
+# Vues enregistrées, nommées (recherche + filtres par colonne + colonnes
+# affichées de la Base de données) -- liées au compte, comme les jeux de
+# colonnes maîtres (voir user_master_column_sets), pas à l'organisation.
+# ---------------------------------------------------------------
+
+@st.cache_data(ttl=30, show_spinner=False)
+def list_saved_views(_client: Client, user_id: str, org_id: str) -> list[dict]:
+    res = (
+        _td(_client, "db_saved_views")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("org_id", org_id)
+        .order("name")
+        .execute()
+    )
+    return res.data or []
+
+
+def save_saved_view(
+    client: Client, user_id: str, org_id: str, name: str,
+    search: str, col_filters: dict, visible_cols: list[str],
+) -> dict:
+    """Crée ou remplace (même nom, même compte, même environnement) une
+    vue enregistrée."""
+    res = (
+        _td(client, "db_saved_views")
+        .upsert(
+            {
+                "user_id": user_id,
+                "org_id": org_id,
+                "name": name,
+                "search": search,
+                "col_filters": col_filters,
+                "visible_cols": visible_cols,
+            },
+            on_conflict="user_id,org_id,name",
+        )
+        .execute()
+    )
+    list_saved_views.clear()
+    return res.data[0]
+
+
+def delete_saved_view(client: Client, view_id: str) -> None:
+    _td(client, "db_saved_views").delete().eq("id", view_id).execute()
+    list_saved_views.clear()
+
+
 def create_import_batch(client: Client, org_id: str, source_filename: str, imported_by: str, row_count: int) -> dict:
     res = (
         _td(client, "import_batches")

@@ -25,6 +25,7 @@ from trieur.db import (
     count_records,
     delete_record,
     delete_saved_view,
+    get_last_import_batch,
     get_org_master_columns,
     get_profiles_map,
     get_record,
@@ -75,14 +76,47 @@ def render():
         key="db_org_select",
     )
 
-    _render_alerts(client, org_id, user)
-    _render_client_list(client, org_id, org_labels[org_id], user)
+    # Calcules UNE fois par rendu, partages entre le tableau de bord et
+    # les sections qui en ont deja besoin plus bas -- sans ca, le total
+    # de clients et les alertes en attente etaient chacun refetches deux
+    # fois sur le meme rendu (voir revue de code).
+    total = count_records(client, org_id)
+    alerts = list_dedup_alerts(client, org_id, status="pending")
+
+    _render_dashboard(client, org_id, total, alerts)
+    _render_alerts(client, org_id, user, alerts)
+    _render_client_list(client, org_id, org_labels[org_id], user, total)
     _render_import(client, org_id, user, is_admin)
     _render_settings(client, org_id, is_admin)
 
 
-def _render_alerts(client, org_id, user):
-    alerts = list_dedup_alerts(client, org_id, status="pending")
+def _render_dashboard(client, org_id, total, alerts):
+    """Résumé "où j'en suis" en arrivant sur un environnement -- nombre
+    de clients, alertes de doublon en attente (visible dès l'arrivée,
+    pas seulement au moment d'un import -- demande explicite, voir
+    PROJECT_LOG.md), date du dernier import. Condensé, à ne jamais
+    confondre avec le Cockpit (réservé au développement du logiciel,
+    jamais aux données clients). `total`/`alerts` calculés une seule
+    fois par render() et partagés avec _render_alerts/_render_client_list,
+    pas refetches ici."""
+    n_alerts = len(alerts)
+    last_batch = get_last_import_batch(client, org_id)
+
+    col_clients, col_alerts, col_import = st.columns(3)
+    col_clients.metric("Clients", total)
+    col_alerts.metric(
+        "Alertes en attente",
+        n_alerts,
+        delta="à traiter" if n_alerts else "aucune",
+        delta_color="inverse" if n_alerts else "off",
+    )
+    col_import.metric("Dernier import", last_batch["source_filename"] if last_batch else "—")
+    if last_batch:
+        st.caption(f"le {last_batch['imported_at']}")
+    st.divider()
+
+
+def _render_alerts(client, org_id, user, alerts):
     if not alerts:
         return
 
@@ -358,8 +392,7 @@ def _render_saved_views(client, org_id, user, search, all_cols, visible_cols):
                 st.rerun()
 
 
-def _render_client_list(client, org_id, org_name, user):
-    total = count_records(client, org_id)
+def _render_client_list(client, org_id, org_name, user, total):
     st.markdown(f"##### Clients importés ({total})")
 
     if total == 0:

@@ -328,6 +328,23 @@ def create_import_batch(client: Client, org_id: str, source_filename: str, impor
     return res.data[0]
 
 
+def get_last_import_batch(client: Client, org_id: str) -> dict | None:
+    """Dernier import (fichier + date) pour cet environnement -- résumé
+    "où j'en suis" affiché en haut de la Base de données (voir
+    views/tab_database.py:_render_dashboard). Pas de cache : un import
+    tout juste terminé doit apparaître immédiatement, pas jusqu'à 30s
+    plus tard."""
+    res = (
+        _td(client, "import_batches")
+        .select("source_filename, imported_at")
+        .eq("org_id", org_id)
+        .order("imported_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return res.data[0] if res.data else None
+
+
 def find_iban_matches(client: Client, org_id: str, iban: str) -> list[dict]:
     """Historique complet des lignes déjà en base avec ce même IBAN,
     quel que soit le fichier ou la date d'import -- détecte les mandats

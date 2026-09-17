@@ -24,13 +24,45 @@ pas encore priorisées, en attente.
    livré, voir section ci-dessous.
 4. [x] Colonnes adaptables selon le fichier importé — livré, voir
    section ci-dessous.
+
+**Reprioris­ation (2026-09-17, suite)** : l'utilisateur a répondu aux 8
+nouvelles idées (n1-n8) — toutes "oui" sauf n8 "Colonnes calculées
+simples" (**plus tard**, explicitement dépriorisée). Nouvel ordre pour
+la suite, en intégrant ces réponses et leurs commentaires :
+
 5. [ ] Vues enregistrées, nommées (dépend du point 1).
-6. [ ] Petit tableau de bord par environnement.
-7. [ ] Règle de doublon configurable par activité — **en attente**,
-   liée à la question "nouvelle souscription vs doublon" déjà bloquée
-   sur l'Excel de référence (voir chantier CRM/Base de données).
-8. [ ] Les 8 nouvelles idées (n1-n8) — pas encore de réponse sur la
-   fiche, à reprioriser une fois répondues.
+6. [ ] Tableau de bord par environnement + badge d'alertes de doublon
+   toujours visible (fusion de l'ancien point 6 et de n6 "Rappel
+   visible des alertes en attente" — même famille, "vue d'ensemble en
+   arrivant").
+7. [ ] Étiquettes libres sur un client (n1).
+8. [ ] Annuler un import entier en un clic (n3).
+9. [ ] Recherche avancée façon Google Sheets (opérateurs
+   contient/égal/plage de dates) + sélection et **modification**
+   multiples, pas juste suppression (n7 — commentaire explicite de
+   l'utilisateur : "rapproche-toi au max des filtres de Google
+   Sheets" + "modifications multiples ... via un bouton, où ? je ne
+   sais pas encore" — la forme exacte du bouton/emplacement sera à
+   affiner à l'implémentation).
+10. [ ] Voir les différences au réimport d'un fichier déjà connu, avec
+    de quoi comprendre POURQUOI une ligne est signalée comme doublon
+    (comparaison, filtre, recherche) avant d'agir (n4 — commentaire :
+    "il faut donner des informations pour comprendre d'où vient le
+    doublon ... pour s'assurer qu'on ne fait pas une mauvaise action").
+11. [ ] **En attente**, bloqué sur l'Excel de référence : détection de
+    quasi-doublons sur d'autres critères que l'IBAN (n2 — "OUI MAIS PAS
+    FORCEMENT QUE LES IBAN") + règle de doublon configurable par
+    activité (ancien point 7) — les deux posent la même question de
+    fond ("quelle règle de rapprochement pour quelle activité"), à
+    trancher ensemble une fois l'Excel reçu.
+12. [ ] **À cadrer avec l'utilisateur avant de coder**, pas juste
+    "commencer par le haut" : rôles plus fins par environnement, avec
+    "encore plus de restrictions possibles si nécessaire" (n5) —
+    formulation volontairement ouverte, la granularité exacte
+    (lecture/écriture par colonne ? par action ? autre chose ?) doit se
+    discuter avant d'écrire du code, pas être devinée.
+13. [ ] **Reporté par l'utilisateur** ("plus tard") : colonnes
+    calculées simples (n8).
 
 ---
 

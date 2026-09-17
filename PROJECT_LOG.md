@@ -6,6 +6,78 @@ en attente.
 
 ---
 
+## Relier le Trieur de Data au CRM : "Enregistrer dans la base de données" (2026-09-17)
+
+**Demande** : la persistance (Leads/Prélèvement, futurs environnements)
+doit se moduler par contexte, et le point d'entrée doit être le Trieur
+de Data lui-même, pas un import à part. Question posée par
+l'utilisateur : "si je n'ai pas signalé pour quelle activité, où ça va
+s'enregistrer ?" — réponse implémentée : **nulle part, jamais
+automatiquement**.
+
+**Fait** :
+- Nouveau bouton "💾 Enregistrer dans la base de données" dans l'onglet
+  Export (`views/tab4_export.py`), visible SEULEMENT si déjà connecté
+  (aucune connexion forcée — le Trieur de Data reste 100% utilisable
+  sans compte). Enregistre `st.session_state.filtered_df` (la base
+  déjà nettoyée/filtrée par les onglets 1-3, pas juste les colonnes
+  choisies pour l'export CSV/Excel) dans l'environnement choisi
+  explicitement dans un menu déroulant (Leads / Prélèvement / futurs).
+- Si un fichier mélange plusieurs activités : filtrer dans l'onglet 3
+  pour isoler une activité, enregistrer, refaire une passe pour
+  l'autre — fonctionne déjà avec l'existant, pas de nouvelle mécanique.
+- `trieur/db.py:import_dataframe()` : extrait l'unique chemin d'import
+  (déjà utilisé par l'upload direct de l'onglet Base de données, gardé
+  tel quel pour charger un fichier brut sans repasser par le pipeline),
+  pour que les deux chemins d'écriture en base ne divergent jamais sur
+  la logique de dédoublonnage IBAN.
+- `views/_auth.py:optional_login_ctx()` : extrait le pattern "section
+  additive visible seulement si connecté, sans jamais forcer de
+  connexion", déjà utilisé par les colonnes maîtres liées au compte
+  (onglet 1), maintenant partagé à un 2e endroit au lieu d'être
+  reimplémenté.
+- Bug trouvé en écrivant les tests du chemin partagé, corrigé au
+  passage : une cellule vide devient `NaN` côté pandas (vrai en
+  booléen, non sérialisable en JSON standard) — sans conversion en
+  `None`, un import avec une colonne vide plantait. N'a pas encore
+  touché la prod (base vide), mais aurait cassé ce nouveau bouton sur
+  un vrai export Prélèvement (colonnes jamais toutes remplies).
+
+**Vérifié** : `tests/test_db_import.py` (nouveau, 5 tests, faux client
+Supabase — pas de réseau) couvrant explicitement le cas "Rachel Daniel"
+/ "Daniel Rachel" à l'origine du besoin de dédoublonnage IBAN. Suite
+complète (103 tests + 2 e2e Playwright réels) verte avant et après
+merge. Vérifié en navigateur réel que l'onglet Export ne plante pas et
+que la section reste invisible sans connexion.
+
+**Pas vérifié** : le vrai flux de bout en bout avec un compte Supabase
+réel (pas de secrets disponibles dans la session qui a fait ce
+chantier) — logique testée unitairement et relue à la main, jamais
+observée en conditions réelles.
+
+**Ne pas casser** :
+- `import_dataframe()` est maintenant LE seul endroit qui écrit dans
+  `trieur_data.records` avec dédoublonnage IBAN — toute future
+  évolution de cette logique (nouvelle règle métier, nouveau champ) se
+  fait ici, jamais dans `tab_database.py` ou `tab4_export.py`
+  directement.
+- Toute nouvelle section "additive si connecté" doit passer par
+  `optional_login_ctx()` (jamais un `require_login()`, qui bloque le
+  rendu — inacceptable sur un onglet qui doit rester utilisable sans
+  compte).
+
+**Notes / À faire** :
+- [ ] Utilisateur : tester le vrai bouton avec un compte réel (import →
+  filtre → export → "Enregistrer dans la base de données" → vérifier
+  dans l'onglet Base de données que les lignes apparaissent dans le bon
+  environnement).
+- [ ] Question ouverte, pas tranchée : l'upload brut de l'onglet Base
+  de données (sans mapping/filtre) reste-t-il utile maintenant que ce
+  bouton existe, ou devient-il redondant à terme ? Pas supprimé pour
+  l'instant, à revoir selon l'usage réel.
+
+---
+
 ## Nettoyage qualité + correction de bugs réels (2026-09-17)
 
 **Demande** : "nettoie le code, fais tout propre, limite les bugs au

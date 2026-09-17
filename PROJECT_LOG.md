@@ -38,18 +38,10 @@ la suite, en intégrant ces réponses et leurs commentaires :
    arrivant").
 7. [ ] Étiquettes libres sur un client (n1).
 8. [ ] Annuler un import entier en un clic (n3).
-9. [ ] Recherche avancée façon Google Sheets (opérateurs
-   contient/égal/plage de dates) + sélection et **modification**
-   multiples, pas juste suppression (n7 — commentaire explicite de
-   l'utilisateur : "rapproche-toi au max des filtres de Google
-   Sheets" + "modifications multiples ... via un bouton, où ? je ne
-   sais pas encore" — la forme exacte du bouton/emplacement sera à
-   affiner à l'implémentation).
-10. [ ] Voir les différences au réimport d'un fichier déjà connu, avec
-    de quoi comprendre POURQUOI une ligne est signalée comme doublon
-    (comparaison, filtre, recherche) avant d'agir (n4 — commentaire :
-    "il faut donner des informations pour comprendre d'où vient le
-    doublon ... pour s'assurer qu'on ne fait pas une mauvaise action").
+9. [x] Recherche avancée façon Google Sheets + modification multiple —
+   livré, voir section ci-dessous.
+10. [x] Diff au réimport (comparaison champ par champ sur une alerte de
+    doublon) — livré, voir section ci-dessous.
 11. [ ] **En attente**, bloqué sur l'Excel de référence : détection de
     quasi-doublons sur d'autres critères que l'IBAN (n2 — "OUI MAIS PAS
     FORCEMENT QUE LES IBAN") + règle de doublon configurable par
@@ -64,6 +56,50 @@ la suite, en intégrant ces réponses et leurs commentaires :
     discuter avant d'écrire du code, pas être devinée.
 13. [ ] **Reporté par l'utilisateur** ("plus tard") : colonnes
     calculées simples (n8).
+
+---
+
+## Recherche avancée + modification multiple + diff au réimport (2026-09-17)
+
+**Fait** (chantiers 9 et 10, regroupés — mode rapide demandé par
+l'utilisateur) :
+- Filtres par colonne à opérateurs : contient / ne contient pas / égal
+  à / vide / non vide (au lieu du seul "contient").
+- Sélectionner 2+ lignes ouvre "Modifier un champ pour la sélection" —
+  un champ, une valeur, appliquée à toute la sélection, avec
+  confirmation (`views/_ui.py:confirm_action_button()`, généralisé à
+  partir de `confirm_delete_button()`).
+- Les alertes de doublon affichent un vrai tableau de comparaison champ
+  par champ (`views/tab_database.py:diff_rows()`) au lieu de deux blocs
+  de données brutes.
+
+**Corrigé après revue avant merge** : le bug `... or ""` (valeur
+"fausse" confondue avec vide) déjà corrigé une fois dans
+`_render_edit_form` avait été réintroduit dans les opérateurs vide/non
+vide et dans le diff — corrigé avec des comparaisons explicites à
+`None`. Rappeler une vue enregistrée avant ce commit aurait fait
+planter l'onglet (format de stockage des filtres changé) — compatibilité
+ajoutée. Le sélecteur de champ de la modification en masse ne propose
+plus les colonnes d'affichage dérivées ("Fichier source", "Modifié
+le"...), qui auraient pollué le jsonb en silence si écrites.
+
+**Vérifié** : `tests/test_client_list_helpers.py` étendu (+10 tests,
+dont les deux régressions falsy-value trouvées en revue). Suite
+complète (149 tests) + e2e Playwright réel verts.
+
+**Pas vérifié** : le rendu réel avec un compte Supabase connecté (pas
+de secrets disponibles dans la session qui a fait ce chantier), ni le
+correctif de compatibilité des vues enregistrées avec une vraie vue au
+format d'avant ce commit (aucune vue réelle n'existe encore en prod).
+
+**Notes / À faire** :
+- [ ] Utilisateur : tester en usage réel (filtres par opérateur,
+  modification en masse sur plusieurs lignes, comparaison sur une
+  alerte de doublon).
+
+Avec ce chantier, **8 des 8 chantiers priorisés le 2026-09-17 sont
+livrés** (hors points 11-13, respectivement bloqué sur l'Excel, à
+cadrer avec l'utilisateur, et reporté par lui).
 
 ---
 

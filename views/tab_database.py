@@ -58,17 +58,22 @@ def render():
 
     st.markdown("##### Colonnes maîtres de cet environnement")
     current_cols = get_org_master_columns(client, org_id)
+    is_admin = ctx["profile"].get("is_super_admin")
     cols_text = st.text_area(
         "Une colonne par ligne",
         value="\n".join(current_cols),
         key=f"org_cols_{org_id}",
         height=150,
+        disabled=not is_admin,
     )
-    if st.button("Enregistrer les colonnes maîtres", key=f"save_cols_{org_id}"):
-        new_cols = [c.strip() for c in cols_text.splitlines() if c.strip()]
-        save_org_master_columns(client, org_id, new_cols)
-        st.success("Colonnes maîtres enregistrées.")
-        st.rerun()
+    if is_admin:
+        if st.button("Enregistrer les colonnes maîtres", key=f"save_cols_{org_id}"):
+            new_cols = [c.strip() for c in cols_text.splitlines() if c.strip()]
+            save_org_master_columns(client, org_id, new_cols)
+            st.success("Colonnes maîtres enregistrées.")
+            st.rerun()
+    else:
+        st.caption("Réglage de l'organisation, modifiable par un administrateur uniquement.")
 
     st.divider()
     st.markdown("##### Importer un fichier dans la base (avec vérification IBAN)")

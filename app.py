@@ -323,12 +323,24 @@ st.caption(f"Import Excel ou Google Sheets → mapping colonnes → aperçu → 
 if "top_menu" not in st.session_state:
     st.session_state.top_menu = "Trieur de Data"
 
-st.segmented_control(
-    "Section",
-    options=["Trieur de Data", "Base de données", "Cockpit"],
-    key="top_menu",
-    label_visibility="collapsed",
-)
+col_menu, col_auth = st.columns([5, 1])
+with col_menu:
+    st.segmented_control(
+        "Section",
+        options=["Trieur de Data", "Base de données", "Cockpit"],
+        key="top_menu",
+        label_visibility="collapsed",
+    )
+with col_auth:
+    # Bouton de connexion UNIQUE, partage par toutes les sections -- pas de
+    # formulaire duplique dans Base de donnees ET Cockpit (voir views/_auth.py).
+    try:
+        _supabase_configured = "supabase" in st.secrets
+    except Exception:
+        _supabase_configured = False
+    if _supabase_configured:
+        from views._auth import render_top_auth_widget
+        render_top_auth_widget()
 
 st.divider()
 

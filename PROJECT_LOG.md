@@ -6,6 +6,72 @@ en attente.
 
 ---
 
+## Nettoyage qualité + correction de bugs réels (2026-09-17)
+
+**Demande** : "nettoie le code, fais tout propre, limite les bugs au
+maximum, fais les correctifs nécessaires, anticipe" — suite à une
+confusion de l'utilisateur sur ce qui avait changé (clarifié : Streamlit
+= la techno, inchangée ; Render = l'hébergement, changé lui, voir
+section Migration ci-dessous).
+
+**Fait**, sur `trieur/` + `views/` + `app.py`, en deux passes
+(`/code-review high --fix` puis `/simplify` sur le diff résultant),
+chaque correctif relu et vérifié à la main avant commit :
+
+1. **Bug réel, priorité sécurité/argent** : la détection de doublon
+   IBAN (mandats SEPA/prélèvement) ne se déclenchait JAMAIS. La colonne
+   générée `records.iban_normalized` (migration 0001) lit la clé JSON
+   fixe `"iban"` (minuscule), mais l'import gardait le nom réel de la
+   colonne choisie par l'utilisateur ("IBAN", etc.) sans jamais la
+   recopier vers cette clé. Corrigé dans `views/tab_database.py`.
+   Vérifié par requête réelle sur la base de prod (`trieur_data.records`)
+   : table vide, donc aucune ligne existante affectée, pas de backfill
+   nécessaire.
+2. Suppression/réordonnancement d'une colonne d'environnement (et,
+   même bug, un filtre enregistré ou un preset d'export) pouvait
+   renommer EN SILENCE l'élément voisin — les champs de saisie sont
+   indexés par position et n'étaient jamais vidés après un changement
+   de liste.
+3. Une ligne totalement vide d'un fichier importé n'était plus jamais
+   filtrée à la fusion (onglet 2) : la colonne "Source Data", toujours
+   renseignée, faisait échouer le `dropna(how="all")`.
+4. Suppression de code mort dans `trieur/matching.py` (deux fonctions
+   non appelées, doublons d'une logique déjà ailleurs).
+5. **Confirmation à deux clics avant toute suppression** (règle globale
+   de l'utilisateur) : trois boutons supprimaient en un clic sans
+   confirmation (jeu de colonnes du compte, filtre enregistré, preset
+   d'export) — nouveau helper partagé `views/_ui.py:confirm_delete_button()`.
+6. Après une revue croisée à 4 angles (`/simplify` : reuse,
+   simplification, efficiency, altitude — unanimes), factorisé le
+   nettoyage des widgets périmés par position (point 2 + le nouveau
+   drapeau "en attente de confirmation" du point 5, qui a le même
+   problème) dans un seul helper `clear_stale_widgets()`, au lieu de
+   3 implémentations à la main.
+
+**Vérifié** : suite complète (99 tests, dont 2 e2e Playwright réels)
+verte avant ET après merge sur `main`. Comportement du nouveau
+`confirm_delete_button`/`clear_stale_widgets` vérifié avec
+`streamlit.testing.v1.AppTest` (script jetable, supprimé après
+verif) : un clic isolé ne supprime rien, "Annuler" revient à l'état
+initial, seul le second clic "Oui, supprimer" déclenche l'action.
+
+**Ignoré (signalé, pas traité)** : le renvoi trouvé par l'angle
+altitude — indexer les lignes (filtres, presets, colonnes) par un id
+stable (uuid) plutôt que par position ferait disparaître entièrement
+le besoin de `clear_stale_widgets()`, pas seulement le factoriser.
+Changement plus large que ce chantier, à considérer si ce genre de bug
+revient sur un futur onglet.
+
+**Ne pas casser** :
+- Tout futur bouton de suppression doit passer par
+  `confirm_delete_button()` (views/_ui.py), pas un `st.button()` nu.
+- Toute nouvelle liste avec des widgets indexés par position (rename,
+  reorder, delete) doit appeler `clear_stale_widgets(...)` avec ses
+  préfixes après chaque mutation de la liste, sinon retour du même bug
+  de renommage/confirmation silencieux sur l'élément voisin.
+
+---
+
 ## Instabilité signalée par l'utilisateur (déconnexions, "ça plante") — 2026-09-17
 
 **Cause racine trouvée et corrigée (vérifiée en conditions réelles)** :

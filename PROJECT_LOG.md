@@ -6,6 +6,63 @@ en attente.
 
 ---
 
+## Cockpit : login unique + hook de démarrage automatique (2026-09-17)
+
+**Login unique** : l'utilisateur a signalé deux formulaires de connexion
+dupliqués (Cockpit et Base de données demandaient chacun email/mot de
+passe). Corrigé : `views/_auth.py.render_top_auth_widget()`, un seul
+bouton (popover) affiché une fois dans `app.py`, à côté de la barre de
+menu. `require_login()` ne redessine plus de formulaire, renvoie juste
+vers ce bouton.
+
+**Bug de sécurité trouvé et corrigé au passage** : la table
+`organizations` n'avait qu'une policy RLS **SELECT**, aucune UPDATE — un
+membre normal qui essayait d'enregistrer les colonnes maîtres de son
+organisation (onglet Base de données) échouait silencieusement (seul
+mon accès admin direct fonctionnait). Ajouté : policy UPDATE réservée
+aux super-admins (migration `0004_organizations_update_policy.sql`) +
+champ désactivé côté interface pour un non-admin.
+
+**Piège de diagnostic à retenir** : deux `ImportError` sont apparus en
+prod (Streamlit Cloud) sur du code qui s'importait sans erreur en local
+— dans les deux cas, la cause réelle était un **secrets.toml absent en
+local** (jamais testé dans les mêmes conditions que la prod) ou un
+**déploiement pas encore terminé** au moment où l'utilisateur a
+rafraîchi juste après un push. Reproduit les conditions réelles (vrais
+secrets Supabase + vrai serveur Streamlit + Playwright) avant de conclure
+à un bug de code — ça a évité de chercher un bug qui n'existait pas.
+**À faire systématiquement à l'avenir avant de creuser un ImportError
+Streamlit Cloud.**
+
+**Hook de démarrage Cockpit** (`.claude/hooks/session-start.sh`,
+enregistré dans `.claude/settings.json`) : chaque nouvelle session
+Claude Code sur ce dépôt lit maintenant automatiquement les chantiers
+`trieur_data.chantiers` ouverts (statut a_faire/en_cours/attente_retour)
+au démarrage, via l'API REST Supabase avec `SUPABASE_SERVICE_ROLE_KEY`
+(déjà dans l'environnement) — plus besoin de demander "regarde le
+Cockpit" à chaque session. Silencieux si la clé est absente (jamais
+bloquant). `.claude/` était entièrement gitignoré ; exception ajoutée
+pour `.claude/hooks/` et `.claude/settings.json` uniquement (voir
+`.gitignore`), pour que ce hook s'applique à toute future session sur ce
+dépôt — c'est la version "hook de démarrage" demandée dans le CLAUDE.md
+global de l'utilisateur.
+
+**Notes / À faire** :
+- [ ] Le hook lit les chantiers mais ne lit pas encore le fil de
+  messages complet automatiquement (juste le titre/statut) — la session
+  doit encore aller chercher `chantier_messages` via le MCP Supabase.
+  Volontaire pour l'instant (éviter un hook trop lourd/lent au
+  démarrage) ; à revoir si ça devient gênant en pratique.
+- [ ] `get_client()` (trieur/db.py) est un `@st.cache_resource` — donc un
+  objet PARTAGÉ par tous les visiteurs du même processus Streamlit Cloud
+  (pas par session). `client.auth.set_session(...)` est appelé à chaque
+  requête donc ça ne devrait pas mélanger les sessions de deux personnes
+  différentes en pratique, mais pas vérifié sous vraie charge concurrente
+  (deux comptes connectés en même temps). À surveiller, pas encore un
+  problème avec 2 utilisateurs.
+
+---
+
 ## Export XML SEPA (pain.008) — Prélèvement (2026-09-17)
 
 **Contexte** (donné par l'utilisateur) : le père gère les prélèvements

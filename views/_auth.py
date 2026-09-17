@@ -1,7 +1,7 @@
 # =============================================================
-# Écran de connexion (Supabase Auth) + résolution du profil/organisations
-# de l'utilisateur connecté. Bloque l'accès au reste de l'app tant que
-# la personne n'est pas authentifiée.
+# Connexion Supabase (Auth) : UN SEUL bouton, dans la barre de menu en
+# haut de l'app (voir app.py), partagé par toutes les sections -- pas de
+# formulaire de connexion dupliqué dans chaque onglet.
 # =============================================================
 
 import streamlit as st
@@ -9,33 +9,45 @@ import streamlit as st
 from trieur.db import get_client, get_my_memberships, get_my_profile, list_organizations
 
 
-def _login_form():
-    st.title("Trieur de Data")
-    st.caption("Connexion requise")
+def render_top_auth_widget():
+    """Bouton de connexion/déconnexion unique, à afficher une fois en haut
+    de l'app quelle que soit la section active. Ne bloque jamais le rendu :
+    c'est `require_login()` (appelé dans Cockpit/Base de données) qui
+    s'en charge, seulement pour les sections qui en ont besoin."""
+    if "auth_session" in st.session_state:
+        email = st.session_state["auth_session"].user.email
+        with st.popover(f"🟢 {email}"):
+            if st.button("Se déconnecter", key="top_logout"):
+                get_client().auth.sign_out()
+                del st.session_state["auth_session"]
+                st.rerun()
+        return
 
-    with st.form("login_form"):
-        email = st.text_input("Email")
-        password = st.text_input("Mot de passe", type="password")
-        submitted = st.form_submit_button("Se connecter", type="primary")
+    with st.popover("🔒 Se connecter"):
+        with st.form("login_form"):
+            email = st.text_input("Email")
+            password = st.text_input("Mot de passe", type="password")
+            submitted = st.form_submit_button("Se connecter", type="primary")
 
-    if submitted:
-        client = get_client()
-        try:
-            auth_res = client.auth.sign_in_with_password({"email": email, "password": password})
-        except Exception as exc:
-            st.error(f"Connexion refusée : {exc}")
-            return
-        st.session_state["auth_session"] = auth_res.session
-        st.rerun()
+        if submitted:
+            client = get_client()
+            try:
+                auth_res = client.auth.sign_in_with_password({"email": email, "password": password})
+            except Exception as exc:
+                st.error(f"Connexion refusée : {exc}")
+                return
+            st.session_state["auth_session"] = auth_res.session
+            st.rerun()
 
-    st.caption("Pas encore de compte ? Demande une invitation à l'administrateur.")
+        st.caption("Pas encore de compte ? Demande une invitation à l'administrateur.")
 
 
 def require_login() -> dict:
-    """Bloque le rendu tant que l'utilisateur n'est pas connecté et n'a
-    pas d'organisation. Retourne un contexte {user, profile, memberships}."""
+    """À appeler au début d'une section qui a besoin d'un compte (Cockpit,
+    Base de données). Affiche un message renvoyant vers le bouton du haut
+    (pas un formulaire dupliqué) tant que personne n'est connecté."""
     if "auth_session" not in st.session_state:
-        _login_form()
+        st.info("Connecte-toi via le bouton **🔒 Se connecter** en haut de la page.")
         st.stop()
 
     client = get_client()
@@ -53,13 +65,6 @@ def require_login() -> dict:
     if not memberships and not profile.get("is_super_admin"):
         st.warning("Ton compte n'a accès à aucun espace pour l'instant. Contacte l'administrateur.")
         st.stop()
-
-    with st.sidebar:
-        st.caption(f"Connecté : {user.email}")
-        if st.button("Se déconnecter"):
-            client.auth.sign_out()
-            del st.session_state["auth_session"]
-            st.rerun()
 
     return {"client": client, "user": user, "profile": profile, "memberships": memberships}
 

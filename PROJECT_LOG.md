@@ -6,6 +6,49 @@ en attente.
 
 ---
 
+## Cockpit : résumé "où j'en suis" + bandeau "depuis ta dernière visite" (2026-09-17)
+
+Le Cockpit se limitait à une liste de chantiers (statut, todos, fil de
+discussion) — comparé à celui du projet Jarvis, il manquait deux choses
+que l'utilisateur a demandé de généraliser à tout projet, pas seulement
+Jarvis (voir `rnab26/dotfiles/cockpit-kit/FONCTIONNALITES.md`, le
+cahier des charges partagé, indépendant du langage).
+
+**Résumé "où j'en suis"** (`views/tab_cockpit.py::_render_ou_jen_suis`) :
+quatre nombres par organisation — Bouge (`en_cours`), Livré aujourd'hui
+(`termine` mis à jour aujourd'hui), Pour toi (`attente_retour`), Dort
+(`a_faire`). `abandonne` ne compte dans aucune des quatre, volontairement
+(un chantier abandonné n'est ni actif ni "à traiter").
+
+**Bandeau "depuis ta dernière visite"** : nouvelle table
+`trieur_data.visites_cockpit` (migration `0006`) + fonction SQL
+`marquer_cockpit_vu()` dont le non-recul est garanti côté serveur
+(`greatest()`), pas côté client — deux onglets ouverts en même temps ne
+doivent pas pouvoir s'écraser l'un l'autre. Silencieux à la toute
+première visite (aucun repère = rien à annoncer comme "nouveau").
+
+**Recherche + filtre par statut** ajoutés sur la liste active
+(`col_search`/`col_filter` dans `render()`).
+
+Vérifié : `python3 -m py_compile` sur les deux fichiers modifiés,
+`pytest` (97/99 — les 2 échecs sont le flake Playwright déjà documenté
+plus haut, sans rapport), migration `0006` appliquée réellement contre
+la base partagée (table + fonction confirmées présentes par requête).
+
+**Non vérifié** : rendu réel dans un navigateur (pas d'accès Streamlit
+Cloud depuis cet environnement). À constater par l'utilisateur : ouvrir
+l'onglet Cockpit et voir le résumé à quatre chiffres + le bouton "Vu".
+
+**Notes / À faire** :
+- [ ] Pas de détection de doublons de chantiers ni de sections/thèmes
+  déclarés — le cahier des charges du kit les dit conditionnels au
+  volume ; à ajouter seulement si le nombre de chantiers grossit
+  vraiment.
+- [ ] Actions groupées (changer le statut de plusieurs chantiers à la
+  fois) pas encore faites, même raison (peu de chantiers aujourd'hui).
+
+---
+
 ## Base de données : point 1 (gestion des colonnes) + Cockpit restructuré (2026-09-17)
 
 **Gestion des colonnes** : dans Base de données → réglages, chaque

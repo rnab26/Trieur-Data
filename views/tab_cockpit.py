@@ -13,15 +13,19 @@
 # de discussion libre.
 # =============================================================
 
+from datetime import datetime, timezone
+
 import streamlit as st
 
 from trieur.db import (
     add_chantier_message,
     add_chantier_todo,
     create_chantier,
+    get_derniere_visite_cockpit,
     list_chantier_messages,
     list_chantier_todos,
     list_chantiers,
+    marquer_cockpit_vu,
     set_chantier_todo_done,
     update_chantier_status,
 )
@@ -77,6 +81,12 @@ def render():
         key="cockpit_org_select",
     )
 
+    chantiers = list_chantiers(client, org_id)
+
+    derniere_visite = get_derniere_visite_cockpit(client, user.id)
+    _render_bandeau_depuis_derniere_visite(client, chantiers, derniere_visite)
+    _render_ou_jen_suis(chantiers)
+
     with st.expander("➕ Nouveau chantier"):
         with st.form("new_chantier_form", clear_on_submit=True):
             title = st.text_input("Titre du chantier / de la demande")
@@ -86,28 +96,117 @@ def render():
             create_chantier(client, org_id, title.strip(), priority, user.id)
             st.rerun()
 
-    chantiers = list_chantiers(client, org_id)
     if not chantiers:
         st.caption("Aucun chantier pour cet environnement pour l'instant.")
         return
+
+    col_search, col_filter = st.columns([2, 1])
+    with col_search:
+        recherche = st.text_input(
+            "Chercher un chantier", key="cockpit_recherche", placeholder="Chercher un chantier...",
+            label_visibility="collapsed",
+        )
+    with col_filter:
+        filtre_statut = st.selectbox(
+            "Filtrer par statut",
+            options=["tous"] + STATUT_ACTIFS,
+            format_func=lambda s: "Tous les statuts actifs" if s == "tous" else STATUT_LABELS[s],
+            key="cockpit_filtre_statut",
+            label_visibility="collapsed",
+        )
+
+    def _correspond(ch):
+        if recherche and recherche.strip().lower() not in ch["title"].lower():
+            return False
+        if filtre_statut != "tous" and ch["status"] != filtre_statut:
+            return False
+        return True
 
     by_status = {s: [] for s in STATUT_ORDER}
     for ch in chantiers:
         by_status.setdefault(ch["status"], []).append(ch)
 
-    n_actifs = sum(len(by_status[s]) for s in STATUT_ACTIFS)
-    if n_actifs == 0:
-        st.caption("Aucun chantier actif — tout est terminé ou abandonné.")
+    actifs_visibles = [ch for s in STATUT_ACTIFS for ch in by_status.get(s, []) if _correspond(ch)]
+    if not actifs_visibles:
+        if any(by_status.get(s) for s in STATUT_ACTIFS):
+            st.caption("Aucun chantier actif ne correspond à cette recherche/ce filtre.")
+        else:
+            st.caption("Aucun chantier actif — tout est terminé ou abandonné.")
 
-    for status in STATUT_ACTIFS:
-        for ch in by_status.get(status, []):
-            _render_chantier(client, ch, user)
+    for ch in actifs_visibles:
+        _render_chantier(client, ch, user)
 
     archives = [ch for s in STATUT_ARCHIVES for ch in by_status.get(s, [])]
     if archives:
         with st.expander(f"📦 Chantiers clos ({len(archives)})"):
             for ch in archives:
                 _render_chantier(client, ch, user, compact=True)
+
+
+def _parse_dt(value: str | None):
+    if not value:
+        return None
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _render_ou_jen_suis(chantiers: list[dict]) -> None:
+    """Le résumé "où j'en suis" (cockpit-kit/FONCTIONNALITES.md, point 1) :
+    quatre nombres, jamais cinq -- un chantier "abandonne" (l'équivalent
+    d'un [REPORTÉ]/[BLOQUÉ] sur Jarvis) ne compte dans AUCUNE des colonnes,
+    plutôt que de forcer une case qui mentirait sur son vrai état."""
+    if not chantiers:
+        return
+
+    aujourdhui = datetime.now(timezone.utc).date()
+    bouge = sum(1 for c in chantiers if c["status"] == "en_cours")
+    livre = sum(
+        1 for c in chantiers
+        if c["status"] == "termine" and (d := _parse_dt(c["updated_at"])) and d.date() == aujourdhui
+    )
+    pour_toi = sum(1 for c in chantiers if c["status"] == "attente_retour")
+    dort = sum(1 for c in chantiers if c["status"] == "a_faire")
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Bouge", bouge)
+    col2.metric("Livré aujourd'hui", livre)
+    col3.metric("Pour toi", pour_toi)
+    col4.metric("Dort", dort)
+
+
+def _render_bandeau_depuis_derniere_visite(client, chantiers: list[dict], derniere_visite: str | None) -> None:
+    """cockpit-kit/FONCTIONNALITES.md, point 2. Silencieux à la toute
+    première visite (aucun repère = rien à comparer, présenter tout
+    l'historique comme "nouveau" serait faux) -- même règle que sur
+    Jarvis. Le bouton "Vu" appelle marquer_cockpit_vu(), dont le
+    non-recul est garanti côté SQL (greatest()), pas ici."""
+    if derniere_visite is None:
+        if st.button("👋 Marquer le cockpit comme vu", key="cockpit_premiere_visite"):
+            marquer_cockpit_vu(client)
+            st.rerun()
+        return
+
+    seuil = _parse_dt(derniere_visite)
+    livres = [c for c in chantiers if c["status"] == "termine" and (d := _parse_dt(c["updated_at"])) and d > seuil]
+    nouveaux = [c for c in chantiers if (d := _parse_dt(c["created_at"])) and d > seuil]
+
+    if not livres and not nouveaux:
+        return
+
+    with st.container(border=True):
+        col_texte, col_bouton = st.columns([4, 1])
+        with col_texte:
+            morceaux = []
+            if livres:
+                morceaux.append(f"**{len(livres)}** livré{'s' if len(livres) > 1 else ''}")
+            if nouveaux:
+                morceaux.append(f"**{len(nouveaux)}** nouveau{'x' if len(nouveaux) > 1 else ''}")
+            st.markdown("Depuis ton dernier passage : " + ", ".join(morceaux))
+            for ch in livres[:5]:
+                st.caption(f"✓ {ch['title']}")
+        with col_bouton:
+            if st.button("Vu", key="cockpit_marquer_vu"):
+                marquer_cockpit_vu(client)
+                st.rerun()
 
 
 def _render_chantier(client, ch, user, compact=False):

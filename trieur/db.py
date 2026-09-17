@@ -138,6 +138,33 @@ def set_chantier_todo_done(client: Client, todo_id: str, done: bool) -> None:
 
 
 # ---------------------------------------------------------------
+# Résumé "où j'en suis" et repère "depuis ta dernière visite"
+# (cockpit-kit/FONCTIONNALITES.md, points 1 et 2).
+# ---------------------------------------------------------------
+
+def get_derniere_visite_cockpit(client: Client, user_id: str) -> str | None:
+    """`None` si l'utilisateur n'a jamais marqué le cockpit comme vu --
+    dans ce cas on ne réannonce PAS tout comme si c'était nouveau (pas de
+    repère = pas de comparaison possible), voir tab_cockpit.py."""
+    res = (
+        _td(client, "visites_cockpit")
+        .select("vu_le")
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    return res.data[0]["vu_le"] if res.data else None
+
+
+def marquer_cockpit_vu(client: Client) -> str:
+    """Le repère ne recule jamais : la fonction SQL fait le `greatest()`,
+    pas ce code (deux écrans ouverts en même temps ne doivent pas pouvoir
+    s'écraser l'un l'autre en arrière)."""
+    res = client.postgrest.schema("trieur_data").rpc("marquer_cockpit_vu", {}).execute()
+    return res.data
+
+
+# ---------------------------------------------------------------
 # Environnements personnalisés : colonnes maîtres par organisation +
 # import avec vérification de doublon IBAN contre tout l'historique.
 # ---------------------------------------------------------------

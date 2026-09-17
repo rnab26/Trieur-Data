@@ -146,6 +146,20 @@ def require_org_access(org_id: str, ctx: AuthCtx = Depends(get_current_ctx)) -> 
 
 
 # ---------------------------------------------------------------
+# Profil courant
+# ---------------------------------------------------------------
+
+@app.get("/me")
+def get_me(ctx: AuthCtx = Depends(get_current_ctx)):
+    """Profil du compte connecté -- notamment `is_super_admin`, dont le
+    frontend a besoin pour savoir s'il doit proposer les contrôles
+    d'édition des colonnes maîtres (write endpoint déjà réservé aux
+    admins ci-dessous ; ceci évite de laisser un membre simple ouvrir un
+    formulaire qui échouera systématiquement en 403)."""
+    return {"profile": ctx.profile}
+
+
+# ---------------------------------------------------------------
 # Orgs
 # ---------------------------------------------------------------
 
@@ -251,8 +265,15 @@ async def import_records(
     file: UploadFile = File(...),
     iban_col: Optional[str] = Form(None),
     add_unknown_columns: bool = Form(False),
+    dry_run: bool = Form(False),
     ctx: AuthCtx = Depends(require_org_access),
 ):
+    """`dry_run=true` : lit et renvoie l'aperçu (colonnes détectées,
+    quelques lignes, colonnes inconnues) SANS rien écrire en base --
+    permet au frontend d'afficher un aperçu et de choisir la colonne
+    IBAN avant de confirmer, comme le fait `st.dataframe(df.head(10))`
+    côté Streamlit (views/tab_database.py:_render_import), sans dupliquer
+    la lecture CSV/Excel (pandas) côté navigateur."""
     content = await file.read()
     filename = file.filename or "import"
     try:
@@ -265,6 +286,16 @@ async def import_records(
 
     master_cols = get_org_master_columns(ctx.client, org_id)
     unknown = unknown_columns(df.columns, master_cols)
+
+    if dry_run:
+        preview = df.head(10).where(pd.notnull(df.head(10)), None)
+        return {
+            "columns": list(df.columns),
+            "unknown_columns": unknown,
+            "preview_rows": preview.to_dict(orient="records"),
+            "row_count": len(df),
+        }
+
     added: list[str] = []
     if unknown and add_unknown_columns:
         if not ctx.profile.get("is_super_admin"):

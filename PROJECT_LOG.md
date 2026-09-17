@@ -1313,14 +1313,46 @@ parallèle sur la même base Supabase pendant la transition).
   sur `main`, pas de PR** — migration en cours, pas prête à remplacer
   le site en production.
 
+**État (2026-09-17, suite — import + colonnes maîtres)** :
+- `api/main.py` : `POST /orgs/{id}/import` accepte maintenant
+  `dry_run=true` — lit le fichier (pandas, comme à l'import réel) et
+  renvoie colonnes détectées + aperçu (10 lignes) + colonnes inconnues,
+  **sans rien écrire en base**. Sert l'aperçu React avant confirmation
+  sans dupliquer la lecture CSV/Excel côté navigateur (et sans y
+  installer de lib de parsing Excel : `xlsx`/SheetJS a des CVE non
+  corrigées — écarté, préféré une extension de l'endpoint existant).
+  Ajout de `GET /me` (profil courant, dont `is_super_admin`) — le
+  frontend en a besoin pour proposer ou non les contrôles d'édition des
+  colonnes maîtres (le write endpoint les refusait déjà en 403, ceci
+  évite juste de les montrer à un membre simple).
+- Réordonner/renommer/supprimer une colonne maître ne nécessitait pas
+  de nouvel endpoint : `save_org_master_columns` (trieur/db.py) prend
+  déjà la liste complète ordonnée — le même
+  `POST /orgs/{id}/master-columns` (déjà réservé admin) suffit, on lui
+  renvoie chaque fois la liste modifiée.
+- `frontend/` : deux nouveaux écrans dans "Base de données" (onglets
+  Clients / Importer / Colonnes maîtres) —
+  `screens/ImportPanel.tsx` (upload, aperçu des colonnes + IBAN à
+  choisir, alerte si plusieurs colonnes ressemblent à un IBAN,
+  proposition d'ajouter les colonnes inconnues aux réglages si admin,
+  résultat import compté/alertes) et
+  `screens/MasterColumnsPanel.tsx` (liste des colonnes ; admin :
+  renommer/réordonner/supprimer avec confirmation/ajouter ; non-admin :
+  lecture seule). États chargement/vide/erreur traités sur les deux.
+- Vérifié : `python3 -m pytest tests/test_api.py -q` → **25 passed**
+  (dont 6 nouveaux tests : dry_run n'écrit rien, import réel, gate
+  admin sur l'ajout de colonnes inconnues, `/me`). Suite complète
+  (`python3 -m pytest -q`) → **175 passed**. `cd frontend && npm run
+  build` → succès (`tsc -b && vite build`, exit 0).
+- `views/` et `app.py` non touchés.
+
 **Reste à faire (portage des écrans Streamlit vers React)** — au-delà
-du seul écran "Base de données" (liste/recherche/édition) livré ce
-soir :
-- [ ] Import CSV/Excel (mapping de colonnes, détection colonnes
-  inconnues, alertes de doublon) — endpoint API déjà prêt
-  (`POST /orgs/{id}/import`), UI React à faire.
-- [ ] Gestion des colonnes maîtres (UI d'ajout/suppression, pas
-  seulement la lecture utilisée par l'écran actuel).
+de "Base de données" (liste/recherche/édition/import/colonnes
+maîtres) livré :
+- [x] Import CSV/Excel (aperçu colonnes, choix IBAN, colonnes
+  inconnues → ajout aux colonnes maîtres) — livré 2026-09-17.
+- [x] Gestion des colonnes maîtres (UI ajout/renommage/réordonnage/
+  suppression, admin ; lecture seule sinon) — livré 2026-09-17.
 - [ ] Vues enregistrées (UI créer/lister/appliquer/supprimer) —
   endpoints déjà prêts.
 - [ ] Tableau de bord par environnement + badge d'alertes de doublon —

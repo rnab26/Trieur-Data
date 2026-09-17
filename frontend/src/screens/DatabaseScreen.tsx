@@ -2,10 +2,14 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { useAuth } from '@/lib/AuthContext'
-import { ApiError, listOrgs, listRecords, type Organization, type RecordRow } from '@/lib/api'
+import { ApiError, getMe, listOrgs, listRecords, type Organization, type RecordRow } from '@/lib/api'
 import { RecordEditDialog } from './RecordEditDialog'
+import { ImportPanel } from './ImportPanel'
+import { MasterColumnsPanel } from './MasterColumnsPanel'
 
 const PAGE_SIZE = 50
+
+type Tab = 'clients' | 'import' | 'columns'
 
 export function DatabaseScreen() {
   const { session, signOut } = useAuth()
@@ -13,6 +17,10 @@ export function DatabaseScreen() {
   const [orgs, setOrgs] = useState<Organization[] | null>(null)
   const [orgsError, setOrgsError] = useState<string | null>(null)
   const [orgId, setOrgId] = useState<string | null>(null)
+
+  const [isAdmin, setIsAdmin] = useState(false)
+
+  const [tab, setTab] = useState<Tab>('clients')
 
   const [search, setSearch] = useState('')
   const [searchInput, setSearchInput] = useState('')
@@ -38,6 +46,23 @@ export function DatabaseScreen() {
       .catch((err: unknown) => {
         if (cancelled) return
         setOrgsError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Statut admin (GET /me) -- détermine si les contrôles d'édition des
+  // colonnes maîtres sont proposés (le write endpoint les refuse de
+  // toute façon en 403, ceci évite juste de les montrer pour rien).
+  useEffect(() => {
+    let cancelled = false
+    getMe()
+      .then((data) => {
+        if (!cancelled) setIsAdmin(Boolean(data.profile.is_super_admin))
+      })
+      .catch(() => {
+        // Pas bloquant : en cas d'échec, on reste en lecture seule.
       })
     return () => {
       cancelled = true
@@ -143,20 +168,55 @@ export function DatabaseScreen() {
             ))}
           </select>
 
-          <form onSubmit={handleSearchSubmit} className="flex flex-1 min-w-[200px] gap-2">
-            <Input
-              placeholder="Rechercher un client…"
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-            />
-            <Button type="submit" variant="secondary">
-              Rechercher
-            </Button>
-          </form>
+          {tab === 'clients' && (
+            <form onSubmit={handleSearchSubmit} className="flex flex-1 min-w-[200px] gap-2">
+              <Input
+                placeholder="Rechercher un client…"
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+              />
+              <Button type="submit" variant="secondary">
+                Rechercher
+              </Button>
+            </form>
+          )}
         </div>
       )}
 
       {orgId && (
+        <div className="mb-4 flex gap-2 border-b border-[var(--border)]">
+          {([
+            ['clients', 'Clients'],
+            ['import', 'Importer'],
+            ['columns', 'Colonnes maîtres'],
+          ] as [Tab, string][]).map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setTab(key)}
+              className={
+                'px-3 py-2 text-sm font-medium ' +
+                (tab === key
+                  ? 'border-b-2 border-[var(--primary)] text-[var(--foreground)]'
+                  : 'text-[var(--muted)] hover:text-[var(--foreground)]')
+              }
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {orgId && tab === 'import' && (
+        <ImportPanel
+          orgId={orgId}
+          isAdmin={isAdmin}
+          onImported={() => void fetchPage(orgId, 1, search, false)}
+        />
+      )}
+
+      {orgId && tab === 'columns' && <MasterColumnsPanel orgId={orgId} isAdmin={isAdmin} />}
+
+      {orgId && tab === 'clients' && (
         <>
           {loading && <p className="text-sm text-[var(--muted)]">Chargement…</p>}
 

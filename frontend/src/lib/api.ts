@@ -105,3 +105,78 @@ export function updateRecord(orgId: string, recordId: string, data: Record<strin
 export function getMasterColumns(orgId: string) {
   return request<{ columns: string[] }>(`/orgs/${orgId}/master-columns`)
 }
+
+export function setMasterColumns(orgId: string, columns: string[]) {
+  return request<{ columns: string[] }>(`/orgs/${orgId}/master-columns`, {
+    method: 'POST',
+    body: JSON.stringify({ columns }),
+  })
+}
+
+export type Profile = {
+  id: string
+  full_name?: string | null
+  is_super_admin?: boolean
+  [key: string]: unknown
+}
+
+export function getMe() {
+  return request<{ profile: Profile }>('/me')
+}
+
+export type ImportPreview = {
+  columns: string[]
+  unknown_columns: string[]
+  preview_rows: Record<string, unknown>[]
+  row_count: number
+}
+
+export type ImportResult = {
+  n_imported: number
+  n_alerts: number
+  unknown_columns: string[]
+  added_to_master_columns: string[]
+}
+
+// Requête multipart -- pas de JSON, donc pas d'appel à `request()`
+// (qui pose systématiquement 'Content-Type: application/json').
+async function importRequest<T>(
+  orgId: string,
+  file: File,
+  opts: { ibanCol?: string | null; addUnknownColumns?: boolean; dryRun?: boolean },
+): Promise<T> {
+  const headers = await authHeader()
+  const form = new FormData()
+  form.set('file', file)
+  if (opts.ibanCol) form.set('iban_col', opts.ibanCol)
+  form.set('add_unknown_columns', String(opts.addUnknownColumns ?? false))
+  form.set('dry_run', String(opts.dryRun ?? false))
+  const res = await fetch(`${API_URL}/orgs/${orgId}/import`, {
+    method: 'POST',
+    headers,
+    body: form,
+  })
+  if (!res.ok) {
+    let detail = res.statusText
+    try {
+      const body = await res.json()
+      detail = body.detail ?? detail
+    } catch {
+      // pas de corps JSON -- on garde le statusText
+    }
+    throw new ApiError(res.status, detail)
+  }
+  return res.json() as Promise<T>
+}
+
+export function previewImport(orgId: string, file: File) {
+  return importRequest<ImportPreview>(orgId, file, { dryRun: true })
+}
+
+export function confirmImport(
+  orgId: string,
+  file: File,
+  opts: { ibanCol?: string | null; addUnknownColumns?: boolean },
+) {
+  return importRequest<ImportResult>(orgId, file, { ...opts, dryRun: false })
+}

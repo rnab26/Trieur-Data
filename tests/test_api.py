@@ -248,6 +248,24 @@ def test_org_not_a_member_of_is_forbidden(client_factory):
 
 
 # ---------------------------------------------------------------
+# Profil courant (/me)
+# ---------------------------------------------------------------
+
+def test_me_returns_profile(client_factory):
+    fake = _make_client(profiles=[{"id": "user-1", "full_name": "Alice", "is_super_admin": True}])
+    tc = client_factory(fake)
+    res = tc.get("/me", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 200
+    assert res.json()["profile"]["is_super_admin"] is True
+
+
+def test_me_requires_auth(client_factory):
+    tc = client_factory(_make_client())
+    res = tc.get("/me")
+    assert res.status_code == 401
+
+
+# ---------------------------------------------------------------
 # Records : pagination
 # ---------------------------------------------------------------
 
@@ -448,6 +466,83 @@ def test_master_columns_write_allowed_for_admin(client_factory):
     )
     assert res.status_code == 200
     assert res.json()["columns"] == ["NOM", "IBAN", "VILLE"]
+
+
+# ---------------------------------------------------------------
+# Import CSV/Excel
+# ---------------------------------------------------------------
+
+_CSV_CONTENT = b"NOM,VILLE\nDupont,Paris\nMartin,Lyon\n"
+
+
+def test_import_dry_run_previews_without_writing(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/import",
+        files={"file": ("clients.csv", _CSV_CONTENT, "text/csv")},
+        data={"dry_run": "true"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["columns"] == ["NOM", "VILLE"]
+    # VILLE n'est pas une colonne maître connue ("NOM", "IBAN" -- voir
+    # _make_client) : détectée comme inconnue, sans être ajoutée.
+    assert body["unknown_columns"] == ["VILLE"]
+    assert body["row_count"] == 2
+    assert len(body["preview_rows"]) == 2
+    # Rien écrit en base : un dry_run n'est qu'un aperçu.
+    assert fake.postgrest.tables["records"] == []
+    assert fake.postgrest.tables["import_batches"] == []
+
+
+def test_import_writes_records_without_adding_unknown_columns(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/import",
+        files={"file": ("clients.csv", _CSV_CONTENT, "text/csv")},
+        data={"iban_col": "", "add_unknown_columns": "false"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["n_imported"] == 2
+    assert body["n_alerts"] == 0
+    assert body["unknown_columns"] == ["VILLE"]
+    assert body["added_to_master_columns"] == []
+    assert len(fake.postgrest.tables["records"]) == 2
+    assert len(fake.postgrest.tables["import_batches"]) == 1
+
+
+def test_import_add_unknown_columns_forbidden_for_non_admin(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/import",
+        files={"file": ("clients.csv", _CSV_CONTENT, "text/csv")},
+        data={"add_unknown_columns": "true"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 403
+    # Refusé avant tout écriture -- aucune ligne importée.
+    assert fake.postgrest.tables["records"] == []
+
+
+def test_import_add_unknown_columns_allowed_for_admin(client_factory):
+    fake = _make_client(profiles=[{"id": "user-1", "full_name": "Alice", "is_super_admin": True}])
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/import",
+        files={"file": ("clients.csv", _CSV_CONTENT, "text/csv")},
+        data={"add_unknown_columns": "true"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["added_to_master_columns"] == ["VILLE"]
+    assert fake.postgrest.tables["organizations"][0]["master_columns"] == ["NOM", "IBAN", "VILLE"]
 
 
 # ---------------------------------------------------------------

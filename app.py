@@ -339,7 +339,8 @@ with col_auth:
     except Exception:
         _supabase_configured = False
     if _supabase_configured:
-        from views._auth import render_top_auth_widget
+        from views._auth import render_top_auth_widget, try_restore_session
+        try_restore_session()
         render_top_auth_widget()
 
 st.divider()

@@ -7,6 +7,43 @@
 import streamlit as st
 
 from trieur.db import get_client, get_my_memberships, get_my_profile, list_organizations
+from views._ls_auth_sync import clear_stored_session, read_stored_session, store_session
+
+
+def try_restore_session():
+    """À appeler une fois, tôt, avant d'afficher le bouton de connexion.
+
+    Streamlit efface `st.session_state` à chaque reconnexion WebSocket
+    (mobile qui met l'onglet en veille, réseau qui coupe un instant...) --
+    ce qui déconnectait silencieusement l'utilisateur en permanence, même
+    si son jeton Supabase restait valable plusieurs semaines. Restaure la
+    session depuis le secours localStorage (voir views/_ls_auth_sync.py)
+    si le serveur vient de la perdre."""
+    if "auth_session" in st.session_state:
+        return
+
+    stored = read_stored_session()
+    if not stored:
+        return
+
+    client = get_client()
+    try:
+        auth_res = client.auth.set_session(stored["access_token"], stored["refresh_token"])
+    except Exception:
+        # Jeton invalide/expiré (ex: mot de passe changé ailleurs) : on
+        # nettoie le secours plutôt que de retenter en boucle.
+        clear_stored_session()
+        return
+
+    if not auth_res.session:
+        clear_stored_session()
+        return
+
+    st.session_state["auth_session"] = auth_res.session
+    # set_session peut avoir fait tourner le refresh_token (single-use) :
+    # on réenregistre la paire la plus fraîche.
+    store_session(auth_res.session.access_token, auth_res.session.refresh_token)
+    st.rerun()
 
 
 def render_top_auth_widget():
@@ -20,6 +57,7 @@ def render_top_auth_widget():
             if st.button("Se déconnecter", key="top_logout"):
                 get_client().auth.sign_out()
                 del st.session_state["auth_session"]
+                clear_stored_session()
                 st.rerun()
         return
 
@@ -37,6 +75,7 @@ def render_top_auth_widget():
                 st.error(f"Connexion refusée : {exc}")
                 return
             st.session_state["auth_session"] = auth_res.session
+            store_session(auth_res.session.access_token, auth_res.session.refresh_token)
             st.rerun()
 
         st.caption("Pas encore de compte ? Demande une invitation à l'administrateur.")

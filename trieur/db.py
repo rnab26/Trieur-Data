@@ -12,9 +12,10 @@ import streamlit as st
 
 # Import differe (dans la fonction, pas au niveau module) : la librairie
 # `supabase` alourdit sensiblement le temps de demarrage de l'app si elle
-# est importee pour tout le monde. Comme seul l'onglet Cockpit en a besoin,
-# on ne paie ce cout que quand quelqu'un l'ouvre reellement -- les onglets
-# 1 a 4 restent aussi legers/rapides qu'avant.
+# est importee pour tout le monde. Comme seuls les onglets Cockpit, Base de
+# donnees et (si connecte) Colonnes maitres en ont besoin, on ne paie ce
+# cout que quand quelqu'un les ouvre reellement -- un visiteur anonyme sur
+# les onglets 1 a 4 ne charge jamais cette librairie.
 
 
 @st.cache_resource(show_spinner=False)
@@ -178,3 +179,54 @@ def resolve_dedup_alert(client: Client, alert_id: str, status: str, user_id: str
         "resolved_at": datetime.now(timezone.utc).isoformat(),
         "note": note,
     }).eq("id", alert_id).execute()
+
+
+# ---------------------------------------------------------------
+# Jeux de colonnes maîtres liés au COMPTE (pas à l'organisation) --
+# onglet 1 "Colonnes maîtres", uniquement pour un utilisateur connecté.
+# ---------------------------------------------------------------
+
+def list_user_column_sets(client: Client, user_id: str) -> list[dict]:
+    res = (
+        _td(client, "user_master_column_sets")
+        .select("*")
+        .eq("user_id", user_id)
+        .order("name")
+        .execute()
+    )
+    return res.data or []
+
+
+def save_user_column_set(client: Client, user_id: str, name: str, columns: list[str]) -> dict:
+    from datetime import datetime, timezone
+
+    res = (
+        _td(client, "user_master_column_sets")
+        .upsert(
+            {
+                "user_id": user_id,
+                "name": name,
+                "columns": columns,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="user_id,name",
+        )
+        .execute()
+    )
+    return res.data[0]
+
+
+def delete_user_column_set(client: Client, set_id: str) -> None:
+    _td(client, "user_master_column_sets").delete().eq("id", set_id).execute()
+
+
+def set_active_column_set(client: Client, user_id: str, set_id: str | None) -> None:
+    _td(client, "profiles").update({"active_master_column_set_id": set_id}).eq("id", user_id).execute()
+
+
+def get_active_column_set(client: Client, profile: dict) -> dict | None:
+    set_id = profile.get("active_master_column_set_id")
+    if not set_id:
+        return None
+    res = _td(client, "user_master_column_sets").select("*").eq("id", set_id).limit(1).execute()
+    return res.data[0] if res.data else None

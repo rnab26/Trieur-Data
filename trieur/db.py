@@ -321,12 +321,18 @@ def import_dataframe(
     return n_imported, n_alerts
 
 
+# Taille de page par defaut pour lister les clients d'un environnement --
+# une seule source de verite, partagee par l'affichage pagine ("Charger
+# plus" cote UI) et par list_all_records ci-dessous (export complet).
+LIST_PAGE_SIZE = 300
+
+
 def count_records(client: Client, org_id: str) -> int:
     res = _td(client, "records").select("id", count="exact").eq("org_id", org_id).limit(1).execute()
     return res.count or 0
 
 
-def list_records(client: Client, org_id: str, limit: int = 300, offset: int = 0) -> list[dict]:
+def list_records(client: Client, org_id: str, limit: int = LIST_PAGE_SIZE, offset: int = 0) -> list[dict]:
     """Clients de cet environnement, du plus récent au plus ancien, avec le
     fichier et la date d'import d'origine -- vue "liste" simple
     (recherche/filtre côté Python pour l'instant, le format final dépendra
@@ -342,6 +348,36 @@ def list_records(client: Client, org_id: str, limit: int = 300, offset: int = 0)
         .execute()
     )
     return res.data or []
+
+
+def list_all_records(client: Client, org_id: str, page_size: int = LIST_PAGE_SIZE) -> list[dict]:
+    """Tout l'historique de cet environnement, en enchaînant les pages --
+    utilisé uniquement pour un export complet (jamais pour l'affichage
+    courant, qui reste paginé). Avance de la taille RÉELLEMENT renvoyée par
+    chaque page (jamais de `page_size` supposé) : une limite serveur
+    silencieuse plus petite que `page_size` (ex: max_rows PostgREST) ne
+    tronque donc jamais le résultat -- on continue tant qu'on n'a pas
+    récupéré `total` lignes, mesuré par un vrai comptage indépendant.
+
+    Limite connue, non corrigée : pagination par offset triée sur
+    `created_at`. Un import concurrent PENDANT ce scan (nouvelles lignes
+    plus récentes, donc insérées en tête) décale les pages suivantes et
+    peut dupliquer ou sauter des lignes -- même risque, déjà présent,
+    que "Charger plus" côté UI, mais sur une fenêtre plus longue ici (un
+    export complet enchaîne plus de pages). Corrigible par une pagination
+    par curseur (created_at, id) plutôt que par offset, si ça devient
+    gênant en usage réel -- pas fait maintenant, le volume actuel ne le
+    justifie pas."""
+    total = count_records(client, org_id)
+    all_rows: list[dict] = []
+    offset = 0
+    while len(all_rows) < total:
+        page = list_records(client, org_id, limit=page_size, offset=offset)
+        if not page:
+            break
+        all_rows.extend(page)
+        offset += len(page)
+    return all_rows
 
 
 def delete_record(client: Client, record_id: str) -> None:

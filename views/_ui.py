@@ -32,3 +32,16 @@ def confirm_delete_button(label: str, key: str) -> bool:
         st.session_state[pending_key] = False
         return True
     return False
+
+
+def clear_stale_widgets(*prefixes: str) -> None:
+    """À appeler après toute mutation d'une liste dont les widgets sont
+    indexés par POSITION (renommer, réordonner, supprimer un élément) :
+    purge les clés `st.session_state` qui commencent par un de ces
+    préfixes. Sans ça, l'élément qui glisse à un indice hérite du widget
+    (texte tapé, confirmation de suppression en attente...) laissé par
+    l'élément qui occupait cet indice avant la mutation -- Streamlit
+    ignore `value=` tant que la clé existe déjà en session_state."""
+    for k in list(st.session_state.keys()):
+        if isinstance(k, str) and k.startswith(prefixes):
+            st.session_state.pop(k, None)

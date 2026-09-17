@@ -33,6 +33,7 @@ from trieur.db import (
     save_org_master_columns,
 )
 from views._auth import accessible_organizations, require_login
+from views._ui import clear_stale_widgets
 
 
 def render():
@@ -216,21 +217,6 @@ def _render_import(client, org_id, user):
         st.rerun()
 
 
-def _clear_colname_widgets(org_id):
-    """[FIX] Les champs de renommage sont indexes par POSITION
-    (`colname_{org_id}_{i}`), pas par colonne : sans ce nettoyage, un
-    reordonnancement ou une suppression laisse en session_state la valeur
-    saisie pour l'ANCIENNE colonne a cet indice -- au prochain rendu ce
-    texte perime est repris tel quel (Streamlit ignore alors `value=`), et
-    comme il differe du nouveau nom a cet indice, la colonne qui a glisse a
-    cette position se retrouve renommee EN SILENCE d'apres ce texte perime.
-    On vide donc ces cles a chaque changement d'ordre/de longueur de la
-    liste, pour forcer leur reinitialisation propre au prochain rendu."""
-    prefix = f"colname_{org_id}_"
-    for key in [k for k in list(st.session_state.keys()) if isinstance(k, str) and k.startswith(prefix)]:
-        st.session_state.pop(key, None)
-
-
 def _render_settings(client, org_id, is_admin):
     with st.expander("⚙️ Réglages de l'environnement (colonnes)"):
         cols = list(get_org_master_columns(client, org_id))
@@ -261,19 +247,19 @@ def _render_settings(client, org_id, is_admin):
                 if i > 0 and st.button("⬆️", key=f"up_{org_id}_{i}"):
                     cols[i - 1], cols[i] = cols[i], cols[i - 1]
                     save_org_master_columns(client, org_id, cols)
-                    _clear_colname_widgets(org_id)
+                    clear_stale_widgets(f"colname_{org_id}_")
                     st.rerun()
             with c_down:
                 if i < len(cols) - 1 and st.button("⬇️", key=f"down_{org_id}_{i}"):
                     cols[i + 1], cols[i] = cols[i], cols[i + 1]
                     save_org_master_columns(client, org_id, cols)
-                    _clear_colname_widgets(org_id)
+                    clear_stale_widgets(f"colname_{org_id}_")
                     st.rerun()
             with c_del:
                 if st.button("🗑️", key=f"del_{org_id}_{i}"):
                     cols.pop(i)
                     save_org_master_columns(client, org_id, cols)
-                    _clear_colname_widgets(org_id)
+                    clear_stale_widgets(f"colname_{org_id}_")
                     st.rerun()
 
         st.divider()

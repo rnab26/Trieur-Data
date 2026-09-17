@@ -20,7 +20,8 @@ pas encore priorisées, en attente.
    masquer des colonnes, sélection multiple, pagination) — livré.
 2. [x] Export direct depuis la Base de données — livré, voir section
    ci-dessous.
-3. [ ] Modifier une ligne directement + historique court par ligne.
+3. [x] Modifier une ligne directement + historique court par ligne —
+   livré, voir section ci-dessous.
 4. [ ] Colonnes adaptables selon le fichier importé.
 5. [ ] Vues enregistrées, nommées (dépend du point 1).
 6. [ ] Petit tableau de bord par environnement.
@@ -29,6 +30,52 @@ pas encore priorisées, en attente.
    sur l'Excel de référence (voir chantier CRM/Base de données).
 8. [ ] Les 8 nouvelles idées (n1-n8) — pas encore de réponse sur la
    fiche, à reprioriser une fois répondues.
+
+---
+
+## Modifier une ligne directement + historique court par ligne (2026-09-17)
+
+**Fait** :
+- Migration 0008 (appliquée à la vraie base, vérifiée) :
+  `records.updated_at`/`updated_by` — volontairement minimal, pas un
+  journal complet des valeurs changées.
+- `trieur/db.py` : `get_record()` (lecture fraîche d'un client),
+  `update_record()` (remplace tout le contenu, trace qui/quand, renvoie
+  si la ligne existait encore), `get_profiles_map()` (résout des
+  identifiants en noms, mis en cache comme les autres lectures rares).
+- Sélectionner UNE ligne dans le tableau (même case à cocher que la
+  suppression groupée) ouvre "✏️ Modifier cette ligne" — un champ par
+  colonne, enregistrement explicite. Colonnes "Modifié le"/"Modifié
+  par" ajoutées à l'affichage et à l'export.
+
+**Vérifié** : `tests/test_db_update_record.py` (8 tests, dont le cas
+"ligne supprimée entre-temps") + `tests/test_client_list_helpers.py`
+étendu. Suite complète (125 tests) + e2e Playwright réel verts.
+
+**Pas vérifié** : le formulaire réel avec un compte Supabase connecté
+(pas de secrets disponibles dans la session qui a fait ce chantier).
+
+**Limites connues, documentées dans le code, pas corrigées** :
+- Dernière écriture gagne — pas de détection si un autre membre modifie
+  le même client entre-temps (silencieusement écrasé). Un correctif
+  demanderait un verrou optimiste (comparer une version avant
+  d'écraser) — pas fait, le volume/usage actuel ne le justifie pas.
+- Modifier le champ IBAN affiché ne resynchronise pas la clé interne
+  `"iban"` qui alimente la détection de doublon — liée à la règle de
+  doublon configurable par activité (point 7 ci-dessus), déjà en
+  attente de l'Excel de référence.
+
+**Ne pas casser** :
+- Toute nouvelle lecture de plusieurs identifiants utilisateur pour de
+  l'affichage doit passer par `get_profiles_map()` (mis en cache), pas
+  un appel direct répété à chaque rerun.
+- `update_record()` remplace TOUT le contenu `data` -- un futur appelant
+  doit toujours partir du contenu actuel (`get_record()`), jamais d'un
+  sous-ensemble de champs.
+
+**Notes / À faire** :
+- [ ] Utilisateur : tester en usage réel (sélectionner une ligne,
+  modifier un champ, vérifier "Modifié le"/"Modifié par").
 
 ---
 

@@ -1594,3 +1594,125 @@ l'app Streamlit en production.
 en production tant que ce chantier n'est pas fini — ne jamais merger
 `feature/react-migration` sur `main` sans validation explicite de
 l'utilisateur, migration écran par écran.
+
+**État (2026-09-18, 6e incrément — écran Cockpit porté, vérifié
+indépendamment)** :
+- Cockpit (chantiers de dev de l'app elle-même, réservé admin) porté
+  en React par l'agent précédent (commit `8a345be`) : `api/main.py`
+  (`GET/POST /orgs/{id}/chantiers`, `GET/POST .../sections`, `PATCH
+  .../chantiers/{id}/status`, `GET/POST .../messages`, `GET/POST
+  .../todos`, `PATCH .../todos/{id}`, tous derrière
+  `require_cockpit_access`, même règle que `views/tab_cockpit.py`,
+  aucune logique dupliquée — tout appelle `trieur/db.py`),
+  `CockpitScreen.tsx` + `ChantierCard.tsx` (bandeau "Où j'en suis",
+  formulaires chantier/section, recherche + filtre statut, groupement
+  par section, todos + fil de discussion), nouvel onglet nav visible
+  admin seulement.
+- **Vérifié indépendamment ce soir** (relecture ligne à ligne, pas
+  seulement le rapport de l'agent précédent) :
+  - `python3 -m pytest -q` (suite complète) → **205 passed** (191
+    d'avant + 14 nouveaux tests Cockpit dans `tests/test_api.py`).
+  - `cd frontend && npm run build` → succès (`tsc -b && vite build`,
+    exit 0). `npm run lint` → seulement des warnings déjà présents sur
+    d'autres écrans (`set-state-in-effect`, `only-export-components`),
+    aucun nouveau problème.
+  - `git diff --stat main...feature/react-migration -- views/ app.py`
+    → non vide (31/2/2 lignes sur `app.py`/`tab2_import_mapping.py`/
+    `tab_database.py`), mais ce sont les commits **antérieurs** au
+    portage Cockpit (filet de diagnostic visible, déjà en place avant
+    ce chantier) — rien ajouté par le portage Cockpit lui-même à
+    `views/`/`app.py`. Confirmé sans régression.
+  - `api/main.py` comparé à `frontend/src/lib/api.ts` endpoint par
+    endpoint pour les 8 nouvelles routes Cockpit : méthode, chemin,
+    noms de champs — aucune divergence trouvée.
+  - **Bug réel trouvé et corrigé** : les 4 `<select>` natifs de
+    `CockpitScreen.tsx` (switch d'environnement, priorité, section,
+    filtre de statut) n'avaient pas de classe de couleur de texte
+    explicite (`text-[var(--foreground)]`), contrairement à celui de
+    `ChantierCard.tsx` qui l'avait déjà. Sur fond sombre
+    (`.cockpit-dark`), un `<select>` natif ne garantit pas d'hériter
+    la couleur du texte du conteneur dans tous les navigateurs — texte
+    illisible (sombre sur fond sombre) ou popup système clair par
+    défaut. Corrigé : couleur de texte ajoutée aux 4 `<select>`, plus
+    `color-scheme: dark` posé sur `.cockpit-dark` pour que le popup
+    natif du `<select>` lui-même rende sombre au lieu de reprendre le
+    thème clair du système. Rebuild + lint refaits après correctif :
+    toujours vert.
+- Poussé sur `origin/feature/react-migration`, commit `<voir hash du
+  push ci-dessous>`. Toujours pas mergé sur `main`, pas de PR.
+
+**Décision d'architecture prise (2026-09-18) — PAS ENCORE IMPLÉMENTÉE,
+prochaine session à démarrer par ceci** : réponse au point transverse
+n°1 ci-dessus (session serveur pour porter le pipeline import → mapping
+→ filtre → export des onglets 1-4 "Trieur de Data" vers FastAPI
+stateless).
+- **Choix retenu** : un schéma Postgres de *staging* côté Supabase
+  (`trieur_data.import_sessions` + `trieur_data.import_rows`, ou une
+  variante à une seule table de staging avec un tableau JSONB clé par
+  `session_id`) — **PAS Redis, PAS un cache fichier temporaire/parquet**.
+- **Pourquoi** (vérifié en lisant `api/main.py` + `trieur/db.py` +
+  `views/tab1-4` cette session, pas deviné) :
+  - L'écran "Base de données" (liste/fiche/tableau de bord/export) est
+    déjà le bon patron : chaque requête est sans état, la pagination
+    est réelle (offset/limit contre Supabase Postgres via
+    `list_records`/`count_records`), et l'export streame depuis
+    `list_all_records()` qui paginate sur toute la table. Cette partie
+    scale déjà bien, aucun changement d'architecture nécessaire là.
+  - Le vrai trou, confirmé en lisant `views/tab1-4` et l'endpoint
+    d'import existant (`api/main.py:437`, `import_records` — seule
+    pièce du pipeline à 4 étapes déjà portée en FastAPI, et elle
+    fusionne import + écriture en un seul appel atomique, sans étape
+    intermédiaire de mapping/filtre exposée via l'API) : les onglets
+    1-4 (import → mapping colonnes → filtre/dedup → export) vivent
+    entièrement dans `st.session_state` de Streamlit, comme un
+    DataFrame pandas en mémoire porté d'un rerun à l'autre
+    (`views/tab2_import_mapping.py` construit `all_sheets`/
+    `filtered_df` en mémoire ; `views/tab4_export.py` lit
+    `st.session_state.filtered_df` directement). Un backend FastAPI
+    sans état n'a rien d'équivalent à `session_state` — chaque requête
+    HTTP est un process neuf, donc ce pipeline à 4 étapes ne peut pas
+    survivre entre deux requêtes sans un mécanisme de persistance.
+  - Pourquoi Postgres plutôt que Redis ou fichier/parquet : le budget
+    annoncé est Supabase Starter + un service web Render à 7$/mois,
+    rien d'autre. Redis = un nouveau service managé (coût) ou du
+    self-host dans le même dyno Render (perd les données à chaque
+    redeploy/restart, ce qui annule l'intérêt ; les offres
+    gratuites/starter de Render n'incluent pas de Redis persistant
+    sans ressource payante séparée). Un cache fichier/parquet sur le
+    disque local de Render est **éphémère** sur cette plateforme — un
+    service web Render perd son disque local à chaque redeploy/restart/
+    scaling, donc ça ne survivrait même pas le temps d'un import →
+    export en plusieurs requêtes si un redeploy tombe entre les deux.
+    Postgres (déjà payé, déjà là) survit à tout ça nativement.
+- **Ce que ça implique concrètement pour la suite** (pas encore fait,
+  à faire par la prochaine session avant de porter les onglets 2-4) :
+  créer la migration Supabase pour `trieur_data.import_sessions`/
+  `trieur_data.import_rows` (ou la variante JSONB à une table), décider
+  du TTL/nettoyage des sessions d'import abandonnées, puis porter
+  l'étape mapping et l'étape filtre/dedup comme des endpoints qui
+  lisent/écrivent cette table de staging au lieu du DataFrame en
+  mémoire. Le point transverse n°2 (progression des tâches longues)
+  reste, lui, **toujours en attente** — non traité par cette décision.
+- **Statut clair pour éviter toute confusion** : ceci est une
+  **décision d'architecture actée, pas du code livré**. Aucune
+  migration, aucune table, aucun endpoint n'a été créé pour ça dans cet
+  incrément — uniquement le choix et sa justification, pour que la
+  prochaine session parte directement à l'implémentation au lieu de
+  re-débattre Redis vs Postgres vs fichiers.
+
+**Statut honnête de l'ensemble de la migration React (2026-09-18)** :
+l'écran "Base de données" est complet et solide (CRUD, recherche,
+filtres, import, colonnes maîtres, vues enregistrées, tableau de bord,
+actions groupées, alertes de doublon, export, historique) et l'écran
+"Cockpit" vient d'être porté et vérifié à son tour — ces deux écrans
+suivent déjà une bonne architecture (API stateless, pagination réelle
+côté Postgres). Ce qui reste est le morceau le plus gros et le moins
+avancé : les 4 onglets "Trieur de Data" eux-mêmes (import → mapping →
+filtre/dedup → export), dont le portage n'a même pas commencé — seul
+l'onglet 1 a été scopé en détail, et la décision d'architecture qui
+débloque les 3 autres (staging Postgres, ci-dessus) vient d'être prise
+mais reste entièrement à implémenter. Tant que ces 4 onglets ne sont
+pas portés, Streamlit reste la seule interface pour "Trieur de Data" en
+production — le Cockpit et la Base de données React ne remplacent
+qu'une partie de l'app, pas encore le cœur du pipeline de tri de
+données.

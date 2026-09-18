@@ -251,7 +251,7 @@ export function CockpitScreen() {
             </label>
             <select
               id="cockpit-org-switcher"
-              className="rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm"
+              className="rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)]"
               value={orgId ?? ''}
               onChange={(e) => setOrgId(e.target.value)}
             >
@@ -292,7 +292,7 @@ export function CockpitScreen() {
                     />
                     <div className="flex flex-wrap gap-2">
                       <select
-                        className="rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm"
+                        className="rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)]"
                         value={newPriority}
                         onChange={(e) => setNewPriority(e.target.value as ChantierPriority)}
                       >
@@ -303,7 +303,7 @@ export function CockpitScreen() {
                         ))}
                       </select>
                       <select
-                        className="min-w-[180px] flex-1 rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm"
+                        className="min-w-[180px] flex-1 rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)]"
                         value={newSectionChoice}
                         onChange={(e) => setNewSectionChoice(e.target.value)}
                       >
@@ -384,7 +384,7 @@ export function CockpitScreen() {
                   onChange={(e) => setRecherche(e.target.value)}
                 />
                 <select
-                  className="rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm"
+                  className="rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)]"
                   value={filtreStatut}
                   onChange={(e) => setFiltreStatut(e.target.value as 'tous' | ChantierStatus)}
                 >

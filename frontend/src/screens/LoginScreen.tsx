@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
@@ -10,6 +10,22 @@ export function LoginScreen() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  // Posé par lib/api.ts:handleUnauthorized (401 global -- jeton révoqué,
+  // compte sans profil...) juste avant la déconnexion forcée qui ramène
+  // ici. Sans ce message, l'utilisateur revoit un simple formulaire de
+  // connexion sans comprendre pourquoi il a été déconnecté.
+  const [sessionExpired, setSessionExpired] = useState(false)
+
+  useEffect(() => {
+    try {
+      if (sessionStorage.getItem('td_session_expired')) {
+        setSessionExpired(true)
+        sessionStorage.removeItem('td_session_expired')
+      }
+    } catch {
+      // stockage indisponible -- pas bloquant, le message reste absent
+    }
+  }, [])
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
@@ -29,6 +45,11 @@ export function LoginScreen() {
           <h1 className="text-lg font-semibold">Trieur de Data</h1>
         </CardHeader>
         <CardContent>
+          {sessionExpired && (
+            <p className="mb-3 rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)]">
+              Ta session a expiré ou n'est plus valide. Reconnecte-toi.
+            </p>
+          )}
           <form onSubmit={handleSubmit} className="flex flex-col gap-3">
             <div>
               <label htmlFor="email" className="mb-1 block text-sm text-[var(--muted)]">

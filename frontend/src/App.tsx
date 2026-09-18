@@ -1,10 +1,29 @@
-import { useState } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import { AuthProvider, useAuth } from '@/lib/AuthContext'
 import { useIsAdmin } from '@/lib/useAccount'
 import { LoginScreen } from '@/screens/LoginScreen'
-import { DatabaseScreen } from '@/screens/DatabaseScreen'
-import { PipelineScreen } from '@/screens/PipelineScreen'
-import { CockpitScreen } from '@/screens/CockpitScreen'
+
+// Chargement à la demande, un chunk par écran (audit bundle-size) : la
+// plupart des comptes ne chargent jamais le Cockpit (réservé aux admins),
+// et ouvrir juste la Base de données n'a plus besoin de télécharger/parser
+// le code du Pipeline (651 lignes) ou du Cockpit (448 lignes).
+const DatabaseScreen = lazy(() =>
+  import('@/screens/DatabaseScreen').then((m) => ({ default: m.DatabaseScreen })),
+)
+const PipelineScreen = lazy(() =>
+  import('@/screens/PipelineScreen').then((m) => ({ default: m.PipelineScreen })),
+)
+const CockpitScreen = lazy(() =>
+  import('@/screens/CockpitScreen').then((m) => ({ default: m.CockpitScreen })),
+)
+
+function EcranFallback() {
+  return (
+    <div className="flex min-h-[50vh] items-center justify-center">
+      <p className="text-sm text-[var(--muted)]">Chargement…</p>
+    </div>
+  )
+}
 
 type Ecran = 'database' | 'pipeline' | 'cockpit'
 
@@ -54,9 +73,11 @@ function AppContent() {
           </button>
         ))}
       </nav>
-      {ecran === 'cockpit' && isAdmin && <CockpitScreen />}
-      {ecran === 'pipeline' && <PipelineScreen />}
-      {(ecran === 'database' || (ecran === 'cockpit' && !isAdmin)) && <DatabaseScreen />}
+      <Suspense fallback={<EcranFallback />}>
+        {ecran === 'cockpit' && isAdmin && <CockpitScreen />}
+        {ecran === 'pipeline' && <PipelineScreen />}
+        {(ecran === 'database' || (ecran === 'cockpit' && !isAdmin)) && <DatabaseScreen />}
+      </Suspense>
     </div>
   )
 }

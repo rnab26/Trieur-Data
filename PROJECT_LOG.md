@@ -2294,3 +2294,107 @@ après ce 8e incrément) : ~82 %.**
   - Pas de revue de sécurité dédiée (RLS Supabase, CORS) refaite
     spécifiquement pour cet incrément — dernière revue explicite plus
     haut dans ce journal, à rafraîchir avant bascule finale.
+
+## Audit avant merge : correctifs réels + go/no-go (2026-09-18)
+
+**Contexte** : audit indépendant de la branche `feature/react-migration`
+(5 constats, dont 1 bloquant, 2 importants, 1 mineur, 1 point de
+contrôle positif). Vérifié chaque constat sur le vrai code avant de
+corriger — aucun ne s'est révélé faux.
+
+**Corrigé — bloquant** :
+- **Filet de diagnostic exposé à tout utilisateur** (`trieur/debug.py`,
+  déjà noté comme point ouvert dans l'entrée précédente de ce
+  journal) : `report_exception` (trace Python complète, `app.py` lignes
+  365-399, les 4 onglets Trieur de Data + Base de données + Cockpit) et
+  `render_upload_diagnostics` (URL + en-têtes HTTP bruts,
+  `views/tab_database.py:650` et `views/tab2_import_mapping.py:52`)
+  s'affichaient à n'importe quel compte connecté, et même sans compte
+  du tout côté onglet "Trieur de Data" (pas de login requis là).
+  Confirmé en lisant le code avant correction. **Corrigé** : les deux
+  fonctions prennent maintenant un paramètre `is_admin` (par défaut
+  `False`, donc sûr par défaut) — message générique tant que ce n'est
+  pas `True`. `is_admin` vient de `ctx["profile"]["is_super_admin"]`
+  quand un compte est connecté (via `optional_login_ctx()`, qui ne
+  bloque jamais le rendu), `False` sinon. La trace complète reste
+  toujours imprimée sur stdout (logs Render), inchangé. Preuve : `python3
+  -m pytest -q` → 250 passants (voir plus bas), aucun test ne couvrait
+  ce filet avant (pas de régression possible à ce niveau) ; relecture
+  manuelle des 4 points d'appel dans `app.py`, `views/tab_database.py`,
+  `views/tab2_import_mapping.py`.
+
+**Corrigé — important** :
+- **Aucun traitement global du 401 côté frontend** (`frontend/src/lib/api.ts`) :
+  un jeton révoqué ou un 401 métier (compte sans profil) laissait
+  chaque écran afficher son message d'erreur brut, sans reconnexion ni
+  redirection. **Corrigé** : les 4 endroits qui gèrent une réponse HTTP
+  en erreur (`request`, `importRequest`, `exportRecords`,
+  `exportPipelineSessionRows`) passent maintenant par un helper commun
+  `throwForErrorResponse` qui, sur un 401, force `supabase.auth.signOut()`
+  (+ un flag `sessionStorage` lu une fois par `LoginScreen`, qui affiche
+  alors "Ta session a expiré ou n'est plus valide. Reconnecte-toi.").
+  `App.tsx` réagit déjà à `session === null` (`useAuth`) → retour
+  automatique sur l'écran de connexion, sans manipulation manuelle.
+  Preuve : `cd frontend && npm run build` → succès (voir plus bas) ;
+  pas de test automatisé frontend dans ce repo (aucun test JS existant à
+  faire régresser), donc vérifié par relecture du flux complet
+  (`api.ts` → `AuthContext` → `App.tsx` → `LoginScreen.tsx`) plutôt que
+  par un test exécuté — **limite à signaler explicitement**.
+- **Bundle frontend >500 kB** (avertissement Vite confirmé en sortie
+  réelle avant correctif : `index-*.js` 510,64 kB / 139,63 kB gzip) :
+  `App.tsx` chargeait `DatabaseScreen`/`PipelineScreen`/`CockpitScreen`
+  statiquement, donc systématiquement, même pour un compte qui n'ouvre
+  jamais le Cockpit. **Corrigé** : les 3 écrans passent par
+  `React.lazy()` + `<Suspense>`, un chunk par écran. Preuve, build réel
+  après correctif : chunk principal `index-*.js` 448,50 kB / 127,61 kB
+  gzip (sous le seuil 500 kB, plus d'avertissement),
+  `DatabaseScreen-*.js` 35,68 kB, `PipelineScreen-*.js` 13,34 kB,
+  `CockpitScreen-*.js` 14,32 kB séparés.
+
+**Corrigé — mineur (trivial, fait dans le même mouvement)** :
+- Cases à cocher de sélection dans `DatabaseScreen.tsx` (tout
+  sélectionner + par ligne) : zone de clic réelle ~16 px, sous les ~40 px
+  recommandés au tactile. **Corrigé** : enveloppées dans un `<label>`
+  de 36×36 px (`h-9 w-9`), case agrandie à `h-5 w-5`.
+
+**Vérifié, aucune action — point de contrôle positif de l'audit** :
+- RLS Supabase (`records`, `pipeline_rows`, `chantiers`) : confirmé
+  déjà conforme par l'audit (policy `ALL` unique par table via
+  `is_org_member()`, RLS activée, aucun repli permissif) — non
+  re-vérifié ici en base (pas de raison de refaire une requête déjà
+  faite par l'audit sur les mêmes tables), rien à corriger.
+
+**Documenté comme lacune connue, volontairement non traité ici** :
+- Aucune lacune supplémentaire ouverte par ce passage d'audit. Les
+  lacunes déjà documentées dans l'entrée précédente (étiquettes libres,
+  annulation d'import, quasi-doublons hors IBAN, rôles fins par
+  environnement, mesure réelle du coût réseau upload, colonnes
+  calculées, passe tactile écran par écran) restent ouvertes et sont
+  des chantiers séparés, pas des blocages de sécurité/fiabilité —
+  inchangées par ce passage.
+
+**Preuves d'exécution réelles** :
+- `python3 -m pytest -q` → `250 passed, 2 warnings` (aucun échec).
+  Note : `test_master_columns_localstorage_fallback` (test E2E
+  Playwright, déjà signalé flaky préexistant dans l'entrée précédente)
+  a été relancé seul pour confirmer : `1 passed` — comportement
+  intermittent confirmé une fois de plus, sans lien avec ce chantier
+  (aucun fichier touché par ce correctif n'a de rapport avec le
+  localStorage des colonnes maîtres).
+- `cd frontend && npm run build` → succès (`tsc -b && vite build`,
+  exit 0), sortie complète relevée ci-dessus (chunks + tailles).
+
+**Go/no-go merge `feature/react-migration` → `main` : prêt, en attente
+du feu vert de l'utilisateur.**
+Aucun blocage de sécurité ou de fiabilité connu ne reste ouvert côté
+code de cette branche : le seul point bloquant remonté par l'audit
+(filet de diagnostic exposé) est corrigé et vérifié. Les lacunes
+restantes (liste ci-dessus, inchangée) sont des manques fonctionnels
+ou des points à mesurer/cadrer, pas des raisons de bloquer un merge —
+mais elles restent réelles et méritent d'être lues avant de décider.
+Le test E2E flaky préexistant n'est pas un obstacle (confirmé sans
+lien avec le code touché). La décision de merger reste, comme
+toujours sur ce projet, celle de l'utilisateur seul.
+
+Poussé sur `origin/feature/react-migration` — **pas de merge sur
+`main`, pas de PR.**

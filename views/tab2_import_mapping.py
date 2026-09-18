@@ -49,7 +49,10 @@ def render():
             type=["xlsx", "xls", "csv", "pdf"], accept_multiple_files=True,
         )
         from trieur.debug import render_upload_diagnostics
-        render_upload_diagnostics(files[0] if files else None, key="trieur_data_import")
+        from views._auth import optional_login_ctx
+        _ctx = optional_login_ctx()
+        _is_admin = bool(_ctx and _ctx["profile"].get("is_super_admin"))
+        render_upload_diagnostics(files[0] if files else None, key="trieur_data_import", is_admin=_is_admin)
         st.caption("💡 Pour de tres gros volumes (plusieurs millions de lignes), le "
                    "**CSV** est bien plus rapide et leger que le .xlsx.")
         google_url = st.text_input("Ou collez une URL Google Sheets publique (optionnel)")

@@ -647,7 +647,7 @@ def _render_import(client, org_id, user, is_admin):
 
     uploaded = st.file_uploader("Fichier CSV ou Excel", type=["csv", "xlsx"], key=f"upload_{org_id}")
     from trieur.debug import render_upload_diagnostics
-    render_upload_diagnostics(uploaded, key=f"db_{org_id}")
+    render_upload_diagnostics(uploaded, key=f"db_{org_id}", is_admin=is_admin)
     if uploaded is None:
         return
 

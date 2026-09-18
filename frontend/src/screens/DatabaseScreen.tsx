@@ -423,12 +423,15 @@ export function DatabaseScreen() {
                 <thead>
                   <tr className="bg-[var(--muted-bg)] text-left">
                     <th className="px-3 py-2">
-                      <input
-                        type="checkbox"
-                        aria-label="Tout sélectionner"
-                        checked={selectedIds.length === rows.length}
-                        onChange={toggleSelectAll}
-                      />
+                      <label className="flex h-9 w-9 cursor-pointer items-center justify-center">
+                        <input
+                          type="checkbox"
+                          aria-label="Tout sélectionner"
+                          className="h-5 w-5"
+                          checked={selectedIds.length === rows.length}
+                          onChange={toggleSelectAll}
+                        />
+                      </label>
                     </th>
                     {effectiveVisibleCols.map((col) => (
                       <th key={col} className="whitespace-nowrap px-3 py-2 font-medium">
@@ -442,12 +445,15 @@ export function DatabaseScreen() {
                   {rows.map((row) => (
                     <tr key={String(row._id)} className="border-t border-[var(--border)]">
                       <td className="px-3 py-2">
-                        <input
-                          type="checkbox"
-                          aria-label={`Sélectionner la ligne ${String(row._id)}`}
-                          checked={selectedIds.includes(String(row._id))}
-                          onChange={() => toggleRowSelection(String(row._id))}
-                        />
+                        <label className="flex h-9 w-9 cursor-pointer items-center justify-center">
+                          <input
+                            type="checkbox"
+                            aria-label={`Sélectionner la ligne ${String(row._id)}`}
+                            className="h-5 w-5"
+                            checked={selectedIds.includes(String(row._id))}
+                            onChange={() => toggleRowSelection(String(row._id))}
+                          />
+                        </label>
                       </td>
                       {effectiveVisibleCols.map((col) => (
                         <td key={col} className="whitespace-nowrap px-3 py-2">

@@ -23,6 +23,38 @@ async function authHeader(): Promise<Record<string, string>> {
   return { Authorization: `Bearer ${token}` }
 }
 
+// Traitement global du 401 -- voir api/main.py:get_current_ctx : un jeton
+// révoqué (mot de passe changé ailleurs, compte désactivé) ou un compte
+// sans profil associé renvoie 401 même après un refresh Supabase réussi.
+// Sans ceci, chaque écran affichait juste le message d'erreur brut sans
+// action de récupération -- l'utilisateur restait bloqué tant qu'il ne
+// rechargeait pas/se déconnectait manuellement. On force ici la
+// déconnexion : App.tsx repasse alors sur LoginScreen (via useAuth/session),
+// et LoginScreen affiche un message clair grâce au flag sessionStorage.
+function handleUnauthorized() {
+  try {
+    sessionStorage.setItem('td_session_expired', '1')
+  } catch {
+    // stockage indisponible (navigation privée...) -- la déconnexion reste
+    // effective, seul le message explicatif sur l'écran de connexion sera absent.
+  }
+  void supabase.auth.signOut()
+}
+
+async function throwForErrorResponse(res: Response): Promise<never> {
+  let detail = res.statusText
+  try {
+    const body = await res.json()
+    detail = body.detail ?? detail
+  } catch {
+    // pas de corps JSON -- on garde le statusText
+  }
+  if (res.status === 401) {
+    handleUnauthorized()
+  }
+  throw new ApiError(res.status, detail)
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = await authHeader()
   const res = await fetch(`${API_URL}${path}`, {
@@ -34,14 +66,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     },
   })
   if (!res.ok) {
-    let detail = res.statusText
-    try {
-      const body = await res.json()
-      detail = body.detail ?? detail
-    } catch {
-      // pas de corps JSON -- on garde le statusText
-    }
-    throw new ApiError(res.status, detail)
+    return throwForErrorResponse(res)
   }
   if (res.status === 204) return undefined as T
   return res.json() as Promise<T>
@@ -202,14 +227,7 @@ async function importRequest<T>(
     body: form,
   })
   if (!res.ok) {
-    let detail = res.statusText
-    try {
-      const body = await res.json()
-      detail = body.detail ?? detail
-    } catch {
-      // pas de corps JSON -- on garde le statusText
-    }
-    throw new ApiError(res.status, detail)
+    return throwForErrorResponse(res)
   }
   return res.json() as Promise<T>
 }
@@ -323,14 +341,7 @@ export async function exportRecords(
 
   const res = await fetch(`${API_URL}/orgs/${orgId}/records/export?${params.toString()}`, { headers })
   if (!res.ok) {
-    let detail = res.statusText
-    try {
-      const body = await res.json()
-      detail = body.detail ?? detail
-    } catch {
-      // pas de corps JSON -- on garde le statusText
-    }
-    throw new ApiError(res.status, detail)
+    return throwForErrorResponse(res)
   }
   const blob = await res.blob()
   const disposition = res.headers.get('content-disposition') ?? ''
@@ -516,14 +527,7 @@ async function uploadPipelineFile<T>(orgId: string, file: File): Promise<T> {
     body: form,
   })
   if (!res.ok) {
-    let detail = res.statusText
-    try {
-      const body = await res.json()
-      detail = body.detail ?? detail
-    } catch {
-      // pas de corps JSON -- on garde le statusText
-    }
-    throw new ApiError(res.status, detail)
+    return throwForErrorResponse(res)
   }
   return res.json() as Promise<T>
 }
@@ -630,14 +634,7 @@ export async function exportPipelineSessionRows(
     { headers },
   )
   if (!res.ok) {
-    let detail = res.statusText
-    try {
-      const body = await res.json()
-      detail = body.detail ?? detail
-    } catch {
-      // pas de corps JSON -- on garde le statusText
-    }
-    throw new ApiError(res.status, detail)
+    return throwForErrorResponse(res)
   }
   const blob = await res.blob()
   const disposition = res.headers.get('content-disposition') ?? ''

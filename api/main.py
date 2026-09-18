@@ -34,6 +34,7 @@ from trieur.db import (
     create_chantier,
     create_section,
     delete_pipeline_export_preset,
+    delete_pipeline_saved_filter,
     delete_record,
     delete_saved_view,
     delete_user_column_set,
@@ -50,13 +51,17 @@ from trieur.db import (
     list_chantiers,
     list_dedup_alerts,
     list_pipeline_export_presets,
+    list_pipeline_saved_filters,
     list_records,
     list_saved_views,
     list_sections,
     list_user_column_sets,
+    rename_pipeline_export_preset,
+    rename_pipeline_saved_filter,
     resolve_dedup_alert,
     save_org_master_columns,
     save_pipeline_export_preset,
+    save_pipeline_saved_filter,
     save_remembered_mapping_for_shape,
     save_saved_view,
     save_user_column_set,
@@ -67,7 +72,14 @@ from trieur.db import (
 )
 from trieur import pipeline_memory
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
-from trieur.filters import dedupe_dataframe, duplicate_groups
+from trieur.filters import (
+    apply_filter_groups,
+    dedupe_dataframe,
+    dedupe_dataframe_manual,
+    duplicate_groups,
+    most_complete_row_index,
+)
+from trieur.persistence import decode_filters_code, encode_filters_code
 from trieur.io_excel import is_google_sheet_url, read_csv_file, read_excel_all_sheets_from_file, read_google_sheets_all_sheets
 from trieur.matching import (
     apply_header_inference_excel,
@@ -327,6 +339,35 @@ def _parse_col_filters(raw: str) -> dict:
     if not isinstance(parsed, dict):
         raise HTTPException(status_code=400, detail="col_filters doit être un objet JSON {colonne: {op, value}}.")
     return parsed
+
+
+def _parse_filter_groups(raw: str) -> list:
+    """Parse le filtre multi-critères du Pipeline (onglet "Filtrer",
+    views/tab3_filtrage_dedup.py) : liste de GROUPES (OU entre eux),
+    chaque groupe une liste de CRITÈRES (ET entre eux) -- voir
+    trieur/filters.py:apply_filter_groups, jamais réimplémenté ici."""
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"filter_groups n'est pas un JSON valide : {exc}")
+    if not isinstance(parsed, list):
+        raise HTTPException(status_code=400, detail="filter_groups doit être une liste de groupes.")
+    return parsed
+
+
+def _apply_filter_groups_to_rows(rows: list[dict], groups: list) -> list[dict]:
+    """Applique trieur/filters.py:apply_filter_groups à une liste de
+    lignes (dicts) -- même contrat NaN -> None que le reste de ce
+    fichier (une cellule vide redevient NaN pendant le passage par
+    pandas, jamais serialisable en JSON telle quelle)."""
+    if not rows or not groups:
+        return rows
+    df = pd.DataFrame(rows)
+    filtered = apply_filter_groups(df, groups)
+    filtered = filtered.where(pd.notnull(filtered), None)
+    return filtered.to_dict(orient="records")
 
 
 @app.get("/orgs/{org_id}/records")
@@ -868,11 +909,18 @@ def _all_pipeline_rows(client, session_id: str) -> list[dict]:
 def _apply_active_dedup(rows: list[dict], session: dict) -> list[dict]:
     """Réapplique le dédoublonnage ACTIF de cette session (voir
     trieur/db.py:update_pipeline_session_dedup) aux lignes déjà
-    filtrées, avec trieur/filters.py:dedupe_dataframe -- même fonction
-    que l'onglet 3 Streamlit, jamais réimplémentée ici. Persiste tant
-    qu'il n'est pas explicitement annulé (POST/DELETE .../dedup
-    ci-dessous), donc appliqué aussi bien par /rows que par /export, pour
-    qu'un export ne "dé-déduplique" jamais silencieusement."""
+    filtrées, avec trieur/filters.py:dedupe_dataframe(_manual) -- mêmes
+    fonctions que l'onglet 3 Streamlit, jamais réimplémentées ici.
+    Persiste tant qu'il n'est pas explicitement annulé (POST/DELETE
+    .../dedup ci-dessous), donc appliqué aussi bien par /rows que par
+    /export, pour qu'un export ne "dé-déduplique" jamais silencieusement.
+
+    mode="manual" (revue groupe par groupe, <=50 groupes, voir
+    apply_pipeline_dedup) : `keep_indices` sont des positions dans CE
+    même jeu de lignes déjà filtré (index 0-based reconstruit ici par
+    pandas) -- valides UNIQUEMENT si le filtre actif au moment de la
+    revue est le même qu'ici, ce qui est garanti par construction
+    (dédoublonnage réappliqué après le MÊME filtre à chaque lecture)."""
     dedup_config = session.get("dedup_config")
     if not dedup_config or not rows:
         return rows
@@ -882,7 +930,10 @@ def _apply_active_dedup(rows: list[dict], session: dict) -> list[dict]:
     df = pd.DataFrame(rows)
     if column not in df.columns:
         return rows
-    deduped = dedupe_dataframe(df, column, keep=dedup_config.get("keep", "first"))
+    if dedup_config.get("mode") == "manual":
+        deduped = dedupe_dataframe_manual(df, column, set(dedup_config.get("keep_indices", [])))
+    else:
+        deduped = dedupe_dataframe(df, column, keep=dedup_config.get("keep", "first"))
     deduped = deduped.where(pd.notnull(deduped), None)
     return deduped.to_dict(orient="records")
 
@@ -893,35 +944,40 @@ def list_pipeline_session_rows(
     session_id: str,
     page: int = Query(1, ge=1),
     page_size: int = Query(LIST_PAGE_SIZE, ge=1, le=2000),
-    search: str = Query(""),
-    col_filters: str = Query("{}", description="JSON : {colonne: {op, value}}"),
+    filter_groups: str = Query(
+        "[]", description="JSON : liste de groupes (OU), chaque groupe une liste de critères "
+                          "(ET) -- voir trieur/filters.py:apply_filter_groups, même modèle que "
+                          "l'onglet Filtrer (views/tab3_filtrage_dedup.py). PAS le même filtre "
+                          "que /orgs/{org_id}/records (col_filters) : le Pipeline n'a jamais eu "
+                          "de recherche libre ni de filtre par colonne façon Google Sheets dans "
+                          "l'original -- seulement ce filtre multi-critères.",
+    ),
     ctx: AuthCtx = Depends(require_org_access),
 ):
     """Lignes de cette session (mémoire process, voir
-    trieur/pipeline_memory.py, TTL 24h), filtrées avec les MÊMES
-    fonctions que /orgs/{org_id}/records (_filter_by_search/
-    _filter_by_columns, views/tab_database.py) -- pas une deuxième
-    logique de filtre. Jamais trieur_data.records (donnée permanente).
+    trieur/pipeline_memory.py, TTL 24h), filtrées avec
+    trieur/filters.py:apply_filter_groups -- même logique de filtre
+    multi-critères (groupes OU de critères ET) que l'onglet "Filtrer"
+    d'origine, jamais réimplémentée ici. Jamais trieur_data.records
+    (donnée permanente).
 
     Paginée (`page`/`page_size`, même contrat que GET /orgs/{org_id}/records)
     depuis la revue PR #24 (point #7) : avant, cette route renvoyait
     TOUTE la session en une réponse (potentiellement des centaines de
     milliers de lignes) alors que l'écran n'en affiche que 50 à la fois.
-    Contrairement à /records, la recherche/les filtres portent ici sur
-    TOUTE la session (pas seulement la page renvoyée) : `_all_pipeline_rows`
-    charge et filtre l'intégralité de la session côté serveur (comme
-    avant), seule la DÉCOUPE en page change -- `count` reste le total filtré réel,
-    pas juste la taille de la page renvoyée. Le dédoublonnage ACTIF de la
-    session (voir .../dedup ci-dessous) est réappliqué ici aussi, après
-    le filtre par colonnes -- même ordre que l'onglet 3 Streamlit
-    (filtre PUIS dédoublonnage)."""
+    Le filtre porte ici sur TOUTE la session (pas seulement la page
+    renvoyée) : `_all_pipeline_rows` charge et filtre l'intégralité de
+    la session côté serveur (comme avant), seule la DÉCOUPE en page
+    change -- `count` reste le total filtré réel, pas juste la taille
+    de la page renvoyée. Le dédoublonnage ACTIF de la session (voir
+    .../dedup ci-dessous) est réappliqué ici aussi, après le filtre --
+    même ordre que l'onglet 3 Streamlit (filtre PUIS dédoublonnage)."""
     session = _get_pipeline_session_or_404(ctx, org_id, session_id)
-    parsed_filters = _parse_col_filters(col_filters)
+    parsed_groups = _parse_filter_groups(filter_groups)
 
     all_rows = _all_pipeline_rows(ctx.client, session_id)
     rows = [_without_sheet_key(r["data"]) for r in all_rows]
-    rows = _filter_by_search(rows, search)
-    rows = _filter_by_columns(rows, parsed_filters)
+    rows = _apply_filter_groups_to_rows(rows, parsed_groups)
     rows = _apply_active_dedup(rows, session)
 
     start = (page - 1) * page_size
@@ -942,8 +998,7 @@ def export_pipeline_session_rows(
     org_id: str,
     session_id: str,
     format: str = Query("csv", pattern="^(csv|xlsx)$"),
-    search: str = Query(""),
-    col_filters: str = Query("{}", description="JSON : {colonne: {op, value}}"),
+    filter_groups: str = Query("[]", description="JSON : voir GET .../rows ci-dessus."),
     columns: str = Query(
         "", description="Ordre + sélection des colonnes à l'export, séparées par des virgules "
                         "(équivalent du glisser-déposer streamlit-sortables de l'onglet 4 : une "
@@ -958,12 +1013,11 @@ def export_pipeline_session_rows(
     StreamingResponse que /orgs/{org_id}/records/export -- aucune
     logique dupliquée."""
     session = _get_pipeline_session_or_404(ctx, org_id, session_id)
-    parsed_filters = _parse_col_filters(col_filters)
+    parsed_groups = _parse_filter_groups(filter_groups)
 
     all_rows = _all_pipeline_rows(ctx.client, session_id)
     rows = [_without_sheet_key(r["data"]) for r in all_rows]
-    rows = _filter_by_search(rows, search)
-    rows = _filter_by_columns(rows, parsed_filters)
+    rows = _apply_filter_groups_to_rows(rows, parsed_groups)
     rows = _apply_active_dedup(rows, session)
 
     full_cols: list[str] = []
@@ -1099,18 +1153,28 @@ def apply_pipeline_mapping(
 
 
 # ---------------------------------------------------------------
-# Dédoublonnage (étape 3, distinct des filtres par colonne ci-dessus,
-# voir views/tab3_filtrage_dedup.py) -- opère sur le résultat déjà
-# filtré (search + col_filters) de la session, avec
-# trieur/filters.py:dedupe_dataframe/duplicate_groups, jamais une
-# deuxième logique de détection de doublon.
+# Dédoublonnage (étape 3, voir views/tab3_filtrage_dedup.py) -- opère
+# sur le résultat déjà filtré (filter_groups) de la session, avec
+# trieur/filters.py:dedupe_dataframe(_manual)/duplicate_groups, jamais
+# une deuxième logique de détection de doublon.
+#
+# Au-delà de DEDUP_GROUP_THRESHOLD groupes, la revue manuelle groupe par
+# groupe devient impraticable -- même seuil que l'original, voir
+# views/tab3_filtrage_dedup.py:DEDUP_GROUP_THRESHOLD.
 # ---------------------------------------------------------------
+
+DEDUP_GROUP_THRESHOLD = 50
+
 
 class PipelineDedupRequest(BaseModel):
     column: str
-    keep: str = "first"  # "first" ou "complete" (voir trieur/filters.py:dedupe_dataframe)
-    search: str = ""
-    col_filters: dict = {}
+    keep: str = "first"  # "first" ou "complete" (voir trieur/filters.py:dedupe_dataframe) -- mode="rule"
+    filter_groups: list = []
+    # "rule" (règle globale, `keep`) ou "manual" (revue groupe par
+    # groupe, `keep_indices` -- un index CHOISI par groupe, voir
+    # trieur/filters.py:dedupe_dataframe_manual).
+    mode: str = "rule"
+    keep_indices: list[int] = []
     # true : renvoie juste les groupes de doublons détectés (aperçu avant
     # confirmation), sans activer le dédoublonnage sur la session.
     dry_run: bool = False
@@ -1121,44 +1185,67 @@ def apply_pipeline_dedup(
     org_id: str, session_id: str, body: PipelineDedupRequest, ctx: AuthCtx = Depends(require_org_access),
 ):
     """Détecte (dry_run) ou active le dédoublonnage sur `body.column` pour
-    cette session -- appliqué au résultat déjà filtré par `search`/
-    `col_filters` (même filtres que GET .../rows), avec
-    trieur/filters.py:duplicate_groups (aperçu) ou dedupe_dataframe
-    (activation), jamais réimplémentés. Une fois activé, le dédoublonnage
-    reste ACTIF (voir trieur/db.py:update_pipeline_session_dedup) et est
-    réappliqué à chaque lecture (GET .../rows, GET .../export) jusqu'à
-    annulation explicite (DELETE .../dedup ci-dessous)."""
+    cette session -- appliqué au résultat déjà filtré par `filter_groups`
+    (même filtre que GET .../rows), avec trieur/filters.py:duplicate_groups
+    (aperçu) ou dedupe_dataframe(_manual) (activation), jamais
+    réimplémentés. Une fois activé, le dédoublonnage reste ACTIF (voir
+    trieur/db.py:update_pipeline_session_dedup) et est réappliqué à
+    chaque lecture (GET .../rows, GET .../export) jusqu'à annulation
+    explicite (DELETE .../dedup ci-dessous).
+
+    dry_run, mode="manual" implicite : si <= DEDUP_GROUP_THRESHOLD
+    groupes, chaque groupe est renvoyé avec ses lignes complètes (revue
+    groupe par groupe, choix de la ligne à garder, pré-sélection = la
+    plus complète -- most_complete_row_index) ; au-delà, seul le compte
+    est renvoyé et l'écran doit proposer la règle globale (`keep`)."""
+    if body.mode not in ("rule", "manual"):
+        raise HTTPException(status_code=400, detail="`mode` doit être 'rule' ou 'manual'.")
     if body.keep not in ("first", "complete"):
         raise HTTPException(status_code=400, detail="`keep` doit être 'first' ou 'complete'.")
     _get_pipeline_session_or_404(ctx, org_id, session_id)
 
     all_rows = _all_pipeline_rows(ctx.client, session_id)
     rows = [_without_sheet_key(r["data"]) for r in all_rows]
-    rows = _filter_by_search(rows, body.search)
-    rows = _filter_by_columns(rows, body.col_filters)
+    rows = _apply_filter_groups_to_rows(rows, body.filter_groups)
 
-    if not rows or body.column not in (rows[0].keys() if rows else []):
-        groups_summary: list[dict] = []
+    df = pd.DataFrame(rows) if rows else None
+    if df is None or body.column not in df.columns:
+        groups: list[tuple] = []
     else:
-        df = pd.DataFrame(rows)
-        if body.column not in df.columns:
-            groups_summary = []
-        else:
-            groups_summary = [
-                {"value": value, "n_rows": len(idx)}
-                for value, idx in duplicate_groups(df, body.column)
-            ]
+        groups = duplicate_groups(df, body.column)
 
     if body.dry_run:
+        n_groups = len(groups)
+        manual_groups = None
+        if 0 < n_groups <= DEDUP_GROUP_THRESHOLD:
+            preview_df = df.where(pd.notnull(df), None)
+            manual_groups = [
+                {
+                    "value": value,
+                    "default_keep_index": int(most_complete_row_index(df, idx_list)),
+                    "rows": [
+                        {"index": int(i), "data": preview_df.loc[i].to_dict()}
+                        for i in idx_list
+                    ],
+                }
+                for value, idx_list in groups
+            ]
         return {
             "session_id": session_id,
             "column": body.column,
-            "n_duplicate_groups": len(groups_summary),
-            "n_duplicate_rows": sum(g["n_rows"] for g in groups_summary),
-            "groups": groups_summary[:50],
+            "n_duplicate_groups": n_groups,
+            "n_duplicate_rows": sum(len(idx) for _, idx in groups),
+            "manual_review_available": manual_groups is not None,
+            "groups": manual_groups if manual_groups is not None
+            else [{"value": value, "n_rows": len(idx)} for value, idx in groups[:50]],
         }
 
-    dedup_config = {"column": body.column, "keep": body.keep}
+    if body.mode == "manual":
+        if not body.keep_indices:
+            raise HTTPException(status_code=400, detail="Choisis une ligne à garder pour chaque groupe.")
+        dedup_config = {"column": body.column, "mode": "manual", "keep_indices": body.keep_indices}
+    else:
+        dedup_config = {"column": body.column, "keep": body.keep}
     pipeline_memory.update_session_dedup(session_id, dedup_config)
     remaining = _apply_active_dedup(rows, {"dedup_config": dedup_config})
     return {
@@ -1222,6 +1309,102 @@ def delete_pipeline_export_preset_endpoint(
         raise HTTPException(status_code=404, detail="Preset d'export introuvable.")
     delete_pipeline_export_preset(ctx.client, preset_id)
     return {"id": preset_id, "deleted": True}
+
+
+class RenameRequest(BaseModel):
+    name: str
+
+
+@app.post("/orgs/{org_id}/pipeline/export-presets/{preset_id}/rename")
+def rename_pipeline_export_preset_endpoint(
+    org_id: str, preset_id: str, body: RenameRequest, ctx: AuthCtx = Depends(require_org_access),
+):
+    """Renomme un preset SANS toucher à son contenu -- bouton "Renommer"
+    séparé de "Enregistrer" dans views/tab4_export.py."""
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Donne un nom à ce preset d'export.")
+    own_presets = list_pipeline_export_presets(ctx.client, ctx.user.id, org_id)
+    if not any(p["id"] == preset_id for p in own_presets):
+        raise HTTPException(status_code=404, detail="Preset d'export introuvable.")
+    return rename_pipeline_export_preset(ctx.client, preset_id, name)
+
+
+# ---------------------------------------------------------------
+# Filtres multi-critères pré-enregistrés (onglet "Filtrer", voir
+# views/tab3_filtrage_dedup.py) -- même patron CRUD que les presets
+# d'export ci-dessus (liés au compte + à l'organisation).
+# ---------------------------------------------------------------
+
+@app.get("/orgs/{org_id}/pipeline/saved-filters")
+def get_pipeline_saved_filters(org_id: str, ctx: AuthCtx = Depends(require_org_access)):
+    return list_pipeline_saved_filters(ctx.client, ctx.user.id, org_id)
+
+
+class PipelineSavedFilterCreate(BaseModel):
+    name: str
+    groups: list = []
+
+
+@app.post("/orgs/{org_id}/pipeline/saved-filters")
+def post_pipeline_saved_filter(
+    org_id: str, body: PipelineSavedFilterCreate, ctx: AuthCtx = Depends(require_org_access),
+):
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Donne un nom à ce filtre.")
+    if not body.groups:
+        raise HTTPException(status_code=400, detail="Aucun critère complet à enregistrer.")
+    return save_pipeline_saved_filter(ctx.client, ctx.user.id, org_id, name, body.groups)
+
+
+@app.post("/orgs/{org_id}/pipeline/saved-filters/{filter_id}/rename")
+def rename_pipeline_saved_filter_endpoint(
+    org_id: str, filter_id: str, body: RenameRequest, ctx: AuthCtx = Depends(require_org_access),
+):
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Donne un nom à ce filtre.")
+    own_filters = list_pipeline_saved_filters(ctx.client, ctx.user.id, org_id)
+    if not any(f["id"] == filter_id for f in own_filters):
+        raise HTTPException(status_code=404, detail="Filtre introuvable.")
+    return rename_pipeline_saved_filter(ctx.client, filter_id, name)
+
+
+@app.delete("/orgs/{org_id}/pipeline/saved-filters/{filter_id}")
+def delete_pipeline_saved_filter_endpoint(
+    org_id: str, filter_id: str, ctx: AuthCtx = Depends(require_org_access),
+):
+    own_filters = list_pipeline_saved_filters(ctx.client, ctx.user.id, org_id)
+    if not any(f["id"] == filter_id for f in own_filters):
+        raise HTTPException(status_code=404, detail="Filtre introuvable.")
+    delete_pipeline_saved_filter(ctx.client, filter_id)
+    return {"id": filter_id, "deleted": True}
+
+
+class FiltersCodeEncodeRequest(BaseModel):
+    filters: list = []
+
+
+@app.post("/orgs/{org_id}/pipeline/saved-filters/encode")
+def encode_pipeline_filters_code(org_id: str, body: FiltersCodeEncodeRequest, ctx: AuthCtx = Depends(require_org_access)):
+    """Encode la liste de filtres enregistrés en un code texte copiable
+    -- même fonction que le "🔗 Sauvegarde texte" de
+    views/tab3_filtrage_dedup.py (trieur/persistence.py:encode_filters_code),
+    pour un secours en dehors de cet environnement (note, message...)."""
+    return {"code": encode_filters_code(body.filters)}
+
+
+class FiltersCodeDecodeRequest(BaseModel):
+    code: str
+
+
+@app.post("/orgs/{org_id}/pipeline/saved-filters/decode")
+def decode_pipeline_filters_code(org_id: str, body: FiltersCodeDecodeRequest, ctx: AuthCtx = Depends(require_org_access)):
+    filters, err = decode_filters_code(body.code)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
+    return {"filters": filters}
 
 
 # ---------------------------------------------------------------

@@ -882,6 +882,62 @@ def delete_pipeline_export_preset(client: Client, preset_id: str) -> None:
     _td(client, "pipeline_export_presets").delete().eq("id", preset_id).execute()
 
 
+def rename_pipeline_export_preset(client: Client, preset_id: str, new_name: str) -> dict:
+    """Renomme un preset d'export SANS toucher à son contenu (ordre/
+    colonnes) -- distinct de save_pipeline_export_preset ci-dessus, qui
+    remplacerait le contenu, voir le bouton "Renommer" séparé de
+    "Enregistrer" dans views/tab4_export.py."""
+    res = _td(client, "pipeline_export_presets").update({"name": new_name}).eq("id", preset_id).execute()
+    return res.data[0]
+
+
+# ---------------------------------------------------------------
+# Filtres multi-critères pré-enregistrés (onglet 3, views/
+# tab3_filtrage_dedup.py -- trieur/filters.py:apply_filter_groups) --
+# liés au COMPTE + à l'organisation, même patron que les presets
+# d'export ci-dessus -- remplace saved_filters.json.
+# ---------------------------------------------------------------
+
+def list_pipeline_saved_filters(client: Client, user_id: str, org_id: str) -> list[dict]:
+    res = (
+        _td(client, "pipeline_saved_filters")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("org_id", org_id)
+        .order("name")
+        .execute()
+    )
+    return res.data or []
+
+
+def save_pipeline_saved_filter(
+    client: Client, user_id: str, org_id: str, name: str, groups: list,
+) -> dict:
+    """Crée ou remplace (même nom, même compte, même environnement) un
+    filtre multi-critères pré-enregistré."""
+    res = (
+        _td(client, "pipeline_saved_filters")
+        .upsert(
+            {"user_id": user_id, "org_id": org_id, "name": name, "groups": groups},
+            on_conflict="user_id,org_id,name",
+        )
+        .execute()
+    )
+    return res.data[0]
+
+
+def rename_pipeline_saved_filter(client: Client, filter_id: str, new_name: str) -> dict:
+    """Renomme un filtre enregistré SANS toucher à ses groupes -- même
+    distinction Renommer/Enregistrer que pour les presets d'export
+    ci-dessus (bouton séparé dans views/tab3_filtrage_dedup.py)."""
+    res = _td(client, "pipeline_saved_filters").update({"name": new_name}).eq("id", filter_id).execute()
+    return res.data[0]
+
+
+def delete_pipeline_saved_filter(client: Client, filter_id: str) -> None:
+    _td(client, "pipeline_saved_filters").delete().eq("id", filter_id).execute()
+
+
 def delete_pipeline_session(client: Client, session_id: str) -> None:
     """Supprime une session de pipeline et toutes ses lignes (cascade,
     voir migration 0010) -- abandon explicite du pipeline en cours par

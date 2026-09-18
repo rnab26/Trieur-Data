@@ -1986,3 +1986,55 @@ vérification indépendante d'un rapport d'agent contredit par un autre)** :
     le site Streamlit en production (branche `main`, dernier commit
     `635fcde`) n'a reçu aucun commit de cette migration depuis son
     démarrage. Aucun merge n'a eu lieu, aucune PR n'est ouverte.
+
+- **Pipeline étapes 2-3, tentative suivante — cette fois-ci réelle,
+  vérifiée indépendamment de zéro (2026-09-18, même soir)** : après le
+  faux rapport signalé ci-dessus, deux nouveaux agents ("API" puis
+  "frontend") ont retravaillé le même chantier. Vérification refaite
+  sans se fier à leurs rapports :
+  - `grep -n "pipeline" api/main.py` : les 3 routes existantes (import,
+    aperçu, mapping) **+ 2 nouvelles routes réelles** —
+    `GET /orgs/{org_id}/pipeline/sessions/{id}/rows` (ligne 687) et
+    `GET .../export` (ligne 716). Lues en entier : réutilisent
+    `_filter_by_search`/`_filter_by_columns` (`views/tab_database.py`,
+    mêmes fonctions que `/records`) et `export_csv_safe`/
+    `export_excel_safe` (`trieur/export.py`), sur toutes les lignes de
+    la session via un nouvel helper paginé `_all_pipeline_rows` — pas
+    juste l'aperçu (`PIPELINE_PREVIEW_SIZE`).
+  - `python3 -m pytest -q` (suite complète) → **238 passed, 2 warnings
+    in 26.38s**, exactement 228 (base de référence) + 10 nouveaux tests
+    pipeline filtre/export (`test_pipeline_rows_filter_*`,
+    `test_pipeline_rows_search`, `test_pipeline_rows_wrong_org_is_404`,
+    `test_pipeline_export_*`). Aucune régression, aucun flake cette
+    fois.
+  - `git log feature/react-migration -3 --oneline` → 2 nouveaux
+    commits réels : `2bc8763` (`api/main.py` +102 lignes,
+    `tests/test_api.py` +181 lignes) et `c580851`
+    (`frontend/src/lib/api.ts` +86, `frontend/src/screens/PipelineScreen.tsx`
+    +201/-8) — `git show --stat` sur chacun confirmé, correspond
+    exactement aux rapports des deux agents.
+  - `git diff --stat main...feature/react-migration -- views/ app.py` →
+    toujours les mêmes 3 fichiers que la vérification précédente
+    (`app.py`, `tab2_import_mapping.py`, `tab_database.py`), tous issus
+    du commit `8b39500` (antérieur, filet de diagnostic upload) — rien
+    ajouté par cet incrément à `views/`/`app.py`, `main` toujours
+    intact.
+  - Scoping `org_id` : `test_pipeline_rows_wrong_org_is_404` et
+    `test_pipeline_export_wrong_org_is_404` existent et passent — les 2
+    nouvelles routes utilisent `_get_pipeline_session_or_404`, comme
+    les 3 routes existantes.
+  - Bug de classe "valeur fausse traitée comme vide" (0/''/false) :
+    absent — `_matches_filter` teste explicitement
+    `value is None or value == ""`, jamais `not value` ; couvert en
+    plus par le nouveau test
+    `test_pipeline_rows_filter_non_vide_traite_zero_comme_une_vraie_valeur`.
+  - `cd frontend && npm run build` → succès, **exit 0** (tsc + vite,
+    aucune erreur TypeScript).
+  - **Conclusion : travail réel cette fois, contrairement à la
+    tentative précédente.** Poussé sur `origin/feature/react-migration`
+    (`git push`), `main` non touché.
+  - **Statut honnête de la migration React : ~78 %**
+    (Base de données + Cockpit + Pipeline étapes 1-2-3 complets et
+    testés ; reste : détails fins onglet 1 déjà listés plus haut,
+    glisser-déposer `streamlit-sortables` à confirmer côté React, barre
+    de progression pour les uploads longs — pas commencée).

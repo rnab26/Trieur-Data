@@ -48,6 +48,8 @@ def render():
             "Deposez un ou plusieurs fichiers Excel, CSV ou PDF",
             type=["xlsx", "xls", "csv", "pdf"], accept_multiple_files=True,
         )
+        from trieur.debug import render_upload_diagnostics
+        render_upload_diagnostics(files[0] if files else None, key="trieur_data_import")
         st.caption("💡 Pour de tres gros volumes (plusieurs millions de lignes), le "
                    "**CSV** est bien plus rapide et leger que le .xlsx.")
         google_url = st.text_input("Ou collez une URL Google Sheets publique (optionnel)")

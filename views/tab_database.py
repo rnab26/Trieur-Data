@@ -635,15 +635,19 @@ def _render_client_list(client, org_id, org_name, user, total):
 
 
 def _render_import(client, org_id, user, is_admin):
-    st.markdown("##### Importer un fichier dans la base (avec vérification IBAN)")
+    st.markdown("##### Importer un fichier dans la base")
     st.caption(
-        "Chaque ligne est comparée à TOUT l'historique déjà en base pour cet "
-        "environnement (pas juste ce fichier) — un même IBAN déjà vu, même "
-        "sous un autre nom, déclenche une alerte au lieu d'être importé en "
-        "double silencieusement."
+        "Si tu indiques une colonne IBAN ci-dessous, chaque ligne est comparée "
+        "à TOUT l'historique déjà en base pour cet environnement (pas juste ce "
+        "fichier) — un même IBAN déjà vu, même sous un autre nom, déclenche une "
+        "alerte au lieu d'être importé en double silencieusement. Sans IBAN, "
+        "l'import se fait normalement, sans cette vérification (utile pour un "
+        "environnement qui n'a pas de RIB, comme des leads)."
     )
 
     uploaded = st.file_uploader("Fichier CSV ou Excel", type=["csv", "xlsx"], key=f"upload_{org_id}")
+    from trieur.debug import render_upload_diagnostics
+    render_upload_diagnostics(uploaded, key=f"db_{org_id}")
     if uploaded is None:
         return
 
@@ -655,7 +659,7 @@ def _render_import(client, org_id, user, is_admin):
 
     st.dataframe(df.head(10), use_container_width=True)
     iban_col = st.selectbox(
-        "Quelle colonne contient l'IBAN ?",
+        "Quelle colonne contient l'IBAN ? (optionnel -- laisse \"(aucune)\" si cet environnement n'en a pas)",
         options=["(aucune)"] + list(df.columns),
         key=f"iban_col_{org_id}",
     )

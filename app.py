@@ -125,6 +125,7 @@ import views.tab3_filtrage_dedup as view_tab3
 import views.tab4_export as view_tab4
 import views.tab_database as view_database
 import views.tab_cockpit as view_cockpit
+from trieur.debug import report_exception
 
 LOGO_PATH = "assets/logo.png"
 
@@ -362,19 +363,37 @@ if st.session_state.top_menu == "Trieur de Data":
     )
 
     with tab1:
-        view_tab1.render()
+        try:
+            view_tab1.render()
+        except Exception as exc:
+            report_exception("Trieur de Data > 1. Colonnes maîtres", exc)
 
     with tab2:
-        view_tab2.render()
+        try:
+            view_tab2.render()
+        except Exception as exc:
+            report_exception("Trieur de Data > 2. Import et Mapping", exc)
 
     with tab3:
-        view_tab3.render()
+        try:
+            view_tab3.render()
+        except Exception as exc:
+            report_exception("Trieur de Data > 3. Filtrage & Dedup", exc)
 
     with tab4:
-        view_tab4.render()
+        try:
+            view_tab4.render()
+        except Exception as exc:
+            report_exception("Trieur de Data > 4. Export", exc)
 
 elif st.session_state.top_menu == "Base de données":
-    view_database.render()
+    try:
+        view_database.render()
+    except Exception as exc:
+        report_exception("Base de données", exc)
 
 elif st.session_state.top_menu == "Cockpit":
-    view_cockpit.render()
+    try:
+        view_cockpit.render()
+    except Exception as exc:
+        report_exception("Cockpit", exc)

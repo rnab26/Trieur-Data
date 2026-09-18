@@ -1,6 +1,23 @@
 [server]
 maxUploadSize = 500
 maxMessageSize = 500
+# Cause réelle des uploads qui échouaient silencieusement en prod (vérifié
+# dans le code source de Streamlit installé, web/server/starlette/starlette_routes.py) :
+# la route d'upload de fichier calcule son en-tête CORS via
+# get_url(browser.serverAddress), et browser.serverAddress vaut "localhost"
+# par défaut -- jamais configuré ici. Résultat : le serveur répond avec
+# Access-Control-Allow-Origin: http://localhost:<port>, alors que le vrai
+# domaine (https://trieur-data.onrender.com) ne correspond pas -- c'est le
+# NAVIGATEUR qui bloque alors sa propre requête, sans qu'aucune erreur ne
+# remonte côté Streamlit (d'où l'absence totale de message d'erreur observée).
+# get_url() code aussi en dur le port et le protocole http://, donc corriger
+# uniquement browser.serverAddress serait insuffisant. La documentation de
+# Streamlit elle-même (config.py, message d'avertissement XSRF/CORS) indique
+# la marche à suivre exacte : désactiver enableXsrfProtection quand un vrai
+# partage cross-origin est nécessaire -- ce qui fait retomber cette route sur
+# le calcul CORS dynamique (_set_cors_headers), qui reflète la vraie origine
+# de la requête au lieu d'une valeur fixe erronée.
+enableXsrfProtection = false
 
 [theme]
 base = "light"

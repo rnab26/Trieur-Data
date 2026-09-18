@@ -344,6 +344,16 @@ with col_auth:
         try_restore_session()
         render_top_auth_widget()
 
+# Réservé aux administrateurs : trace Python complète / diagnostic upload
+# (URL, en-têtes bruts) en cas d'erreur -- voir trieur/debug.py. Un compte
+# normal (ou personne, sur "Trieur de Data" qui ne nécessite pas de compte)
+# ne voit qu'un message générique.
+_is_admin = False
+if _supabase_configured:
+    from views._auth import optional_login_ctx
+    _debug_ctx = optional_login_ctx()
+    _is_admin = bool(_debug_ctx and _debug_ctx["profile"].get("is_super_admin"))
+
 st.divider()
 
 if st.session_state.top_menu == "Trieur de Data":
@@ -366,34 +376,34 @@ if st.session_state.top_menu == "Trieur de Data":
         try:
             view_tab1.render()
         except Exception as exc:
-            report_exception("Trieur de Data > 1. Colonnes maîtres", exc)
+            report_exception("Trieur de Data > 1. Colonnes maîtres", exc, is_admin=_is_admin)
 
     with tab2:
         try:
             view_tab2.render()
         except Exception as exc:
-            report_exception("Trieur de Data > 2. Import et Mapping", exc)
+            report_exception("Trieur de Data > 2. Import et Mapping", exc, is_admin=_is_admin)
 
     with tab3:
         try:
             view_tab3.render()
         except Exception as exc:
-            report_exception("Trieur de Data > 3. Filtrage & Dedup", exc)
+            report_exception("Trieur de Data > 3. Filtrage & Dedup", exc, is_admin=_is_admin)
 
     with tab4:
         try:
             view_tab4.render()
         except Exception as exc:
-            report_exception("Trieur de Data > 4. Export", exc)
+            report_exception("Trieur de Data > 4. Export", exc, is_admin=_is_admin)
 
 elif st.session_state.top_menu == "Base de données":
     try:
         view_database.render()
     except Exception as exc:
-        report_exception("Base de données", exc)
+        report_exception("Base de données", exc, is_admin=_is_admin)
 
 elif st.session_state.top_menu == "Cockpit":
     try:
         view_cockpit.render()
     except Exception as exc:
-        report_exception("Cockpit", exc)
+        report_exception("Cockpit", exc, is_admin=_is_admin)

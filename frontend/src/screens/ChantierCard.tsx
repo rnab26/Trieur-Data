@@ -165,6 +165,20 @@ export function ChantierCard({
 
       {statusError && <p className="mt-1 text-xs text-[var(--danger)]">{statusError}</p>}
 
+      {todos && todos.length > 0 && (
+        <div className="mt-2">
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--muted-bg)]">
+            <div
+              className="h-full rounded-full bg-[var(--primary)] transition-all"
+              style={{ width: `${Math.round((todos.filter((t) => t.done).length / todos.length) * 100)}%` }}
+            />
+          </div>
+          <p className="mt-0.5 text-xs text-[var(--muted)]">
+            {todos.filter((t) => t.done).length}/{todos.length} points traités
+          </p>
+        </div>
+      )}
+
       {!compact && (
         <div className="mt-3 flex flex-col gap-1">
           {todosError && <p className="text-xs text-[var(--danger)]">{todosError}</p>}

@@ -35,6 +35,7 @@ from trieur.db import (
     create_chantier,
     create_pipeline_session,
     create_section,
+    delete_expired_pipeline_sessions_for_org,
     delete_record,
     delete_saved_view,
     delete_user_column_set,
@@ -711,6 +712,16 @@ async def create_pipeline_session_endpoint(
     if not rows:
         raise HTTPException(status_code=400, detail="Fichier vide ou sans ligne exploitable.")
 
+    # Nettoyage opportuniste des sessions expirées de CET org avant d'en
+    # ouvrir une nouvelle (revue PR #24, point #8 -- voir docstring de
+    # delete_expired_pipeline_sessions_for_org) -- best-effort : un échec
+    # ici ne doit jamais empêcher l'import en cours, juste laisser un peu
+    # plus de sessions périmées trainer jusqu'au prochain appel.
+    try:
+        delete_expired_pipeline_sessions_for_org(ctx.client, org_id)
+    except Exception:
+        pass
+
     session = create_pipeline_session(ctx.client, org_id, ctx.user.id, source_filename=filename)
     for start in range(0, len(rows), PIPELINE_APPEND_BATCH):
         append_pipeline_rows(
@@ -774,6 +785,8 @@ def _all_pipeline_rows(client, session_id: str) -> list[dict]:
 def list_pipeline_session_rows(
     org_id: str,
     session_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(LIST_PAGE_SIZE, ge=1, le=2000),
     search: str = Query(""),
     col_filters: str = Query("{}", description="JSON : {colonne: {op, value}}"),
     ctx: AuthCtx = Depends(require_org_access),
@@ -782,7 +795,17 @@ def list_pipeline_session_rows(
     filtrées avec les MÊMES fonctions que /orgs/{org_id}/records
     (_filter_by_search/_filter_by_columns, views/tab_database.py) -- pas
     une deuxième logique de filtre. Porte sur trieur_data.pipeline_rows
-    (staging TTL 24h), jamais trieur_data.records (donnée permanente)."""
+    (staging TTL 24h), jamais trieur_data.records (donnée permanente).
+
+    Paginée (`page`/`page_size`, même contrat que GET /orgs/{org_id}/records)
+    depuis la revue PR #24 (point #7) : avant, cette route renvoyait
+    TOUTE la session en une réponse (potentiellement des centaines de
+    milliers de lignes) alors que l'écran n'en affiche que 50 à la fois.
+    Contrairement à /records, la recherche/les filtres portent ici sur
+    TOUTE la session (pas seulement la page renvoyée) : `_all_pipeline_rows`
+    charge et filtre l'intégralité du staging côté serveur (comme avant),
+    seule la DÉCOUPE en page change -- `count` reste le total filtré réel,
+    pas juste la taille de la page renvoyée."""
     _get_pipeline_session_or_404(ctx, org_id, session_id)
     parsed_filters = _parse_col_filters(col_filters)
 
@@ -791,11 +814,16 @@ def list_pipeline_session_rows(
     rows = _filter_by_search(rows, search)
     rows = _filter_by_columns(rows, parsed_filters)
 
+    start = (page - 1) * page_size
+    page_rows = rows[start:start + page_size]
+
     return {
         "session_id": session_id,
+        "page": page,
+        "page_size": page_size,
         "row_count": len(all_rows),
         "count": len(rows),
-        "rows": rows,
+        "rows": page_rows,
     }
 
 

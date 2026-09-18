@@ -630,6 +630,36 @@ def create_pipeline_session(client: Client, org_id: str, created_by: str, source
     return res.data[0]
 
 
+def delete_expired_pipeline_sessions_for_org(client: Client, org_id: str) -> int:
+    """Nettoie les sessions de pipeline expirées (TTL 24h, colonne
+    `expires_at`) de CET environnement seulement -- appelé opportunément
+    au début de la création d'une nouvelle session (voir
+    api/main.py:create_pipeline_session_endpoint), pour borner le
+    problème "les sessions abandonnées ne sont jamais nettoyées" sans
+    dépendre d'une tâche planifiée externe (revue PR #24, point #8).
+
+    Volontairement PAS `trieur_data.cleanup_expired_pipeline_sessions()`
+    (le RPC SECURITY DEFINER de la migration 0010) : ce nettoyage-ci
+    passe par le client normal de l'appelant, scopé à son propre org_id,
+    permis nativement par la policy RLS `pipeline_sessions_rw` (un membre
+    peut déjà supprimer les sessions de sa propre org) -- pas besoin d'un
+    rôle privilégié. Le RPC cross-org reste réservé à service_role/pg_cron
+    (voir migration 0011) : un vrai nettoyage global periodique serait
+    préférable à long terme, mais suppose une tâche planifiée externe
+    (pg_cron ou un scheduler type Render Cron Job appelant ce RPC avec la
+    clé service_role) -- décision d'infra hors périmètre de ce correctif."""
+    from datetime import datetime, timezone
+
+    res = (
+        _td(client, "pipeline_sessions")
+        .delete()
+        .eq("org_id", org_id)
+        .lt("expires_at", datetime.now(timezone.utc).isoformat())
+        .execute()
+    )
+    return len(res.data or [])
+
+
 def get_pipeline_session(client: Client, session_id: str) -> dict | None:
     """Une session de pipeline, ou `None` si elle n'existe plus --
     supprimée par `cleanup_expired_pipeline_sessions()` (TTL dépassée) ou

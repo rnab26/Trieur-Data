@@ -1,0 +1,31 @@
+-- =============================================================
+-- Correctif sécurité (revue GitHub Copilot, PR #24) :
+-- trieur_data.cleanup_expired_pipeline_sessions() est SECURITY DEFINER
+-- et supprime les sessions expirées de TOUTES les organisations en un
+-- seul appel (par construction : c'est un nettoyage global, pas une
+-- action scopée à l'org de l'appelant). La migration 0010 accordait
+-- EXECUTE à `authenticated` -- n'importe quel utilisateur connecté
+-- pouvait donc appeler ce RPC directement (PostgREST expose toute
+-- fonction schema-qualifiée exécutable par le rôle courant), contournant
+-- la RLS normale (is_org_member) pour une action destructrice
+-- cross-tenant. Rien n'exploitait volontairement ce chemin, mais rien ne
+-- l'empêchait non plus.
+--
+-- Correctif : n'accorder EXECUTE qu'à `service_role` (jamais appelé avec
+-- le jeton d'un utilisateur -- réservé à pg_cron ou un appel backend
+-- avec la clé service_role, tous deux hors de portée d'un utilisateur
+-- normal). `authenticated` perd l'accès direct.
+--
+-- Corollaire (voir aussi PROJECT_LOG.md, item #8 de la revue) : l'API
+-- FastAPI n'a pas de client service_role -- l'appel "opportuniste" au
+-- début de POST /orgs/{org_id}/pipeline/sessions n'utilise donc PAS ce
+-- RPC. Il nettoie uniquement les sessions expirées de l'org courante,
+-- via le client normal de l'appelant (soumis à la RLS pipeline_sessions_rw,
+-- qui autorise déjà un membre à supprimer les lignes de SON org) --
+-- voir trieur/db.py:delete_expired_pipeline_sessions_for_org. Ce
+-- nettoyage global RESTE prêt pour service_role/pg_cron le jour où
+-- l'un des deux est mis en place (voir commentaire de la migration 0010).
+-- =============================================================
+
+revoke execute on function trieur_data.cleanup_expired_pipeline_sessions() from authenticated;
+grant execute on function trieur_data.cleanup_expired_pipeline_sessions() to service_role;

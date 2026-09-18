@@ -4,9 +4,12 @@ faux client Supabase (aucun réseau) -- même pattern que
 tests/test_db_import.py et tests/test_db_saved_views.py."""
 from types import SimpleNamespace
 
+from datetime import datetime, timedelta, timezone
+
 from trieur.db import (
     append_pipeline_rows,
     create_pipeline_session,
+    delete_expired_pipeline_sessions_for_org,
     delete_pipeline_session,
     get_pipeline_session,
     list_pipeline_rows,
@@ -34,6 +37,7 @@ class _FakeTable:
         self._store = store
         self._name = name
         self._filters = {}
+        self._lt_filters = {}
         self._insert_payload = None
         self._update_payload = None
         self._delete = False
@@ -50,6 +54,10 @@ class _FakeTable:
 
     def eq(self, field, value):
         self._filters[field] = value
+        return self
+
+    def lt(self, field, value):
+        self._lt_filters[field] = value
         return self
 
     def order(self, field, desc=False):
@@ -73,7 +81,12 @@ class _FakeTable:
         return self
 
     def _matched(self):
-        return [r for r in self._store[self._name] if all(r.get(k) == v for k, v in self._filters.items())]
+        return [
+            r
+            for r in self._store[self._name]
+            if all(r.get(k) == v for k, v in self._filters.items())
+            and all(r.get(k) is not None and r.get(k) < v for k, v in self._lt_filters.items())
+        ]
 
     def execute(self):
         if self._insert_payload is not None:
@@ -211,6 +224,31 @@ def test_update_pipeline_session_status():
     update_pipeline_session_status(client, session["id"], "mapped")
 
     assert get_pipeline_session(client, session["id"])["status"] == "mapped"
+
+
+def test_delete_expired_pipeline_sessions_for_org_removes_only_expired_ones():
+    """Revue PR #24, point #8 : nettoyage opportuniste scopé à l'org de
+    l'appelant (pas le RPC cross-org, réservé à service_role depuis la
+    migration 0011) -- ne touche que les sessions de CET org, et
+    seulement celles déjà expirées."""
+    client = _FakeClient()
+    expired = create_pipeline_session(client, "org-1", "user-1")
+    fresh = create_pipeline_session(client, "org-1", "user-1")
+    other_org_expired = create_pipeline_session(client, "org-2", "user-1")
+
+    now = datetime.now(timezone.utc)
+    client.store["pipeline_sessions"][0]["expires_at"] = (now - timedelta(hours=1)).isoformat()
+    client.store["pipeline_sessions"][1]["expires_at"] = (now + timedelta(hours=23)).isoformat()
+    client.store["pipeline_sessions"][2]["expires_at"] = (now - timedelta(hours=1)).isoformat()
+
+    n_deleted = delete_expired_pipeline_sessions_for_org(client, "org-1")
+
+    assert n_deleted == 1
+    assert get_pipeline_session(client, expired["id"]) is None
+    assert get_pipeline_session(client, fresh["id"]) is not None
+    # Un org différent, même expiré, n'est pas touché par cet appel --
+    # scopé à org-1 uniquement.
+    assert get_pipeline_session(client, other_org_expired["id"]) is not None
 
 
 def test_delete_pipeline_session_removes_its_rows_too():

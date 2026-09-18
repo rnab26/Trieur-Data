@@ -40,6 +40,7 @@ class _FakeTable:
         self._op = None
         self._payload = None
         self._on_conflict = None
+        self._lt_filters = []
 
     def select(self, *_a, count=None):
         self._select_count = count
@@ -51,6 +52,10 @@ class _FakeTable:
 
     def in_(self, field, values):
         self._filters.append((field, ("in", set(values))))
+        return self
+
+    def lt(self, field, value):
+        self._lt_filters.append((field, value))
         return self
 
     def order(self, field, desc=False):
@@ -91,6 +96,9 @@ class _FakeTable:
                 if row.get(field) not in value[1]:
                     return False
             elif row.get(field) != value:
+                return False
+        for field, value in self._lt_filters:
+            if row.get(field) is None or not (row.get(field) < value):
                 return False
         return True
 
@@ -1156,6 +1164,36 @@ def test_pipeline_session_create_stages_rows_and_detects_columns(client_factory)
     assert all(r["session_id"] == session_id for r in rows)
 
 
+def test_pipeline_session_create_cleans_up_expired_sessions_of_same_org_first(client_factory):
+    """Revue PR #24, point #8 : la création d'une nouvelle session
+    nettoie d'abord les sessions EXPIRÉES de cet org (nettoyage
+    opportuniste, pas de tâche planifiée) -- une session d'un AUTRE org,
+    même expirée, n'est pas touchée (pas de RPC cross-org côté API, voir
+    migration 0011)."""
+    from datetime import datetime, timedelta, timezone
+
+    fake = _make_client()
+    tc = client_factory(fake)
+
+    expired_own_org = _upload_csv(tc, "org-1", b"NOM\nA\n").json()["session_id"]
+    expired_other_org = _upload_csv(tc, "org-1", b"NOM\nB\n").json()["session_id"]
+    fresh_own_org = _upload_csv(tc, "org-1", b"NOM\nC\n").json()["session_id"]
+
+    now = datetime.now(timezone.utc)
+    by_id = {s["id"]: s for s in fake.postgrest.tables["pipeline_sessions"]}
+    by_id[expired_own_org]["expires_at"] = (now - timedelta(hours=1)).isoformat()
+    by_id[expired_other_org]["expires_at"] = (now - timedelta(hours=1)).isoformat()
+    by_id[expired_other_org]["org_id"] = "org-2"
+    by_id[fresh_own_org]["expires_at"] = (now + timedelta(hours=23)).isoformat()
+
+    _upload_csv(tc, "org-1", b"NOM\nD\n")
+
+    remaining_ids = {s["id"] for s in fake.postgrest.tables["pipeline_sessions"]}
+    assert expired_own_org not in remaining_ids
+    assert fresh_own_org in remaining_ids
+    assert expired_other_org in remaining_ids
+
+
 def test_pipeline_session_requires_org_access(client_factory):
     fake = _make_client(memberships=[])
     tc = client_factory(fake)
@@ -1428,6 +1466,61 @@ def test_pipeline_rows_search(client_factory):
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert [r["NOM"] for r in res.json()["rows"]] == ["Martin"]
+
+
+def test_pipeline_rows_paginates_with_page_and_page_size(client_factory):
+    """Revue PR #24, point #7 : avant, cette route renvoyait TOUTE la
+    session en une réponse -- vérifie qu'elle est maintenant vraiment
+    paginée (page/page_size), comme GET /orgs/{org_id}/records."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    content = b"NOM\n" + b"\n".join(f"row{i}".encode() for i in range(5)) + b"\n"
+    session_id = _upload_pipeline_rows(tc, "org-1", content)
+
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"page": 1, "page_size": 2},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    body = res.json()
+    assert body["page"] == 1
+    assert body["page_size"] == 2
+    # `count`/`row_count` restent les totaux réels (pas la taille de la
+    # page renvoyée) -- l'écran doit pouvoir afficher "2/5" correctement.
+    assert body["row_count"] == 5
+    assert body["count"] == 5
+    assert [r["NOM"] for r in body["rows"]] == ["row0", "row1"]
+
+    res2 = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"page": 3, "page_size": 2},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert [r["NOM"] for r in res2.json()["rows"]] == ["row4"]
+
+
+def test_pipeline_rows_pagination_applies_after_filtering(client_factory):
+    """La pagination découpe le résultat FILTRÉ, pas la table brute --
+    sinon une page pourrait rater des lignes qui matchent le filtre mais
+    sont situées après la page brute demandée."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,VILLE\nA,Paris\nB,Lyon\nC,Paris\nD,Lyon\nE,Paris\n",
+    )
+
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={
+            "page": 2,
+            "page_size": 2,
+            "col_filters": json.dumps({"VILLE": {"op": "égal à", "value": "paris"}}),
+        },
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    body = res.json()
+    assert body["count"] == 3
+    assert [r["NOM"] for r in body["rows"]] == ["E"]
 
 
 def test_pipeline_rows_wrong_org_is_404(client_factory):

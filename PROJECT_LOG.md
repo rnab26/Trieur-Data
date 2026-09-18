@@ -1353,21 +1353,77 @@ maîtres) livré :
   inconnues → ajout aux colonnes maîtres) — livré 2026-09-17.
 - [x] Gestion des colonnes maîtres (UI ajout/renommage/réordonnage/
   suppression, admin ; lecture seule sinon) — livré 2026-09-17.
-- [ ] Vues enregistrées (UI créer/lister/appliquer/supprimer) —
-  endpoints déjà prêts.
-- [ ] Tableau de bord par environnement + badge d'alertes de doublon —
-  endpoint déjà prêt (`GET /orgs/{id}/dashboard`), UI à faire.
+- [x] Vues enregistrées (UI créer/lister/appliquer/supprimer) — livré
+  2026-09-17 (voir suite ci-dessous).
+- [x] Tableau de bord par environnement + badge d'alertes de doublon —
+  livré 2026-09-17.
 - [ ] Modification multiple (sélection multi-lignes) et diff au
   réimport — pas d'équivalent côté API pour l'instant.
-- [ ] Recherche avancée façon Google Sheets (filtres par colonne
-  combinés) — l'API expose `col_filters` mais l'UI React ne s'en sert
-  pas encore.
+- [x] Recherche avancée façon Google Sheets (filtres par colonne
+  combinés) — livré 2026-09-17 (`ColumnFilters.tsx`), branché sur
+  `col_filters` déjà exposé par l'API.
 - [ ] Export direct depuis la base.
 - [ ] Historique court par ligne modifiée.
 - [ ] Les onglets "Trieur de Data" eux-mêmes (au-delà de la Base de
   données) : tout ce qui vit dans les autres tabs de `app.py`/`views/`
   et n'a pas encore d'équivalent React ni d'endpoint API dédié — à
-  auditer un par un avant de porter.
+  auditer un par un avant de porter. **Pas commencé.**
+
+**État (2026-09-17, suite — filtres par colonne + vues enregistrées +
+tableau de bord)** :
+- Découverte : côté API les trois fonctionnalités étaient déjà prêtes
+  (`col_filters` sur `GET .../records`, `GET/POST/DELETE
+  .../saved-views`, `GET .../dashboard` avec `alerts_pending` via
+  `list_dedup_alerts`) — aucun changement API nécessaire, seul le
+  frontend manquait.
+- `frontend/` : `ColumnFilters.tsx` (opérateur
+  contient/ne contient pas/égal à/vide/non vide + valeur, combinés en
+  ET), `SavedViews.tsx` (lister/enregistrer/appliquer/supprimer une
+  vue), `DashboardPanel.tsx` (clients/alertes en attente/dernier
+  import, recalculé après import/édition), `DatabaseScreen.tsx`
+  (intègre les trois + sélecteur de colonnes affichées), `api.ts`
+  (`colFilters` sur `listRecords`, fonctions vues enregistrées,
+  correction d'un bug de types : `Dashboard.last_import` référençait
+  `filename`/`created_at` au lieu des vrais champs
+  `source_filename`/`imported_at`).
+- **Vérifié indépendamment ce soir** (deuxième session, relecture
+  ligne à ligne du code + comparaison API/frontend endpoint par
+  endpoint) :
+  - `python3 -m pytest -q` (suite complète) → **176 passed** (175
+    d'avant + 1 nouveau test `test_records_col_filters_operators`),
+    aucun flake observé cette fois. Le flake connu
+    (`test_master_columns_localstorage_fallback`, ~1 fois sur 3,
+    confirmé préexistant sur `main` par bisection) reste un chantier de
+    fiabilisation séparé, sans lien avec ce travail.
+  - `cd frontend && npm run build` → succès (`tsc -b && vite build`,
+    exit 0).
+  - `git diff --stat main...feature/react-migration -- views/ app.py`
+    → vide, confirmé : app Streamlit toujours non touchée.
+  - Relu `ColumnFilters.tsx`/`SavedViews.tsx`/`DashboardPanel.tsx`/
+    `DatabaseScreen.tsx` contre `api/main.py` et `api.ts` : méthodes
+    HTTP, chemins, noms de champs (`source_filename`/`imported_at`,
+    `col_filters`, `visible_cols`) tous cohérents — aucune divergence
+    trouvée.
+  - Piège des valeurs falsy (0/''/false traité comme "vide") vérifié
+    spécifiquement : `_matches_filter` (`views/tab_database.py`) juge
+    "vide"/"non vide" sur `value is None or value == ""`, pas sur
+    `not value` — un `ENFANTS: 0` reste "non vide", couvert par le
+    nouveau test. Côté affichage, `DashboardPanel` et le tableau de
+    `DatabaseScreen` utilisent JSX direct / `== null` (jamais `||` ou
+    `!value`) — un compteur à 0 s'affiche bien "0", jamais vide ni
+    coincé en "chargement". **Aucun bug trouvé, rien à corriger.**
+- Poussé sur `origin/feature/react-migration` (commit `<voir git log`
+  au moment du push). Toujours pas mergé sur `main`, pas de PR.
+
+**Avancement global estimé** : ~40-45% de la migration complète.
+Fait : auth, écran Base de données avec liste/recherche/filtres par
+colonne/édition/import/colonnes maîtres/vues enregistrées/tableau de
+bord. Pour arriver à 100% il reste : sélection multiple + diff au
+réimport, export, historique par ligne, et surtout l'audit + portage
+de **tous les autres onglets de `app.py`/`views/`** (non commencé,
+probablement le plus gros morceau restant — pas encore mesuré en
+détail) avant de pouvoir envisager un remplacement de l'app Streamlit
+en production.
 
 **Ne pas casser** : l'app Streamlit (`app.py`, `views/`) reste la seule
 en production tant que ce chantier n'est pas fini — ne jamais merger

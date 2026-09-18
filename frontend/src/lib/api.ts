@@ -529,3 +529,89 @@ export function applyPipelineMapping(orgId: string, sessionId: string, mapping: 
     { method: 'POST', body: JSON.stringify({ mapping, dry_run: false }) },
   )
 }
+
+// ---------------------------------------------------------------
+// Pipeline "Trieur de Data" -- étape 2 (filtrer/exporter les lignes en
+// staging), voir api/main.py:list_pipeline_session_rows /
+// export_pipeline_session_rows. Mêmes opérateurs de filtre (FILTER_OPERATORS
+// ci-dessus) et même normalisation casse que côté /records -- une seule
+// source de vérité, ne pas dupliquer une deuxième liste d'opérateurs.
+// ---------------------------------------------------------------
+
+export type PipelineRowsPage = {
+  session_id: string
+  row_count: number
+  count: number
+  rows: Record<string, unknown>[]
+}
+
+// _matches_filter (views/tab_database.py) met en minuscules la VALEUR du
+// champ mais pas `needle` -- même normalisation côté appelant que
+// toApiColFilters/toApiColFiltersExport ci-dessus, dupliquée ici pour que
+// les deux fonctions pipeline restent autonomes.
+function toApiColFiltersPipeline(filters: ColFilters): ColFilters {
+  const out: ColFilters = {}
+  for (const [col, f] of Object.entries(filters)) {
+    out[col] = { op: f.op, value: f.value.toLowerCase() }
+  }
+  return out
+}
+
+export function listPipelineSessionRows(
+  orgId: string,
+  sessionId: string,
+  opts: { search?: string; colFilters?: ColFilters } = {},
+) {
+  const params = new URLSearchParams()
+  if (opts.search) params.set('search', opts.search)
+  if (opts.colFilters && Object.keys(opts.colFilters).length > 0) {
+    params.set('col_filters', JSON.stringify(toApiColFiltersPipeline(opts.colFilters)))
+  }
+  return request<PipelineRowsPage>(
+    `/orgs/${orgId}/pipeline/sessions/${sessionId}/rows?${params.toString()}`,
+  )
+}
+
+// Même mécanique de téléchargement navigateur que exportRecords ci-dessus
+// (pas de JSON en retour) -- voir api/main.py:export_pipeline_session_rows.
+export async function exportPipelineSessionRows(
+  orgId: string,
+  sessionId: string,
+  opts: { format: 'csv' | 'xlsx'; search?: string; colFilters?: ColFilters },
+): Promise<void> {
+  const headers = await authHeader()
+  const params = new URLSearchParams()
+  params.set('format', opts.format)
+  if (opts.search) params.set('search', opts.search)
+  if (opts.colFilters && Object.keys(opts.colFilters).length > 0) {
+    params.set('col_filters', JSON.stringify(toApiColFiltersPipeline(opts.colFilters)))
+  }
+
+  const res = await fetch(
+    `${API_URL}/orgs/${orgId}/pipeline/sessions/${sessionId}/export?${params.toString()}`,
+    { headers },
+  )
+  if (!res.ok) {
+    let detail = res.statusText
+    try {
+      const body = await res.json()
+      detail = body.detail ?? detail
+    } catch {
+      // pas de corps JSON -- on garde le statusText
+    }
+    throw new ApiError(res.status, detail)
+  }
+  const blob = await res.blob()
+  const disposition = res.headers.get('content-disposition') ?? ''
+  const match = /filename="?([^"]+)"?/.exec(disposition)
+  const filename = match ? match[1] : `export_pipeline.${opts.format}`
+
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}

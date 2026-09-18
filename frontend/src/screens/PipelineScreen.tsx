@@ -269,13 +269,24 @@ export function PipelineScreen() {
               à chaque changement d'onglet détruisait son fichier importé/son
               mapping en cours (state local React) -- constaté en réel par
               l'utilisateur : retour sur "Colonnes maîtres" puis retour sur
-              "Importer" = fichier à réimporter depuis zéro. */}
+              "Importer" = fichier à réimporter depuis zéro.
+
+              `key={orgId}` sur les deux panneaux qui gardent un état LOCAL lié
+              à une session pipeline (fichier importé, mapping en cours) :
+              bug réel constaté (logs Render) -- changer d'environnement en
+              cours de mapping laissait le state local (session_id créé sous
+              l'ANCIEN org) survivre pendant que la prop `orgId` passait au
+              NOUVEL org, donc "Construire" envoyait un org_id qui ne
+              correspondait plus à la session -> 404 "session introuvable".
+              `key` force React à démonter/remonter ces panneaux (state
+              local reparti à zéro) exactement quand orgId change, jamais
+              juste en changeant d'onglet. */}
           <div hidden={tab !== 'colonnes'}>
-            <MasterColumnsPanel orgId={orgId} isAdmin={isAdmin} onSaved={onColumnsChanged} />
+            <MasterColumnsPanel key={orgId} orgId={orgId} isAdmin={isAdmin} onSaved={onColumnsChanged} />
           </div>
 
           <div hidden={tab !== 'import'}>
-            <PipelineImportPanel orgId={orgId} masterColumns={masterColumns} onBuilt={handleBuilt} />
+            <PipelineImportPanel key={orgId} orgId={orgId} masterColumns={masterColumns} onBuilt={handleBuilt} />
           </div>
 
           <div hidden={tab !== 'filtrer'}>

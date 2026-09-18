@@ -43,6 +43,12 @@ export function MasterColumnsPanel({
   onSaved?: () => void
 }) {
   const [text, setText] = useState('')
+  // Colonnes réellement ENREGISTRÉES pour l'environnement (distinct du
+  // brouillon `text` du textarea, pas encore sauvegardé) -- ce que
+  // "🔗 Mémoire liée à ton compte" capture sous un nom, même distinction
+  // que st.session_state.master_columns vs le widget textarea côté
+  // original.
+  const [savedColumns, setSavedColumns] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -57,6 +63,7 @@ export function MasterColumnsPanel({
       .then((data) => {
         if (cancelled) return
         setText(data.columns.join('\n'))
+        setSavedColumns(data.columns)
       })
       .catch((err: unknown) => {
         if (cancelled) return
@@ -77,6 +84,7 @@ export function MasterColumnsPanel({
     try {
       await setMasterColumns(orgId, next)
       setText(next.join('\n'))
+      setSavedColumns(next)
       setSaveSuccess(successMessage)
       onSaved?.()
     } catch (err) {
@@ -145,7 +153,10 @@ export function MasterColumnsPanel({
         l'en-tête est absente ou trompeuse.
       </p>
 
-      <PersonalColumnSets />
+      <PersonalColumnSets
+        currentColumns={savedColumns}
+        onApplied={(cols) => void persist(cols, `Jeu appliqué (${cols.length} colonnes).`)}
+      />
     </div>
   )
 }

@@ -1220,6 +1220,28 @@ def test_pipeline_session_get_wrong_org_is_404(client_factory):
     assert res.status_code == 404
 
 
+def test_pipeline_mapping_wrong_org_is_404(client_factory):
+    """Même règle que test_pipeline_session_get_wrong_org_is_404, mais sur
+    la route POST mapping : une session d'un autre org ne doit ni être
+    lisible ni modifiable via /orgs/org-1/.../mapping."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_csv(tc, "org-1", b"NOM\nDupont\n").json()["session_id"]
+    fake.postgrest.tables["pipeline_sessions"][0]["org_id"] = "org-2"
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 404
+
+    # Les lignes n'ont pas été réécrites (toujours les clés source, pas
+    # les clés colonnes maîtres qu'aurait produites le mapping).
+    rows = fake.postgrest.tables["pipeline_rows"]
+    assert rows[0]["data"] == {"NOM": "Dupont", "_sheet": "clients"}
+
+
 def test_pipeline_mapping_dry_run_suggests_without_writing(client_factory):
     fake = _make_client()  # master_columns = ["NOM", "IBAN"]
     tc = client_factory(fake)

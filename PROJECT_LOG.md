@@ -1813,3 +1813,71 @@ seulement)** :
   cette même table de staging ; PDF (relevés SEPA) pas encore branché
   sur `POST .../pipeline/sessions` ; le point transverse n°2
   (progression des tâches longues) reste ouvert.
+
+**État (2026-09-18, écran React "Trieur de Data" — étape 1 import +
+mapping) + vérification indépendante de tout l'incrément staging**,
+implémenté (étape 1 : import + mapping) :
+- `frontend/src/screens/PipelineScreen.tsx` : nouvel écran, mêmes
+  routes que l'API ci-dessus (`createPipelineSession`,
+  `suggestPipelineMapping`, `applyPipelineMapping` dans
+  `frontend/src/lib/api.ts`) — upload → aperçu colonnes/colonnes
+  inconnues → mapping colonne par colonne (suggestion auto en
+  `dry_run`, éditable) → "Construire". Une étape affichée à la fois,
+  colonnes maîtres réutilisées via `get/setMasterColumns` (aucune
+  deuxième liste créée). États chargement/vide/erreur/succès traités à
+  chaque appel. `views/` et `app.py` non touchés.
+- **Vérification indépendante** (pas seulement les rapports des 3
+  agents de ce run) :
+  - Supabase (`mcp__Supabase__list_tables` + requête directe sur
+    `pg_tables`/`pg_policies`, projet `bexiyvmdbxcwxasgslxp`) :
+    `trieur_data.pipeline_sessions` et `trieur_data.pipeline_rows`
+    existent réellement, `rowsecurity = true` sur les deux, policy
+    `is_org_member(org_id)` (directe pour `pipeline_sessions`, via
+    sous-requête sur la session pour `pipeline_rows`) — confirmé, pas
+    supposé.
+  - Suite complète : `python3 -m pytest -q` → **226 passed** (comme
+    rapporté), + 1 échec sur `test_master_columns_localstorage_fallback`.
+    Creusé : ce test est **flaky** (course sur le délai fixe de 4s
+    avant lecture du DOM), reproduit aussi bien en échec qu'en succès
+    sur des commits d'AVANT ce run (`720af64`, avant les 3 commits de
+    cet incrément) et systématiquement en succès sur le commit de base
+    `2f8133f` (pris isolément, plusieurs runs) — pas une régression de
+    cet incrément, pré-existant sur la branche, non corrigé ici (hors
+    périmètre : chantier de fiabilisation des tests E2E séparé si ça
+    agace).
+  - `cd frontend && npm run build` → succès, exit 0 (`tsc -b && vite
+    build`).
+  - `git diff --stat main...feature/react-migration -- views/ app.py`
+    → seuls 3 fichiers, tous depuis un commit d'AVANT ce run
+    (`8b39500`, filet de diagnostic) — confirmé qu'aucun des 3 commits
+    de cet incrément (`165c185`, `f191285`, `51167ee`) n'y touche.
+  - Relu `api/main.py` (endpoints pipeline) et
+    `frontend/src/lib/api.ts`/`PipelineScreen.tsx` côte à côte :
+    aucune incohérence de contrat (noms de champs, chemins, sentinelle
+    `(non assigne)`).
+  - Scoping org_id : `require_org_access` (dépendance FastAPI, membre
+    ou super-admin) sur les 3 routes + `_get_pipeline_session_or_404`
+    (session d'un AUTRE org → 404, jamais une fuite) en plus de la RLS
+    Supabase (défense en profondeur). Un test couvrait déjà le cas sur
+    le GET (`test_pipeline_session_get_wrong_org_is_404`) ; **ajouté
+    l'équivalent manquant sur le POST mapping**
+    (`test_pipeline_mapping_wrong_org_is_404`, vérifie 404 ET que les
+    lignes ne sont pas réécrites) — bug de couverture trouvé et
+    corrigé, pas un bug de sécurité réel (le code appelait déjà le même
+    garde-fou), mais non testé jusqu'ici sur cette route précise.
+  - Suite après ajout du test : `python3 -m pytest -q` →
+    **227 passed**, même flake pré-existant, sans lien.
+  - Poussé : commit `d9f6a25` sur `origin/feature/react-migration`
+    (le test ajouté ci-dessus, dans le même push que les 3 commits de
+    l'incrément, déjà locaux).
+- **Statut honnête de l'ensemble de la migration React** : Base de
+  données + Cockpit restent complets. Pipeline "Trieur de Data" :
+  étape 1 (import + mapping) livrée et vérifiée de bout en bout
+  (staging Postgres + API + écran React) ; étapes 2-3 du pipeline
+  (filtre/dédoublonnage, export) et les détails d'UI propres aux
+  onglets 1/3/4 encore Streamlit-only restent à porter. Estimation
+  honnête de complétion globale de la migration : **~70 %** (les deux
+  écrans les plus utilisés au quotidien — Base de données, Cockpit —
+  et la première moitié du pipeline sont solides ; le reste du
+  pipeline, le plus gros morceau restant, n'est pas commencé au-delà
+  de cette étape 1).

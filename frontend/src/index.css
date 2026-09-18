@@ -1,32 +1,38 @@
 @import "tailwindcss";
 
+/* Police et coins arrondis repris de la feuille de style Apple de l'ancien
+   app.py (bloc [10] "DESIGN EPURE FACON APPLE") -- meme demande : garder
+   le meme visuel, pas en inventer un nouveau. */
+html, body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+               "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  background: #ffffff;
+  color: #1d1d1f;
+}
+h1, h2, h3 {
+  letter-spacing: -0.02em;
+  font-weight: 600;
+}
+
+/* Palette reprise EXACTEMENT de .streamlit/config.toml (theme de l'app
+   d'origine) -- demande explicite de l'utilisateur de garder le meme
+   visuel, pas une refonte. base="light" force : l'ancien Streamlit ne
+   basculait jamais en sombre selon le systeme, donc pas de media query
+   prefers-color-scheme ici (seul .cockpit-dark, plus bas, reste sombre
+   par choix explicite pour cet ecran precis). */
 :root {
   --background: #ffffff;
-  --foreground: #0f172a;
-  --muted: #64748b;
-  --muted-bg: #f1f5f9;
-  --border: #e2e8f0;
-  --primary: #4f46e5;
+  --foreground: #1d1d1f;
+  --muted: #6e6e73;
+  --muted-bg: #f5f5f7;
+  --border: #d2d2d7;
+  --primary: #0071e3;
   --primary-foreground: #ffffff;
   --danger: #dc2626;
   --danger-foreground: #ffffff;
   --card: #ffffff;
-  --radius: 0.5rem;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0f1115;
-    --foreground: #e5e7eb;
-    --muted: #94a3b8;
-    --muted-bg: #1c2027;
-    --border: #2a2f3a;
-    --primary: #818cf8;
-    --primary-foreground: #0f1115;
-    --danger: #f87171;
-    --danger-foreground: #0f1115;
-    --card: #171a21;
-  }
+  --radius: 10px;
 }
 
 /* Cockpit : dark par défaut (demande explicite), palette réellement

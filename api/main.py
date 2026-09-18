@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -108,10 +109,22 @@ def get_supabase_client():
     toute la LOGIQUE MÉTIER, elle, continue de passer par trieur/db.py
     sans rien dupliquer."""
     from supabase import create_client
-    import streamlit as st
 
-    url = st.secrets["supabase"]["url"]
-    key = st.secrets["supabase"]["anon_key"]
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_ANON_KEY")
+    if not url or not key:
+        # Repli sur les secrets Streamlit UNIQUEMENT si l'API tourne dans le
+        # même process que l'app Streamlit (dev local partagé) -- ce service
+        # tourne seul en production (uvicorn), sans st.secrets disponible.
+        try:
+            import streamlit as st
+            url = url or st.secrets["supabase"]["url"]
+            key = key or st.secrets["supabase"]["anon_key"]
+        except Exception as exc:
+            raise RuntimeError(
+                "SUPABASE_URL/SUPABASE_ANON_KEY manquantes (variables "
+                "d'environnement) et aucun secrets.toml Streamlit disponible."
+            ) from exc
     return create_client(url, key)
 
 

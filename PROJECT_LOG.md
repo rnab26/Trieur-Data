@@ -2659,5 +2659,63 @@ horizontalement.
   `trieur/db.py` correspondantes — tout ça est désormais du code/schéma
   mort côté pipeline, gardé intact volontairement.
 
-**Commité** sur `fix/pipeline-full-parity` — **pas pushé** (l'agent
-suivant vérifie et pousse, voir consigne de la tâche).
+**Vérification indépendante (2026-09-18, avant push)** :
+- `python3 -m pytest -q` (suite complète, à froid) : **290 passed, 1
+  failed** — l'échec est `test_e2e_smoke.py::test_master_columns_localstorage_fallback`,
+  déjà signalé flaky ailleurs dans ce journal (voir plus haut, "un échec
+  isolé du test pipeline complet confirmé flaky par relances
+  répétées"). Confirmé sans lien avec ce commit : passe seul
+  (`pytest tests/test_e2e_smoke.py::test_master_columns_localstorage_fallback`
+  → 1 passed) et passait déjà sur le commit parent avec le même
+  comportement (pollution d'état entre tests e2e, pas une régression de
+  ce chantier). 291 tests au total, comme annoncé.
+- `cd frontend && npm run build` : **succès** (`tsc -b && vite build`,
+  build en 249ms). Les 6 routes pipeline gardent exactement les mêmes
+  formes de réponse JSON qu'avant (diff `api/main.py` relu ligne à
+  ligne : seule la source des données change, pas les clés renvoyées) —
+  `frontend/src/lib/api.ts` n'avait rien à changer.
+- Contrôle `org_id` relu sur les 6 endpoints qui prennent un
+  `session_id` — tous passent par `_get_pipeline_session_or_404`
+  (aucun accès direct à `pipeline_memory` en contournant ce garde-fou) :
+  `GET .../sessions/{id}`, `GET .../sessions/{id}/rows`,
+  `GET .../sessions/{id}/export`, `POST .../sessions/{id}/mapping`,
+  `POST .../sessions/{id}/dedup`, `DELETE .../sessions/{id}/dedup`.
+  `POST .../sessions` (création) n'a pas besoin de ce garde-fou : il
+  génère un nouvel UUID, jamais visible d'un autre org avant la réponse.
+- Mesure du test à 500 000 lignes re-lancée deux fois indépendamment :
+  **0,614s** puis **0,829s** — cohérent avec les 0,56–0,78s annoncés
+  (variance normale, même ordre de grandeur, largement sous le seuil de
+  10s du test).
+- Verrouillage relu (`trieur/pipeline_memory.py`, `_LOCK` global) :
+  chaque fonction qui touche `_SESSIONS` (lecture comme écriture) le
+  fait entièrement à l'intérieur d'un seul `with _LOCK:` — pas de
+  lecture puis écriture séparées en deux verrous (pas de TOCTOU
+  possible). Deux requêtes concurrentes sur la même session (ex.
+  mapping + dedup en parallèle) s'exécutent en séquence, jamais en
+  entrelacé : le dict ne peut pas être corrompu. Limite connue et
+  acceptée : le verrou est UNIQUE pour tout le module (toutes sessions,
+  tous org confondus) plutôt que par session — `map_rows`/`append_rows`
+  sur une session à plusieurs millions de lignes bloque brièvement (de
+  l'ordre de la seconde, voir mesure ci-dessus) les opérations pipeline
+  des AUTRES org pendant ce temps. Pas un bug de correction, mais un
+  vrai compromis de contention à garder en tête si plusieurs gros
+  imports tombent en même temps.
+- `git diff --stat main -- views/ app.py` : vide, confirmé — l'app
+  Streamlit n'est pas touchée par ce chantier.
+
+**Caveat opérationnel à connaître (perte au restart)** : un import en
+cours (fichier uploadé, mapping pas encore validé) est perdu si l'API
+redémarre (déploiement, crash) pendant que l'utilisateur est sur
+l'étape 1-3 du pipeline — il doit re-uploader son fichier. Ce n'est pas
+une régression (Streamlit avait exactement la même limite avec
+`st.session_state`), mais c'est un vrai changement de comportement par
+rapport à la version Postgres qui vient de partir : les données
+importées mais pas encore validées ne survivent plus à un
+`git push`/redéploiement Render. Rien ne prévient l'utilisateur de ça à
+l'écran aujourd'hui — pas fait dans ce lot, à considérer si les
+déploiements pendant un import en cours deviennent fréquents.
+
+**Commité et pushé** sur `fix/pipeline-full-parity` (pas de merge sur
+`main`, comme demandé) : voir hash dans l'historique git de cette
+branche, commit "Pipeline : remplace le staging Postgres par un store
+en mémoire (parité Streamlit)" + ce commit de vérification.

@@ -270,13 +270,23 @@ export function PipelineScreen() {
             ))}
           </nav>
 
-          {tab === 'colonnes' && <MasterColumnsPanel orgId={orgId} isAdmin={isAdmin} onSaved={onColumnsChanged} />}
+          {/* Chaque onglet reste MONTÉ en permanence (juste masqué via `hidden`)
+              tant que orgId ne change pas -- comme st.session_state côté
+              Streamlit, qui ne perdait jamais l'import/mapping en cours quand
+              on allait consulter un autre onglet. Démonter <PipelineImportPanel>
+              à chaque changement d'onglet détruisait son fichier importé/son
+              mapping en cours (state local React) -- constaté en réel par
+              l'utilisateur : retour sur "Colonnes maîtres" puis retour sur
+              "Importer" = fichier à réimporter depuis zéro. */}
+          <div hidden={tab !== 'colonnes'}>
+            <MasterColumnsPanel orgId={orgId} isAdmin={isAdmin} onSaved={onColumnsChanged} />
+          </div>
 
-          {tab === 'import' && (
+          <div hidden={tab !== 'import'}>
             <PipelineImportPanel orgId={orgId} masterColumns={masterColumns} onBuilt={handleBuilt} />
-          )}
+          </div>
 
-          {tab === 'filtrer' && (
+          <div hidden={tab !== 'filtrer'}>
             <>
               {!pipelineSession && (
                 <p className="text-sm text-[var(--muted)]">
@@ -376,9 +386,9 @@ export function PipelineScreen() {
                 </div>
               )}
             </>
-          )}
+          </div>
 
-          {tab === 'exporter' && (
+          <div hidden={tab !== 'exporter'}>
             <>
               {!pipelineSession && (
                 <p className="text-sm text-[var(--muted)]">
@@ -407,7 +417,7 @@ export function PipelineScreen() {
                 />
               )}
             </>
-          )}
+          </div>
 
           {masterColumnsError && (
             <p className="mt-4 text-sm text-[var(--danger)]">

@@ -1135,7 +1135,19 @@ def test_chantier_todo_unknown_id_is_404(client_factory):
 def _upload_csv(tc, org_id, content: bytes, filename="clients.csv"):
     return tc.post(
         f"/orgs/{org_id}/pipeline/sessions",
-        files={"file": (filename, content, "text/csv")},
+        files=[("files", (filename, content, "text/csv"))],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+
+
+def _upload_files(tc, org_id, files: list[tuple], google_sheet_url: str | None = None):
+    """`files` : liste de (filename, content, content_type) -- import
+    MULTI-FICHIERS (voir create_pipeline_session_endpoint)."""
+    data = {"google_sheet_url": google_sheet_url} if google_sheet_url else {}
+    return tc.post(
+        f"/orgs/{org_id}/pipeline/sessions",
+        files=[("files", f) for f in files],
+        data=data,
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
 
@@ -1213,7 +1225,7 @@ def test_pipeline_session_unreadable_file_is_400(client_factory):
     tc = client_factory(fake)
     res = tc.post(
         "/orgs/org-1/pipeline/sessions",
-        files={"file": ("clients.xlsx", b"pas un vrai xlsx", "application/octet-stream")},
+        files=[("files", ("clients.xlsx", b"pas un vrai xlsx", "application/octet-stream"))],
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 400
@@ -1278,7 +1290,7 @@ def test_pipeline_mapping_wrong_org_is_404(client_factory):
     # Les lignes n'ont pas été réécrites (toujours les clés source, pas
     # les clés colonnes maîtres qu'aurait produites le mapping).
     rows = fake.postgrest.tables["pipeline_rows"]
-    assert rows[0]["data"] == {"NOM": "Dupont", "_sheet": "clients"}
+    assert rows[0]["data"] == {"NOM": "Dupont", "_sheet": "clients.csv :: clients"}
 
 
 def test_pipeline_mapping_dry_run_suggests_without_writing(client_factory):
@@ -1368,8 +1380,44 @@ def test_pipeline_mapping_unknown_session_is_404(client_factory):
 
 def test_pipeline_requires_auth(client_factory):
     tc = client_factory(_make_client())
-    res = tc.post("/orgs/org-1/pipeline/sessions", files={"file": ("a.csv", b"NOM\nX\n", "text/csv")})
+    res = tc.post("/orgs/org-1/pipeline/sessions", files=[("files", ("a.csv", b"NOM\nX\n", "text/csv"))])
     assert res.status_code == 401
+
+
+def test_pipeline_session_no_file_and_no_url_is_400(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/pipeline/sessions", files=[], headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_pipeline_session_multi_file_merges_rows_and_dedupes_display_names(client_factory):
+    """Deux fichiers (dont deux de même nom) dans le MÊME batch -- même
+    import multi-fichiers que views/tab2_import_mapping.py."""
+    fake = _make_client()
+    tc = client_factory(fake)
+
+    res = _upload_files(
+        tc, "org-1",
+        [
+            ("clients.csv", b"NOM,EMAIL\nDupont,d@x.com\n", "text/csv"),
+            ("clients.csv", b"NOM,EMAIL\nMartin,m@x.com\n", "text/csv"),
+        ],
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["row_count"] == 2
+    assert sorted(r["NOM"] for r in body["preview_rows"]) == ["Dupont", "Martin"]
+
+    rows = fake.postgrest.tables["pipeline_rows"]
+    assert len(rows) == 2
+    # Les deux fichiers de même nom ont bien des étiquettes "_sheet"
+    # distinctes (suffixe " (2)"), pas confondues.
+    sheets = {r["data"]["_sheet"] for r in rows}
+    assert len(sheets) == 2
+    assert any(" (2)" in s for s in sheets)
 
 
 # ---------------------------------------------------------------
@@ -1638,6 +1686,248 @@ def test_pipeline_export_wrong_org_is_404(client_factory):
         f"/orgs/org-1/pipeline/sessions/{session_id}/export",
         params={"format": "csv"},
         headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 404
+
+
+# ---------------------------------------------------------------
+# Pipeline : mapping mémorisé par forme de fichier (auto-assignation
+# répétée -- voir trieur/matching.py:auto_assign_with_memory).
+# ---------------------------------------------------------------
+
+def test_pipeline_mapping_remembers_confirmed_mapping_for_next_import_of_same_shape(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+
+    # Premier import : colonnes non reconnues automatiquement -> mapping
+    # manuel confirmé explicitement.
+    session_1 = _upload_csv(tc, "org-1", b"nom_client,iban_ref\nDupont,FR7630006000011234567890189\n").json()["session_id"]
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_1}/mapping",
+        json={"mapping": {"nom_client": "NOM", "iban_ref": "IBAN"}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+
+    # Deuxième import, MÊME forme de colonnes (même en-têtes, ordre
+    # indifférent) -- la suggestion doit déjà proposer le mapping
+    # confirmé la première fois, sans que l'utilisateur ne le refasse.
+    session_2 = _upload_csv(tc, "org-1", b"nom_client,iban_ref\nMartin,FR7630006000019876543210189\n").json()["session_id"]
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_2}/mapping",
+        json={"dry_run": True},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["suggested_mapping"] == {"nom_client": "NOM", "iban_ref": "IBAN"}
+    assert body["remembered_for_shape"] is True
+
+
+def test_pipeline_mapping_remembered_mapping_is_scoped_to_org(client_factory):
+    """Un mapping confirmé dans un environnement ne doit pas fuiter vers
+    un autre environnement, même pour un utilisateur ayant accès aux
+    deux (mêmes règles d'appartenance que le reste de l'API)."""
+    fake = _make_client(
+        memberships=[
+            {"user_id": "user-1", "org_id": "org-1", "role": "member", "organizations": {"slug": "a", "name": "A"}},
+            {"user_id": "user-1", "org_id": "org-2", "role": "member", "organizations": {"slug": "b", "name": "B"}},
+        ],
+        organizations=[
+            {"id": "org-1", "slug": "a", "name": "A", "master_columns": ["NOM", "IBAN"]},
+            {"id": "org-2", "slug": "b", "name": "B", "master_columns": ["NOM", "IBAN"]},
+        ],
+    )
+    tc = client_factory(fake)
+    session_1 = _upload_csv(tc, "org-1", b"nom_client,iban_ref\nDupont,FR7630006000011234567890189\n").json()["session_id"]
+    tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_1}/mapping",
+        json={"mapping": {"nom_client": "NOM", "iban_ref": "IBAN"}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+
+    session_2 = _upload_csv(tc, "org-2", b"nom_client,iban_ref\nMartin,FR7630006000019876543210189\n").json()["session_id"]
+    res = tc.post(
+        f"/orgs/org-2/pipeline/sessions/{session_2}/mapping",
+        json={"dry_run": True},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.json()["remembered_for_shape"] is False
+
+
+# ---------------------------------------------------------------
+# Pipeline : dédoublonnage (étape 3, voir views/tab3_filtrage_dedup.py) --
+# distinct des filtres par colonne, opère sur le résultat déjà filtré.
+# ---------------------------------------------------------------
+
+def _upload_dedup_rows(tc, org_id, content: bytes):
+    return _upload_csv(tc, org_id, content).json()["session_id"]
+
+
+def test_pipeline_dedup_dry_run_reports_groups_without_activating(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_dedup_rows(
+        tc, "org-1", b"NOM,IBAN\nDupont,FR76A\nMartin,FR76A\nDurand,FR76B\n",
+    )
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedup",
+        json={"column": "IBAN", "dry_run": True},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["n_duplicate_groups"] == 1
+    assert body["n_duplicate_rows"] == 2
+
+    # dry_run : pas encore activé -> /rows renvoie encore toutes les lignes.
+    rows_res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows", headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert rows_res.json()["count"] == 3
+
+
+def test_pipeline_dedup_apply_then_rows_and_export_reflect_it(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_dedup_rows(
+        tc, "org-1", b"NOM,IBAN\nDupont,FR76A\nMartin,FR76A\nDurand,FR76B\n",
+    )
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedup",
+        json={"column": "IBAN", "keep": "first"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.json()["n_removed"] == 1
+
+    rows_res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows", headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    body = rows_res.json()
+    assert body["count"] == 2
+    assert sorted(r["NOM"] for r in body["rows"]) == ["Dupont", "Durand"]
+
+    export_res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/export",
+        params={"format": "csv"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    csv_text = export_res.content.decode("utf-8")
+    assert "Martin" not in csv_text
+    assert "Dupont" in csv_text and "Durand" in csv_text
+
+
+def test_pipeline_dedup_can_be_cleared(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_dedup_rows(tc, "org-1", b"NOM,IBAN\nDupont,FR76A\nMartin,FR76A\n")
+    tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedup",
+        json={"column": "IBAN"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+
+    res = tc.delete(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedup", headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.json()["dedup_config"] is None
+
+    rows_res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows", headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert rows_res.json()["count"] == 2
+
+
+def test_pipeline_dedup_invalid_keep_is_400(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_dedup_rows(tc, "org-1", b"NOM,IBAN\nDupont,FR76A\n")
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedup",
+        json={"column": "IBAN", "keep": "n_importe_quoi"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_pipeline_dedup_wrong_org_is_404(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_dedup_rows(tc, "org-1", b"NOM,IBAN\nDupont,FR76A\n")
+    fake.postgrest.tables["pipeline_sessions"][0]["org_id"] = "org-2"
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedup",
+        json={"column": "IBAN"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 404
+
+
+# ---------------------------------------------------------------
+# Pipeline : presets d'export nommés (ordre + sélection des colonnes,
+# onglet 4 -- voir trieur/db.py:list_pipeline_export_presets et suite).
+# ---------------------------------------------------------------
+
+def test_pipeline_export_presets_empty_by_default(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.get("/orgs/org-1/pipeline/export-presets", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 200
+    assert res.json() == []
+
+
+def test_pipeline_export_preset_save_then_list(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/pipeline/export-presets",
+        json={"name": "Standard", "included": ["NOM", "IBAN"], "excluded": ["CP"]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+
+    res = tc.get("/orgs/org-1/pipeline/export-presets", headers={"Authorization": f"Bearer {TOKEN}"})
+    presets = res.json()
+    assert len(presets) == 1
+    assert presets[0]["name"] == "Standard"
+    assert presets[0]["included"] == ["NOM", "IBAN"]
+
+
+def test_pipeline_export_preset_empty_name_is_400(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/pipeline/export-presets",
+        json={"name": "   ", "included": [], "excluded": []},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_pipeline_export_preset_delete_requires_ownership(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/pipeline/export-presets",
+        json={"name": "Standard", "included": ["NOM"], "excluded": []},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    preset_id = res.json()["id"]
+
+    res = tc.delete(
+        f"/orgs/org-1/pipeline/export-presets/{preset_id}", headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.json()["deleted"] is True
+
+    res = tc.delete(
+        f"/orgs/org-1/pipeline/export-presets/does-not-exist", headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 404
 

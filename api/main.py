@@ -30,12 +30,13 @@ from trieur.db import (
     add_chantier_message,
     add_chantier_todo,
     add_org_master_columns,
-    append_pipeline_rows,
+    append_pipeline_rows_bulk,
     count_records,
     create_chantier,
     create_pipeline_session,
     create_section,
     delete_expired_pipeline_sessions_for_org,
+    delete_pipeline_export_preset,
     delete_record,
     delete_saved_view,
     delete_user_column_set,
@@ -45,12 +46,14 @@ from trieur.db import (
     get_org_master_columns,
     get_pipeline_session,
     get_record,
+    get_remembered_mapping_for_shape,
     import_dataframe,
     list_all_records,
     list_chantier_messages,
     list_chantier_todos,
     list_chantiers,
     list_dedup_alerts,
+    list_pipeline_export_presets,
     list_pipeline_rows,
     list_records,
     list_saved_views,
@@ -58,18 +61,27 @@ from trieur.db import (
     list_user_column_sets,
     resolve_dedup_alert,
     save_org_master_columns,
+    save_pipeline_export_preset,
+    save_remembered_mapping_for_shape,
     save_saved_view,
     save_user_column_set,
     set_active_column_set,
     set_chantier_todo_done,
     update_chantier_status,
     update_pipeline_row_data,
+    update_pipeline_session_dedup,
     update_pipeline_session_status,
     update_record,
 )
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
-from trieur.io_excel import read_csv_file, read_excel_all_sheets_from_file
-from trieur.matching import apply_header_inference_excel, auto_assign_columns_fast
+from trieur.filters import dedupe_dataframe, duplicate_groups
+from trieur.io_excel import is_google_sheet_url, read_csv_file, read_excel_all_sheets_from_file, read_google_sheets_all_sheets
+from trieur.matching import (
+    apply_header_inference_excel,
+    auto_assign_with_memory,
+    column_fingerprint,
+    mapping_to_remembered,
+)
 from views._auth import accessible_organizations
 from views._ui import unknown_columns
 from views.tab_database import (
@@ -608,29 +620,35 @@ async def import_records(
 
 
 # ---------------------------------------------------------------
-# Pipeline "Trieur de Data" -- étape 1 : import + mapping des colonnes
-# (équivalent onglets 1-2 Streamlit, sans porter chaque nuance d'UI --
-# voir supabase/migrations/0010_pipeline_staging.sql et trieur/db.py pour
-# la couche de données). Les colonnes MAÎTRES restent celles de
-# l'environnement (trieur_data.organizations.master_columns) : mêmes
-# GET/POST que le CRM ci-dessous (get_master_columns/set_master_columns),
-# volontairement PAS une deuxième liste -- voir la note au-dessus de
-# get_master_columns.
+# Pipeline "Trieur de Data" -- étape 1-2 : import multi-fichiers/Google
+# Sheets + mapping des colonnes (équivalent onglets 1-2 Streamlit -- voir
+# supabase/migrations/0010_pipeline_staging.sql,
+# 0012_pipeline_parity.sql et trieur/db.py pour la couche de données).
+# Les colonnes MAÎTRES restent celles de l'environnement
+# (trieur_data.organizations.master_columns) : mêmes GET/POST que le CRM
+# ci-dessous (get_master_columns/set_master_columns), volontairement PAS
+# une deuxième liste -- voir la note au-dessus de get_master_columns.
 #
-# Limite connue, volontaire pour ce premier incrément : un fichier PDF
-# (relevés SEPA, trieur/io_pdf.py) n'est pas encore couvert par cette
-# route -- seuls Excel/CSV (trieur/io_excel.py) le sont ici. Un fichier
-# multi-onglets est fusionné en une seule session (onglet d'origine gardé
-# sous la clé "_sheet" de chaque ligne, jamais proposée au mapping) : le
-# mapping par onglet séparé de views/tab2_import_mapping.py n'est pas
-# reproduit, ce n'est pas nécessaire pour le flux de données.
+# Limite connue, volontaire : un fichier PDF (relevés SEPA,
+# trieur/io_pdf.py) n'est pas encore couvert par cette route -- seuls
+# Excel/CSV/Google Sheets (trieur/io_excel.py) le sont ici. Tous les
+# fichiers + le Google Sheets éventuel d'un même import sont fusionnés en
+# UNE session (onglet/fichier d'origine gardé sous la clé "_sheet" de
+# chaque ligne, jamais proposée au mapping) : le mapping PAR ONGLET
+# séparé de views/tab2_import_mapping.py (une UI par feuille, checkbox
+# d'inclusion par fichier/onglet) n'est pas reproduit -- seul le résultat
+# fusionné est mappé, ce qui couvre le flux de données mais pas encore
+# "choisir quel onglet exclure avant mapping" (limite connue, à ajouter
+# si un vrai usage l'exige).
 # ---------------------------------------------------------------
 
 PIPELINE_PREVIEW_SIZE = 10
-# Taille de lot pour le staging (append_pipeline_rows) : évite d'envoyer
-# un unique insert de plusieurs centaines de milliers de lignes à
-# PostgREST en un seul appel HTTP.
-PIPELINE_APPEND_BATCH = 500
+# Taille de lot pour le staging (append_pipeline_rows_bulk) : évite
+# d'envoyer un unique INSERT de plusieurs centaines de milliers de lignes
+# à PostgREST en un seul appel HTTP -- mais SANS le SELECT+UPDATE
+# intermédiaire par lot qui causait le vrai ralentissement (voir
+# trieur/db.py:append_pipeline_rows_bulk pour la mesure).
+PIPELINE_APPEND_BATCH = 2000
 
 
 def _parse_pipeline_file(filename: str, content: bytes) -> dict[str, pd.DataFrame]:
@@ -647,6 +665,51 @@ def _parse_pipeline_file(filename: str, content: bytes) -> dict[str, pd.DataFram
     if not sheets:
         raise HTTPException(status_code=400, detail=f"Impossible de lire le fichier : {filename}")
     return sheets
+
+
+def _unique_display_name(base: str, used: set[str]) -> str:
+    """Suffixe " (2)", " (3)"... pour deux fichiers/classeurs de même nom
+    dans le même batch d'import -- même règle que
+    views/tab2_import_mapping.py (comparée à TOUS les noms déjà utilisés
+    dans le batch, pas juste un compteur)."""
+    name = base
+    n = 2
+    while name in used:
+        name = f"{base} ({n})"
+        n += 1
+    used.add(name)
+    return name
+
+
+def _read_pipeline_sources(
+    files_data: list[tuple[str, bytes]], google_sheet_url: str | None,
+) -> dict[str, pd.DataFrame]:
+    """Lit TOUS les fichiers Excel/CSV uploadés + l'éventuel Google Sheets
+    dans le MÊME batch (import multi-fichiers, voir
+    views/tab2_import_mapping.py) et renvoie un unique dict
+    {"<nom affiché> :: <onglet>": dataframe} -- le nom affiché est
+    dédupliqué par fichier/classeur (voir _unique_display_name), l'onglet
+    reste celui du fichier source."""
+    combined: dict[str, pd.DataFrame] = {}
+    used_names: set[str] = set()
+    for filename, content in files_data:
+        display = _unique_display_name(filename, used_names)
+        sheets = _parse_pipeline_file(filename, content)
+        for sheet_name, df in sheets.items():
+            combined[f"{display} :: {sheet_name}"] = df
+
+    if google_sheet_url:
+        sheets, _inferred, source_name = read_google_sheets_all_sheets(google_sheet_url)
+        if not sheets:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Impossible de lire le Google Sheets : {google_sheet_url}",
+            )
+        display = _unique_display_name(source_name, used_names)
+        for sheet_name, df in sheets.items():
+            combined[f"{display} :: {sheet_name}"] = df
+
+    return combined
 
 
 def _merge_pipeline_sheets(sheets: dict[str, pd.DataFrame]) -> tuple[list[dict], list[str]]:
@@ -697,20 +760,36 @@ def _detected_columns(rows: list[dict]) -> list[str]:
 @app.post("/orgs/{org_id}/pipeline/sessions")
 async def create_pipeline_session_endpoint(
     org_id: str,
-    file: UploadFile = File(...),
+    files: list[UploadFile] = File(default=[]),
+    google_sheet_url: Optional[str] = Form(None),
     ctx: AuthCtx = Depends(require_org_access),
 ):
-    """Ouvre une session de pipeline : lit le fichier, met les lignes en
-    staging (trieur_data.pipeline_rows, TTL 24h), et renvoie un aperçu +
+    """Ouvre une session de pipeline : lit UN OU PLUSIEURS fichiers
+    Excel/CSV et/ou un Google Sheets public (tous ses onglets), DANS LE
+    MÊME BATCH -- même import multi-fichiers que
+    views/tab2_import_mapping.py (`st.file_uploader(accept_multiple_files=True)`
+    + champ URL) -- met les lignes en staging (trieur_data.pipeline_rows,
+    TTL 24h) via un INSERT en gros lots (voir
+    trieur/db.py:append_pipeline_rows_bulk -- correctif de performance,
+    plus de SELECT+UPDATE par lot de 500 lignes), et renvoie un aperçu +
     les colonnes détectées pour l'étape de mapping suivante. N'écrit
     jamais dans trieur_data.records (donnée permanente) -- ça reste la
     validation finale du pipeline, pas encore portée ici."""
-    content = await file.read()
-    filename = file.filename or "import"
-    sheets = _parse_pipeline_file(filename, content)
+    url = (google_sheet_url or "").strip()
+    if url and not is_google_sheet_url(url):
+        raise HTTPException(status_code=400, detail="URL Google Sheets invalide.")
+    if not files and not url:
+        raise HTTPException(status_code=400, detail="Aucun fichier ni URL Google Sheets fourni.")
+
+    files_data: list[tuple[str, bytes]] = []
+    for f in files:
+        content = await f.read()
+        files_data.append((f.filename or "import", content))
+
+    sheets = _read_pipeline_sources(files_data, url or None)
     rows, columns = _merge_pipeline_sheets(sheets)
     if not rows:
-        raise HTTPException(status_code=400, detail="Fichier vide ou sans ligne exploitable.")
+        raise HTTPException(status_code=400, detail="Fichier(s) vide(s) ou sans ligne exploitable.")
 
     # Nettoyage opportuniste des sessions expirées de CET org avant d'en
     # ouvrir une nouvelle (revue PR #24, point #8 -- voir docstring de
@@ -722,11 +801,10 @@ async def create_pipeline_session_endpoint(
     except Exception:
         pass
 
-    session = create_pipeline_session(ctx.client, org_id, ctx.user.id, source_filename=filename)
-    for start in range(0, len(rows), PIPELINE_APPEND_BATCH):
-        append_pipeline_rows(
-            ctx.client, session["id"], rows[start:start + PIPELINE_APPEND_BATCH], start_index=start,
-        )
+    display_names = [name for name, _ in files_data] + ([url] if url else [])
+    source_filename = display_names[0] if len(display_names) == 1 else f"{len(display_names)} fichiers"
+    session = create_pipeline_session(ctx.client, org_id, ctx.user.id, source_filename=source_filename)
+    append_pipeline_rows_bulk(ctx.client, session["id"], rows, batch_size=PIPELINE_APPEND_BATCH)
 
     master_cols = get_org_master_columns(ctx.client, org_id)
     return {
@@ -781,6 +859,28 @@ def _all_pipeline_rows(client, session_id: str) -> list[dict]:
     return all_rows
 
 
+def _apply_active_dedup(rows: list[dict], session: dict) -> list[dict]:
+    """Réapplique le dédoublonnage ACTIF de cette session (voir
+    trieur/db.py:update_pipeline_session_dedup) aux lignes déjà
+    filtrées, avec trieur/filters.py:dedupe_dataframe -- même fonction
+    que l'onglet 3 Streamlit, jamais réimplémentée ici. Persiste tant
+    qu'il n'est pas explicitement annulé (POST/DELETE .../dedup
+    ci-dessous), donc appliqué aussi bien par /rows que par /export, pour
+    qu'un export ne "dé-déduplique" jamais silencieusement."""
+    dedup_config = session.get("dedup_config")
+    if not dedup_config or not rows:
+        return rows
+    column = dedup_config.get("column")
+    if not column:
+        return rows
+    df = pd.DataFrame(rows)
+    if column not in df.columns:
+        return rows
+    deduped = dedupe_dataframe(df, column, keep=dedup_config.get("keep", "first"))
+    deduped = deduped.where(pd.notnull(deduped), None)
+    return deduped.to_dict(orient="records")
+
+
 @app.get("/orgs/{org_id}/pipeline/sessions/{session_id}/rows")
 def list_pipeline_session_rows(
     org_id: str,
@@ -805,14 +905,18 @@ def list_pipeline_session_rows(
     TOUTE la session (pas seulement la page renvoyée) : `_all_pipeline_rows`
     charge et filtre l'intégralité du staging côté serveur (comme avant),
     seule la DÉCOUPE en page change -- `count` reste le total filtré réel,
-    pas juste la taille de la page renvoyée."""
-    _get_pipeline_session_or_404(ctx, org_id, session_id)
+    pas juste la taille de la page renvoyée. Le dédoublonnage ACTIF de la
+    session (voir .../dedup ci-dessous) est réappliqué ici aussi, après
+    le filtre par colonnes -- même ordre que l'onglet 3 Streamlit
+    (filtre PUIS dédoublonnage)."""
+    session = _get_pipeline_session_or_404(ctx, org_id, session_id)
     parsed_filters = _parse_col_filters(col_filters)
 
     all_rows = _all_pipeline_rows(ctx.client, session_id)
     rows = [_without_sheet_key(r["data"]) for r in all_rows]
     rows = _filter_by_search(rows, search)
     rows = _filter_by_columns(rows, parsed_filters)
+    rows = _apply_active_dedup(rows, session)
 
     start = (page - 1) * page_size
     page_rows = rows[start:start + page_size]
@@ -854,6 +958,7 @@ def export_pipeline_session_rows(
     rows = [_without_sheet_key(r["data"]) for r in all_rows]
     rows = _filter_by_search(rows, search)
     rows = _filter_by_columns(rows, parsed_filters)
+    rows = _apply_active_dedup(rows, session)
 
     full_cols: list[str] = []
     for row in rows:
@@ -903,16 +1008,21 @@ def apply_pipeline_mapping(
     org_id: str, session_id: str, body: PipelineMapping, ctx: AuthCtx = Depends(require_org_access),
 ):
     """Propose (dry_run) ou applique le mapping colonnes source -> colonnes
-    maîtres. La suggestion réutilise trieur/matching.py:auto_assign_columns_fast
-    -- même logique que le bouton "Auto" de views/tab2_import_mapping.py,
-    jamais réimplémentée ici (échantillon = le même aperçu que le GET
-    ci-dessus, pas tout le fichier : suffisant pour la détection par
-    contenu -- téléphone/IBAN -- sans charger des millions de lignes).
+    maîtres. La suggestion réutilise trieur/matching.py:auto_assign_with_memory
+    -- même logique (+ mémoire du mapping par forme de fichier, voir
+    trieur/matching.py:column_fingerprint et
+    supabase/migrations/0012_pipeline_parity.sql) que le bouton "Auto" +
+    "mapping mémorisé" de views/tab2_import_mapping.py, jamais
+    réimplémentée ici (échantillon = le même aperçu que le GET ci-dessus,
+    pas tout le fichier : suffisant pour la détection par contenu --
+    téléphone/IBAN -- sans charger des millions de lignes).
 
     En dehors d'un dry_run, applique le mapping (fourni, ou la suggestion
     si omis) : chaque ligne de la session est réécrite avec les clés
     COLONNES MAÎTRES (une colonne source sur "(non assigne)" disparaît de
-    la ligne), puis la session passe au statut 'mapped'. Limite connue,
+    la ligne), le mapping CONFIRMÉ est mémorisé pour cette forme de
+    fichier (prochain import similaire dans cet environnement -> déjà
+    pré-rempli), puis la session passe au statut 'mapped'. Limite connue,
     simplification volontaire par rapport à l'onglet 2 : si deux colonnes
     source sont mappées sur la MÊME colonne maître, la dernière écrase la
     précédente (l'onglet 2 garde la première valeur non vide) -- à revoir
@@ -923,10 +1033,21 @@ def apply_pipeline_mapping(
     sample = list_pipeline_rows(ctx.client, session_id, limit=PIPELINE_PREVIEW_SIZE)
     real_columns = _detected_columns([r["data"] for r in sample])
     sample_df = pd.DataFrame([_without_sheet_key(r["data"]) for r in sample]) if sample else None
-    suggestion = auto_assign_columns_fast(real_columns, master_cols, sheet_df=sample_df)
+    fingerprint = column_fingerprint(real_columns)
+    remembered = get_remembered_mapping_for_shape(ctx.client, org_id, fingerprint)
+    suggestion = auto_assign_with_memory(
+        real_columns, master_cols, sheet_df=sample_df, remembered_for_shape=remembered,
+    )
+    unknown = unknown_columns(real_columns, master_cols)
 
     if body.dry_run:
-        return {"session_id": session_id, "suggested_mapping": suggestion, "columns": real_columns}
+        return {
+            "session_id": session_id,
+            "suggested_mapping": suggestion,
+            "columns": real_columns,
+            "unknown_columns": unknown,
+            "remembered_for_shape": bool(remembered),
+        }
 
     mapping = body.mapping if body.mapping is not None else suggestion
     if not any(m and m != "(non assigne)" for m in mapping.values()):
@@ -948,8 +1069,141 @@ def apply_pipeline_mapping(
             n_updated += 1
         offset += len(page)
 
+    # Mémorise le mapping CONFIRMÉ pour cette forme de fichier (pas la
+    # suggestion en dry_run) -- rejoué automatiquement au prochain import
+    # de même forme dans cet environnement (voir docstring ci-dessus).
+    save_remembered_mapping_for_shape(
+        ctx.client, org_id, fingerprint, mapping_to_remembered(mapping),
+    )
+
     update_pipeline_session_status(ctx.client, session_id, "mapped")
     return {"session_id": session_id, "status": "mapped", "mapping": mapping, "n_rows_updated": n_updated}
+
+
+# ---------------------------------------------------------------
+# Dédoublonnage (étape 3, distinct des filtres par colonne ci-dessus,
+# voir views/tab3_filtrage_dedup.py) -- opère sur le résultat déjà
+# filtré (search + col_filters) de la session, avec
+# trieur/filters.py:dedupe_dataframe/duplicate_groups, jamais une
+# deuxième logique de détection de doublon.
+# ---------------------------------------------------------------
+
+class PipelineDedupRequest(BaseModel):
+    column: str
+    keep: str = "first"  # "first" ou "complete" (voir trieur/filters.py:dedupe_dataframe)
+    search: str = ""
+    col_filters: dict = {}
+    # true : renvoie juste les groupes de doublons détectés (aperçu avant
+    # confirmation), sans activer le dédoublonnage sur la session.
+    dry_run: bool = False
+
+
+@app.post("/orgs/{org_id}/pipeline/sessions/{session_id}/dedup")
+def apply_pipeline_dedup(
+    org_id: str, session_id: str, body: PipelineDedupRequest, ctx: AuthCtx = Depends(require_org_access),
+):
+    """Détecte (dry_run) ou active le dédoublonnage sur `body.column` pour
+    cette session -- appliqué au résultat déjà filtré par `search`/
+    `col_filters` (même filtres que GET .../rows), avec
+    trieur/filters.py:duplicate_groups (aperçu) ou dedupe_dataframe
+    (activation), jamais réimplémentés. Une fois activé, le dédoublonnage
+    reste ACTIF (voir trieur/db.py:update_pipeline_session_dedup) et est
+    réappliqué à chaque lecture (GET .../rows, GET .../export) jusqu'à
+    annulation explicite (DELETE .../dedup ci-dessous)."""
+    if body.keep not in ("first", "complete"):
+        raise HTTPException(status_code=400, detail="`keep` doit être 'first' ou 'complete'.")
+    _get_pipeline_session_or_404(ctx, org_id, session_id)
+
+    all_rows = _all_pipeline_rows(ctx.client, session_id)
+    rows = [_without_sheet_key(r["data"]) for r in all_rows]
+    rows = _filter_by_search(rows, body.search)
+    rows = _filter_by_columns(rows, body.col_filters)
+
+    if not rows or body.column not in (rows[0].keys() if rows else []):
+        groups_summary: list[dict] = []
+    else:
+        df = pd.DataFrame(rows)
+        if body.column not in df.columns:
+            groups_summary = []
+        else:
+            groups_summary = [
+                {"value": value, "n_rows": len(idx)}
+                for value, idx in duplicate_groups(df, body.column)
+            ]
+
+    if body.dry_run:
+        return {
+            "session_id": session_id,
+            "column": body.column,
+            "n_duplicate_groups": len(groups_summary),
+            "n_duplicate_rows": sum(g["n_rows"] for g in groups_summary),
+            "groups": groups_summary[:50],
+        }
+
+    dedup_config = {"column": body.column, "keep": body.keep}
+    update_pipeline_session_dedup(ctx.client, session_id, dedup_config)
+    remaining = _apply_active_dedup(rows, {"dedup_config": dedup_config})
+    return {
+        "session_id": session_id,
+        "dedup_config": dedup_config,
+        "n_before": len(rows),
+        "n_after": len(remaining),
+        "n_removed": len(rows) - len(remaining),
+    }
+
+
+@app.delete("/orgs/{org_id}/pipeline/sessions/{session_id}/dedup")
+def clear_pipeline_dedup(org_id: str, session_id: str, ctx: AuthCtx = Depends(require_org_access)):
+    """Annule le dédoublonnage actif de cette session -- GET .../rows et
+    .../export renvoient de nouveau toutes les lignes filtrées, sans
+    suppression de doublons."""
+    _get_pipeline_session_or_404(ctx, org_id, session_id)
+    update_pipeline_session_dedup(ctx.client, session_id, None)
+    return {"session_id": session_id, "dedup_config": None}
+
+
+# ---------------------------------------------------------------
+# Presets d'export nommés (ordre + sélection des colonnes, onglet 4) --
+# liés au compte + à l'organisation, même patron que les vues
+# enregistrées (GET/POST/DELETE .../saved-views ci-dessous) -- remplace
+# export_presets.json (voir trieur/db.py et
+# supabase/migrations/0012_pipeline_parity.sql).
+# ---------------------------------------------------------------
+
+@app.get("/orgs/{org_id}/pipeline/export-presets")
+def get_pipeline_export_presets(org_id: str, ctx: AuthCtx = Depends(require_org_access)):
+    return list_pipeline_export_presets(ctx.client, ctx.user.id, org_id)
+
+
+class PipelineExportPresetCreate(BaseModel):
+    name: str
+    included: list[str] = []
+    excluded: list[str] = []
+
+
+@app.post("/orgs/{org_id}/pipeline/export-presets")
+def post_pipeline_export_preset(
+    org_id: str, body: PipelineExportPresetCreate, ctx: AuthCtx = Depends(require_org_access),
+):
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Donne un nom à ce preset d'export.")
+    return save_pipeline_export_preset(ctx.client, ctx.user.id, org_id, name, body.included, body.excluded)
+
+
+@app.delete("/orgs/{org_id}/pipeline/export-presets/{preset_id}")
+def delete_pipeline_export_preset_endpoint(
+    org_id: str, preset_id: str, ctx: AuthCtx = Depends(require_org_access),
+):
+    # save_pipeline_export_preset()/delete_pipeline_export_preset() ne
+    # filtrent que par id (trieur/db.py) -- même garde que
+    # delete_saved_view_endpoint : on vérifie que le preset appartient
+    # bien à ce compte/cet environnement avant de supprimer.
+    own_presets = list_pipeline_export_presets(ctx.client, ctx.user.id, org_id)
+    if not any(p["id"] == preset_id for p in own_presets):
+        raise HTTPException(status_code=404, detail="Preset d'export introuvable.")
+    delete_pipeline_export_preset(ctx.client, preset_id)
+    return {"id": preset_id, "deleted": True}
 
 
 # ---------------------------------------------------------------

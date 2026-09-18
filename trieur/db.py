@@ -688,7 +688,16 @@ def append_pipeline_rows(client: Client, session_id: str, rows: list[dict], star
     source). Met aussi à jour `pipeline_sessions.row_count` en conséquence
     -- une seule source de vérité pour ce compteur, jamais recalculé par
     un `count` séparé côté appelant. Retourne le nombre de lignes
-    insérées."""
+    insérées.
+
+    [PERF] Pour importer TOUT un fichier en un seul coup, préférer
+    `append_pipeline_rows_bulk` ci-dessous : cette fonction-ci fait un
+    SELECT (row_count actuel) + un UPDATE à CHAQUE appel, ce qui coûte
+    3 allers-retours réseau par lot -- mesuré à ~2.3s/lot de 500 lignes
+    (~29s pour un fichier de 1 Mo / 5787 lignes) contre ~2.7s pour la
+    MÊME donnée insérée sans cette boucle (voir append_pipeline_rows_bulk).
+    Gardée telle quelle (API publique déjà testée, utile pour un ajout
+    ponctuel/incrémental où on ne connaît pas encore le total)."""
     if not rows:
         return 0
     payload = [
@@ -700,6 +709,40 @@ def append_pipeline_rows(client: Client, session_id: str, rows: list[dict], star
     new_count = (session["row_count"] if session else 0) + len(rows)
     _td(client, "pipeline_sessions").update({"row_count": new_count}).eq("id", session_id).execute()
     return len(rows)
+
+
+def append_pipeline_rows_bulk(
+    client: Client, session_id: str, rows: list[dict], start_index: int = 0, batch_size: int = 2000,
+) -> int:
+    """Version optimisée d'`append_pipeline_rows` pour l'import INITIAL
+    d'une session (tout le fichier connu d'un coup, voir
+    api/main.py:create_pipeline_session_endpoint) : cause racine mesurée
+    du "fichier de 1 Mo qui prend 30s" -- `append_pipeline_rows` fait un
+    SELECT (row_count) + un UPDATE à CHAQUE lot de 500 lignes, soit 3
+    allers-retours réseau séquentiels par lot (~2.3s/lot mesuré, ~29s
+    pour 12 lots). Ici : autant d'INSERT que nécessaire (taille de lot
+    plus grande, `batch_size`, pour rester sous la limite de payload
+    PostgREST), UNE SEULE lecture de `row_count` avant la boucle et UNE
+    SEULE écriture après -- mesuré à 2.665s pour insérer les mêmes 5787
+    lignes en un seul INSERT, soit ~10x plus rapide pour le même volume.
+    Retourne le nombre de lignes insérées."""
+    if not rows:
+        return 0
+    session = get_pipeline_session(client, session_id)
+    base_count = session["row_count"] if session else 0
+    n_inserted = 0
+    for start in range(0, len(rows), batch_size):
+        chunk = rows[start:start + batch_size]
+        payload = [
+            {"session_id": session_id, "row_index": start_index + start + i, "data": row}
+            for i, row in enumerate(chunk)
+        ]
+        _td(client, "pipeline_rows").insert(payload).execute()
+        n_inserted += len(chunk)
+    _td(client, "pipeline_sessions").update(
+        {"row_count": base_count + n_inserted}
+    ).eq("id", session_id).execute()
+    return n_inserted
 
 
 def list_pipeline_rows(client: Client, session_id: str, limit: int = LIST_PAGE_SIZE, offset: int = 0) -> list[dict]:
@@ -727,6 +770,99 @@ def update_pipeline_row_data(client: Client, row_id: str, data: dict) -> None:
     convention que `update_record`) : l'appelant construit le dict final,
     pas un patch partiel."""
     _td(client, "pipeline_rows").update({"data": data}).eq("id", row_id).execute()
+
+
+def update_pipeline_session_dedup(client: Client, session_id: str, dedup_config: dict | None) -> None:
+    """Fixe (ou annule, avec `None`) le dédoublonnage actif d'une session
+    de pipeline -- réappliqué à chaque lecture (`/rows`, `/export`) tant
+    qu'il n'est pas explicitement annulé, même comportement que l'onglet
+    3 Streamlit ("Active dedup persiste et se réapplique à chaque rerun
+    jusqu'à annulation explicite")."""
+    _td(client, "pipeline_sessions").update({"dedup_config": dedup_config}).eq("id", session_id).execute()
+
+
+# ---------------------------------------------------------------
+# Mémoire du mapping colonnes source -> colonnes maîtres PAR FORME DE
+# FICHIER (trieur/matching.py:column_fingerprint/auto_assign_with_memory),
+# scopée à l'organisation -- remplace remembered_mappings.json (voir
+# supabase/migrations/0012_pipeline_parity.sql).
+# ---------------------------------------------------------------
+
+def get_remembered_mapping_for_shape(client: Client, org_id: str, fingerprint: str) -> dict:
+    """Mapping mémorisé pour cette empreinte de colonnes, ou `{}` si cette
+    forme de fichier n'a encore jamais été confirmée dans cet
+    environnement."""
+    res = (
+        _td(client, "pipeline_remembered_mappings")
+        .select("mapping")
+        .eq("org_id", org_id)
+        .eq("fingerprint", fingerprint)
+        .limit(1)
+        .execute()
+    )
+    return (res.data[0]["mapping"] if res.data else {}) or {}
+
+
+def save_remembered_mapping_for_shape(client: Client, org_id: str, fingerprint: str, mapping: dict) -> None:
+    """Mémorise (ou remplace, même empreinte) le mapping CONFIRMÉ pour
+    cette forme de fichier -- appelé quand un mapping est réellement
+    appliqué (jamais pour une simple suggestion en dry_run)."""
+    from datetime import datetime, timezone
+
+    _td(client, "pipeline_remembered_mappings").upsert(
+        {
+            "org_id": org_id,
+            "fingerprint": fingerprint,
+            "mapping": mapping,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+        on_conflict="org_id,fingerprint",
+    ).execute()
+
+
+# ---------------------------------------------------------------
+# Presets d'export nommés (ordre + sélection des colonnes, onglet 4) --
+# liés au COMPTE + à l'organisation, même patron que les vues
+# enregistrées (list_saved_views/save_saved_view/delete_saved_view
+# ci-dessus) -- remplace export_presets.json.
+# ---------------------------------------------------------------
+
+def list_pipeline_export_presets(client: Client, user_id: str, org_id: str) -> list[dict]:
+    res = (
+        _td(client, "pipeline_export_presets")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("org_id", org_id)
+        .order("name")
+        .execute()
+    )
+    return res.data or []
+
+
+def save_pipeline_export_preset(
+    client: Client, user_id: str, org_id: str, name: str, included: list[str], excluded: list[str],
+) -> dict:
+    """Crée ou remplace (même nom, même compte, même environnement) un
+    preset d'export."""
+    res = (
+        _td(client, "pipeline_export_presets")
+        .upsert(
+            {
+                "user_id": user_id,
+                "org_id": org_id,
+                "name": name,
+                "included": included,
+                "excluded": excluded,
+            },
+            on_conflict="user_id,org_id,name",
+        )
+        .execute()
+    )
+    return res.data[0]
+
+
+def delete_pipeline_export_preset(client: Client, preset_id: str) -> None:
+    _td(client, "pipeline_export_presets").delete().eq("id", preset_id).execute()
 
 
 def delete_pipeline_session(client: Client, session_id: str) -> None:

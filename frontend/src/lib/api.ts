@@ -445,3 +445,87 @@ export function confirmImport(
 ) {
   return importRequest<ImportResult>(orgId, file, { ...opts, dryRun: false })
 }
+
+// ---------------------------------------------------------------
+// Pipeline "Trieur de Data" -- étape 1 (import + mapping), voir
+// api/main.py section "Pipeline Trieur de Data". Les colonnes maîtres
+// cibles du mapping restent get/setMasterColumns ci-dessus, PAS une
+// deuxième liste -- ne jamais dupliquer cette notion côté frontend non
+// plus.
+// ---------------------------------------------------------------
+
+// Sentinelle "non assigné" -- même valeur exacte que
+// trieur/matching.py:auto_assign_columns_fast et api/main.py, ne jamais
+// diverger (le backend compare cette chaîne littéralement).
+export const PIPELINE_UNASSIGNED = '(non assigne)'
+
+export type PipelineSessionCreated = {
+  session_id: string
+  status: string
+  row_count: number
+  columns: string[]
+  unknown_columns: string[]
+  preview_rows: Record<string, unknown>[]
+}
+
+// Requête multipart dédiée (fichier seul, pas d'autres champs) -- même
+// raison que importRequest ci-dessus : rester autonome plutôt que de
+// partager un helper générique qui devrait gérer deux formes de champs
+// différentes.
+async function uploadPipelineFile<T>(orgId: string, file: File): Promise<T> {
+  const headers = await authHeader()
+  const form = new FormData()
+  form.set('file', file)
+  const res = await fetch(`${API_URL}/orgs/${orgId}/pipeline/sessions`, {
+    method: 'POST',
+    headers,
+    body: form,
+  })
+  if (!res.ok) {
+    let detail = res.statusText
+    try {
+      const body = await res.json()
+      detail = body.detail ?? detail
+    } catch {
+      // pas de corps JSON -- on garde le statusText
+    }
+    throw new ApiError(res.status, detail)
+  }
+  return res.json() as Promise<T>
+}
+
+export function createPipelineSession(orgId: string, file: File) {
+  return uploadPipelineFile<PipelineSessionCreated>(orgId, file)
+}
+
+export type PipelineMappingSuggestion = {
+  session_id: string
+  suggested_mapping: Record<string, string>
+  columns: string[]
+}
+
+// dry_run=true : suggestion d'auto-assignation, rien n'est écrit --
+// voir api/main.py:apply_pipeline_mapping.
+export function suggestPipelineMapping(orgId: string, sessionId: string) {
+  return request<PipelineMappingSuggestion>(
+    `/orgs/${orgId}/pipeline/sessions/${sessionId}/mapping`,
+    { method: 'POST', body: JSON.stringify({ dry_run: true }) },
+  )
+}
+
+export type PipelineMappingResult = {
+  session_id: string
+  status: string
+  mapping: Record<string, string>
+  n_rows_updated: number
+}
+
+// Applique le mapping fourni (l'appelant doit envoyer le mapping
+// COMPLET voulu, pas un patch -- même contrat que côté serveur) et fait
+// passer la session au statut "mapped".
+export function applyPipelineMapping(orgId: string, sessionId: string, mapping: Record<string, string>) {
+  return request<PipelineMappingResult>(
+    `/orgs/${orgId}/pipeline/sessions/${sessionId}/mapping`,
+    { method: 'POST', body: JSON.stringify({ mapping, dry_run: false }) },
+  )
+}

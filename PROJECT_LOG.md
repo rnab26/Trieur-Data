@@ -2180,3 +2180,117 @@ mesure réelle du temps d'upload)** :
 - Committé sur `feature/react-migration` (message en français, voir
   `git log`). **Pas pushé** (demande explicite de l'utilisateur pour cet
   incrément : ne pas pousser).
+
+**Vérification indépendante de ce 8e incrément, refaite de zéro
+(2026-09-18, même soir, nouvelle session)** — un rapport précédent sur
+ce même repo s'était révélé faux, donc rien n'est pris pour acquis ici :
+tout relu, tout réexécuté.
+- `git log feature/react-migration -5 --oneline` / `git show --stat
+  HEAD` : commit `3ff3eda` réel, non pushé (`origin/feature/react-migration`
+  toujours à `df8ef3d`, confirmé par `git fetch`). Diff réel : 7 fichiers,
+  875 insertions/6 suppressions (`api/main.py`, `frontend/src/lib/api.ts`,
+  `MasterColumnsPanel.tsx`, `PersonalColumnSets.tsx` (nouveau),
+  `PipelineScreen.tsx`, `tests/test_api.py`, `PROJECT_LOG.md`).
+- `python3 -m pytest -q` (suite complète, run frais) → **250 passed, 2
+  warnings, 26.47s**. Pas de flake cette fois (le flake E2E
+  `test_master_columns_localstorage_fallback` documenté plus haut est
+  intermittent, pas reproduit sur ce run).
+- `cd frontend && npm run build` → **exit 0** (`tsc -b && vite build`,
+  aucune erreur TypeScript, seul avertissement = taille de chunk >500kB,
+  préexistant, sans lien).
+- `git diff --stat main...feature/react-migration -- views/ app.py` →
+  **3 fichiers** (`app.py`, `views/tab2_import_mapping.py`,
+  `views/tab_database.py`), mais tous issus du commit `8b39500`
+  (antérieur, filet de diagnostic upload — voir plus haut) via
+  `git log main..feature/react-migration -- views/ app.py` : **rien
+  ajouté par le commit `3ff3eda`** à ces fichiers. `main` toujours
+  intact, confirmé.
+- Code relu pour les 3 points, pas seulement le rapport de l'agent :
+  - **1. Jeux de colonnes personnels** : les 4 routes
+    (`GET/POST /me/column-sets`, `POST .../apply`, `DELETE .../{id}`)
+    existent réellement dans `api/main.py`, avec garde de propriété
+    (`_get_own_column_set_or_404`) avant apply/delete — confirmé par
+    lecture directe. `PersonalColumnSets.tsx` : auto-chargement au
+    montage via `active_master_column_set_id`, états
+    chargement/vide/erreur, confirmation avant suppression
+    (`window.confirm`), intégré dans `MasterColumnsPanel.tsx`
+    (`<PersonalColumnSets />` ajouté, visible pour tout compte connecté).
+    Réel, correspond au rapport.
+  - **2. Ordre/sélection colonnes export** : paramètre `columns` sur
+    `export_pipeline_session_rows`, filtre `[c for c in requested_cols
+    if c in full_cols]` — rétrocompatible (vide = tout, ordre
+    d'apparition), colonne inconnue ignorée sans erreur. Côté écran,
+    `colOrder`/`excludedCols` avec flèches haut/bas + cases à cocher,
+    fusion automatique des nouvelles colonnes détectées sans perte.
+    Réel, correspond au rapport.
+  - **3. Chrono d'upload** : `setInterval` 1s affichant
+    `uploadElapsedSec`, spinner CSS, message après 8s — réel, mais
+    reste ce que le rapport dit honnêtement : un affichage de temps
+    écoulé, pas une vraie barre de progression ni un job asynchrone.
+    Le vrai coût réseau (100 lots séquentiels vers Supabase pour 50 000
+    lignes) reste **estimé, jamais mesuré en conditions réelles** —
+    point toujours ouvert, non résolu par cet incrément.
+  - 11 nouveaux tests dans `tests/test_api.py` confirmés un par un
+    (noms de fonctions relus) : couvrent vide par défaut, save/list,
+    validation nom/colonnes vides (400), remplacement même nom, apply
+    (actif + 404 sur id inconnu), delete (+ 404 sur jeu d'un autre
+    compte), auth requise, export colonnes (ordre+sélection, colonne
+    inconnue ignorée). Couverture réelle, pas seulement des tests qui
+    passent par accident.
+- **Conclusion : le rapport de cet incrément est honnête et exact.**
+  Aucune régression trouvée, aucun écart entre le rapport et le code
+  réel.
+- Poussé sur `origin/feature/react-migration` (`git push`), commit
+  `3ff3eda` — **pas de merge sur `main`, pas de PR** : décision qui
+  reste à l'utilisateur, conformément aux règles de ce projet.
+
+**Statut honnête de l'ensemble de la migration React (2026-09-18,
+après ce 8e incrément) : ~82 %.**
+- **Fait et vérifié** : Base de données (complet, y compris colonnes
+  maîtres d'organisation + jeux personnels par compte) ; Cockpit
+  (complet, barre de progression par chantier) ; Pipeline "Trieur de
+  Data" étapes 1-2-3 complètes (import/mapping, filtre/dédoublonnage,
+  export avec ordre/sélection de colonnes) ; chrono d'upload affiché.
+  Tous testés (250 tests passants) et le build frontend passe.
+- **Reste pour 100 %, liste précise** :
+  1. Étiquettes libres sur un client (n1) — pas commencé, ni côté
+     Streamlit ni côté React (feature produit, pas juste un portage).
+  2. Annuler un import entier en un clic (n3) — pas commencé.
+  3. Détection de quasi-doublons hors IBAN + règle configurable par
+     activité (n2 + point 7) — bloqué sur l'Excel de référence attendu
+     de l'utilisateur, pas un manque de code.
+  4. Rôles plus fins par environnement (n5) — à cadrer avec
+     l'utilisateur avant de coder, pas encore lancé.
+  5. Mesure réelle du coût réseau upload contre le vrai Supabase (voir
+     point 3 ci-dessus) — pour trancher si un job asynchrone est
+     nécessaire ou si le chrono actuel suffit.
+  6. Colonnes calculées simples (n8) — explicitement reporté par
+     l'utilisateur ("plus tard").
+- **Ce qu'une revue avant merge sur `main`/mise en prod devrait vérifier
+  en plus, avant que l'utilisateur décide** (aucun de ces points n'a
+  été audité spécifiquement pendant la migration écran par écran) :
+  - **Cas limites d'authentification** : expiration de session/jeton
+    pendant une action longue (upload, export), comportement si
+    `is_super_admin` change en cours de session, accès à un `org_id`
+    dont l'utilisateur vient d'être retiré.
+  - **Passage mobile réel** : tous les écrans ont été construits
+    "téléphone d'abord" dans l'intention (choix explicite des flèches
+    plutôt que drag-and-drop), mais aucune passe de test tactile sur
+    écran réel n'a été faite écran par écran — à faire avant bascule.
+  - **Test de charge avec un vrai gros fichier** : le point 5 ci-dessus
+    — actuellement seulement estimé, jamais mesuré contre le vrai
+    projet Supabase.
+  - **Filet de diagnostic (`trieur/debug.py`, commit `8b39500`)** :
+    affiche la trace complète des exceptions à l'écran sur l'app
+    Streamlit — utile en migration, mais à vérifier/retirer ou gater
+    (visible admin seulement) avant toute mise en prod, pour ne pas
+    exposer de détails internes à un utilisateur final. Concerne
+    l'app Streamlit (`main`), pas la branche React, mais doit être
+    tranché avant que `main` reparte en prod avec ce commit si jamais
+    il y est mergé séparément.
+  - **Chunk frontend >500 kB** (avertissement build, voir plus haut) —
+    sans impact fonctionnel, mais à code-splitter avant une vraie mise
+    en prod si le temps de chargement initial compte.
+  - Pas de revue de sécurité dédiée (RLS Supabase, CORS) refaite
+    spécifiquement pour cet incrément — dernière revue explicite plus
+    haut dans ce journal, à rafraîchir avant bascule finale.

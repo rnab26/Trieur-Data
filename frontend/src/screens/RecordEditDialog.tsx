@@ -26,6 +26,16 @@ export function RecordEditDialog({
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
 
+  // Valeur BRUTE d'origine par colonne (avant conversion en chaîne pour
+  // l'affichage dans <Input>) -- voir handleSave : un champ jamais
+  // touché doit repartir avec SON type d'origine (nombre, booléen...)
+  // dans le PATCH, pas la version stringifiée utilisée pour l'affichage.
+  // Sans ça, modifier UNE seule ligne convertissait TOUTES ses valeurs
+  // inchangées en chaînes (0 -> "0", false -> "false"), cassant la
+  // distinction vide/non-vide côté backend (revue PR #24, point #2).
+  const [originalData, setOriginalData] = useState<Record<string, unknown>>({})
+  const [editedKeys, setEditedKeys] = useState<Set<string>>(new Set())
+
   useEffect(() => {
     let cancelled = false
     setLoading(true)
@@ -38,6 +48,8 @@ export function RecordEditDialog({
           ...master.columns,
           ...Object.keys(data).filter((k) => !master.columns.includes(k)),
         ]
+        setOriginalData(data)
+        setEditedKeys(new Set())
         setFields(orderedKeys.map((k) => [k, data[k] == null ? '' : String(data[k])]))
       })
       .catch((err: unknown) => {
@@ -54,13 +66,19 @@ export function RecordEditDialog({
 
   function updateField(key: string, value: string) {
     setFields((prev) => prev.map(([k, v]) => (k === key ? [k, value] : [k, v])))
+    setEditedKeys((prev) => new Set(prev).add(key))
   }
 
   async function handleSave() {
     setSaving(true)
     setSaveError(null)
-    const data: Record<string, string | null> = {}
-    for (const [k, v] of fields) data[k] = v === '' ? null : v
+    const data: Record<string, unknown> = {}
+    for (const [k, v] of fields) {
+      // Champ non modifié : renvoie sa valeur BRUTE d'origine (type
+      // préservé), jamais la chaîne d'affichage -- seul un champ
+      // effectivement édité est envoyé comme chaîne (ou null si vidé).
+      data[k] = editedKeys.has(k) ? (v === '' ? null : v) : (originalData[k] ?? null)
+    }
     try {
       await updateRecord(orgId, recordId, data)
       onSaved()

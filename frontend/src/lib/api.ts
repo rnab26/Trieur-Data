@@ -543,21 +543,33 @@ export function createPipelineSession(orgId: string, files: File[], googleSheetU
   return uploadPipelineFiles<PipelineSessionCreated>(orgId, files, googleSheetUrl)
 }
 
-export type PipelineMappingSuggestion = {
-  session_id: string
-  suggested_mapping: Record<string, string>
+// Un fichier importé = un ou plusieurs ONGLETS (une feuille Excel/CSV/
+// Google Sheets) ; chaque onglet est mappé et fusionné SÉPARÉMENT --
+// copie conforme de views/tab2_import_mapping.py (jamais un mapping
+// unique sur l'union de toutes les colonnes de tous les fichiers).
+export type PipelineSheetSuggestion = {
+  sheet_key: string
   columns: string[]
+  row_count: number
+  n_duplicates: number
+  preview_rows: Record<string, unknown>[]
+  suggested_mapping: Record<string, string>
   unknown_columns: string[]
-  // true : une mémoire de mapping existe déjà pour cette FORME de fichier
-  // (même empreinte de colonnes qu'un import déjà confirmé dans cet
-  // environnement) -- la suggestion l'a déjà appliquée en priorité, voir
-  // trieur/matching.py:auto_assign_with_memory.
+  // true : une mémoire de mapping existe déjà pour cette FORME de
+  // fichier (même empreinte de colonnes qu'un import déjà confirmé dans
+  // cet environnement) -- la suggestion l'a déjà appliquée en priorité,
+  // voir trieur/matching.py:auto_assign_with_memory.
   remembered_for_shape: boolean
 }
 
-// dry_run=true : suggestion d'auto-assignation (mémoire de mapping par
-// forme de fichier PUIS détection générique), rien n'est écrit -- voir
-// api/main.py:apply_pipeline_mapping.
+export type PipelineMappingSuggestion = {
+  session_id: string
+  sheets: PipelineSheetSuggestion[]
+}
+
+// dry_run=true : suggestion d'auto-assignation PAR ONGLET (mémoire de
+// mapping par forme de fichier PUIS détection générique), rien n'est
+// écrit -- voir api/main.py:apply_pipeline_mapping.
 export function suggestPipelineMapping(orgId: string, sessionId: string) {
   return request<PipelineMappingSuggestion>(
     `/orgs/${orgId}/pipeline/sessions/${sessionId}/mapping`,
@@ -568,18 +580,27 @@ export function suggestPipelineMapping(orgId: string, sessionId: string) {
 export type PipelineMappingResult = {
   session_id: string
   status: string
-  mapping: Record<string, string>
   n_rows_updated: number
+  used_master_columns: string[]
+  iban_warnings: { column: string; n_invalid: number }[]
 }
 
-// Applique le mapping fourni (l'appelant doit envoyer le mapping
-// COMPLET voulu, pas un patch -- même contrat que côté serveur) et fait
-// passer la session au statut "mapped". Le mapping CONFIRMÉ est mémorisé
-// côté serveur pour cette forme de fichier (voir suggestPipelineMapping).
-export function applyPipelineMapping(orgId: string, sessionId: string, mapping: Record<string, string>) {
+// Applique le mapping fourni PAR ONGLET ({sheet_key: {src_col:
+// master_col}}, l'appelant doit envoyer le mapping COMPLET voulu pour
+// chaque onglet qu'il fournit, pas un patch -- même contrat que côté
+// serveur) et fait passer la session au statut "mapped". `excludedSheets`
+// = onglets à ne pas fusionner (voir la case "à inclure" de
+// views/tab2_import_mapping.py). Le mapping CONFIRMÉ de chaque onglet
+// fusionné est mémorisé côté serveur pour sa propre forme de fichier.
+export function applyPipelineMapping(
+  orgId: string,
+  sessionId: string,
+  mapping: Record<string, Record<string, string>>,
+  excludedSheets: string[] = [],
+) {
   return request<PipelineMappingResult>(
     `/orgs/${orgId}/pipeline/sessions/${sessionId}/mapping`,
-    { method: 'POST', body: JSON.stringify({ mapping, dry_run: false }) },
+    { method: 'POST', body: JSON.stringify({ mapping, excluded_sheets: excludedSheets, dry_run: false }) },
   )
 }
 

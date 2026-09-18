@@ -84,7 +84,11 @@ from trieur.io_excel import is_google_sheet_url, read_csv_file, read_excel_all_s
 from trieur.matching import (
     apply_header_inference_excel,
     auto_assign_with_memory,
+    clean_iban,
     column_fingerprint,
+    detect_iban_column,
+    iban_is_valid,
+    is_iban_master,
     mapping_to_remembered,
 )
 from views._auth import accessible_organizations
@@ -686,13 +690,6 @@ async def import_records(
 # ---------------------------------------------------------------
 
 PIPELINE_PREVIEW_SIZE = 10
-# Échantillon utilisé UNIQUEMENT pour la détection de contenu (téléphone
-# mobile/fixe) au moment de suggérer un mapping -- volontairement plus
-# large que PIPELINE_PREVIEW_SIZE (aperçu écran) pour donner une chance
-# raisonnable de voir du contenu de chaque fichier/onglet importé sur un
-# import multi-fichiers, sans charger des millions de lignes en mémoire
-# pour un simple échantillonnage.
-PIPELINE_MAPPING_SAMPLE_SIZE = 500
 
 
 def _parse_pipeline_file(filename: str, content: bytes) -> dict[str, pd.DataFrame]:
@@ -780,6 +777,35 @@ def _merge_pipeline_sheets(sheets: dict[str, pd.DataFrame]) -> tuple[list[dict],
 
 def _without_sheet_key(data: dict) -> dict:
     return {k: v for k, v in data.items() if k != "_sheet"}
+
+
+# Même sentinelle que trieur/matching.py:auto_assign_columns_fast (chaîne
+# littérale "(non assigne)") -- une seule source de vérité, jamais une
+# deuxième valeur qui pourrait diverger.
+PIPELINE_UNASSIGNED = "(non assigne)"
+
+
+def _group_rows_by_sheet(session_id: str) -> dict[str, list[dict]]:
+    """Lignes de la session groupées par onglet d'origine (`_sheet`,
+    voir _merge_pipeline_sheets côté import), dans l'ordre de première
+    apparition -- un groupe = un fichier/feuille importé, mappé et
+    fusionné séparément (voir apply_pipeline_mapping), jamais une union
+    de toutes les colonnes de tous les fichiers."""
+    sheets: dict[str, list[dict]] = {}
+    for r in pipeline_memory.list_rows(session_id):
+        sheet_key = r["data"].get("_sheet") or ""
+        sheets.setdefault(sheet_key, []).append(_without_sheet_key(r["data"]))
+    return sheets
+
+
+def _split_sheet_key(sheet_key: str) -> tuple[str, str]:
+    """Sépare une clé d'onglet "<fichier> :: <feuille>" (voir
+    _merge_pipeline_sheets) en (fichier, feuille) -- pour remplir
+    "Source Data" par onglet, même règle que views/tab2_import_mapping.py."""
+    if " :: " in sheet_key:
+        file_part, sheet_part = sheet_key.split(" :: ", 1)
+        return file_part, sheet_part
+    return sheet_key, "Unknown"
 
 
 def _get_pipeline_session_or_404(ctx: AuthCtx, org_id: str, session_id: str) -> dict:
@@ -919,12 +945,21 @@ def get_pipeline_column_unique_values(
 
 class PipelineMapping(BaseModel):
     # `None` : pas de mapping fourni -> la suggestion d'auto-assignation
-    # est appliquée telle quelle. Fournir un dict explicite, même partiel,
-    # remplace entièrement la suggestion (l'appelant doit envoyer le
-    # mapping COMPLET qu'il veut appliquer, pas un patch).
-    mapping: Optional[dict[str, str]] = None
-    # true : renvoie la suggestion sans rien écrire (aperçu avant
-    # confirmation côté frontend, même principe que dry_run sur /import).
+    # est appliquée telle quelle pour CHAQUE onglet. Fournir un dict
+    # explicite {sheet_key: {src_col: master_col}}, même partiel,
+    # remplace entièrement la suggestion pour les onglets qu'il couvre
+    # (l'appelant doit envoyer le mapping COMPLET qu'il veut appliquer
+    # pour chaque onglet donné, pas un patch) -- un onglet fourni sans
+    # aucune colonne assignée est ignoré (voir views/tab2_import_mapping.py :
+    # "Aucune colonne assignée, ignoré").
+    mapping: Optional[dict[str, dict[str, str]]] = None
+    # Onglets à exclure de la fusion (voir "🗂️ Choisir les fichiers et
+    # onglets à inclure" -- views/tab2_import_mapping.py) -- une clé de
+    # `sheet_key` (voir GET .../mapping dry_run) par onglet exclu.
+    excluded_sheets: list[str] = []
+    # true : renvoie la suggestion PAR ONGLET sans rien écrire (aperçu
+    # avant confirmation côté frontend, même principe que dry_run sur
+    # /import).
     dry_run: bool = False
 
 
@@ -1173,88 +1208,154 @@ def apply_pipeline_mapping(
     org_id: str, session_id: str, body: PipelineMapping, ctx: AuthCtx = Depends(require_org_access),
 ):
     """Propose (dry_run) ou applique le mapping colonnes source -> colonnes
-    maîtres. La suggestion réutilise trieur/matching.py:auto_assign_with_memory
-    -- même logique (+ mémoire du mapping par forme de fichier, voir
-    trieur/matching.py:column_fingerprint et
-    supabase/migrations/0012_pipeline_parity.sql) que le bouton "Auto" +
-    "mapping mémorisé" de views/tab2_import_mapping.py, jamais
-    réimplémentée ici (échantillon = le même aperçu que le GET ci-dessus,
-    pas tout le fichier : suffisant pour la détection par contenu --
-    téléphone/IBAN -- sans charger des millions de lignes).
+    maîtres, PAR ONGLET (un fichier/feuille importé = un onglet, voir
+    trieur/pipeline_memory.py:create_session/_merge_pipeline_sheets côté
+    import) -- copie conforme de views/tab2_import_mapping.py, qui mappe
+    et fusionne chaque onglet séparément plutôt qu'un mapping unique sur
+    l'union de toutes les colonnes de tous les fichiers importés (l'un
+    des deux onglets d'un import de 2 fichiers différents aurait sinon
+    ses colonnes mélangées à celles de l'autre).
 
-    En dehors d'un dry_run, applique le mapping (fourni, ou la suggestion
-    si omis) : chaque ligne de la session est réécrite avec les clés
-    COLONNES MAÎTRES (une colonne source sur "(non assigne)" disparaît de
-    la ligne), le mapping CONFIRMÉ est mémorisé pour cette forme de
-    fichier (prochain import similaire dans cet environnement -> déjà
-    pré-rempli), puis la session passe au statut 'mapped'. Limite connue,
-    simplification volontaire par rapport à l'onglet 2 : si deux colonnes
-    source sont mappées sur la MÊME colonne maître, la dernière écrase la
-    précédente (l'onglet 2 garde la première valeur non vide) -- à revoir
-    si un vrai cas d'usage l'exige."""
+    dry_run : suggestion par onglet (trieur/matching.py:
+    auto_assign_single_sheet_with_memory, + mémoire du mapping par forme
+    de fichier propre à CET onglet, jamais réimplémentée ici), avec un
+    aperçu (colonnes, quelques lignes, doublons) pour chaque onglet.
+
+    Sinon : fusionne les onglets NON exclus (`body.excluded_sheets`) avec
+    leur mapping respectif (fourni, ou la suggestion par onglet si
+    omis) -- même logique que la boucle de "✅ Construire la base de
+    travail fusionnée" : "Source Data" auto-rempli par onglet (fichier +
+    feuille), colonnes source multiples mappées sur la MÊME colonne
+    maître combinées en gardant la première valeur non vide (jamais
+    juste la dernière écrite), nettoyage IBAN (trieur/matching.py:
+    clean_iban) sur toute colonne détectée comme IBAN par le nom OU le
+    contenu, lignes entièrement vides retirées, colonnes maîtres jamais
+    assignées sur aucun onglet retirées du résultat. Le résultat
+    REMPLACE les lignes de la session (voir
+    trieur/pipeline_memory.py:replace_rows -- le nombre de lignes/
+    colonnes peut changer, contrairement à une simple réécriture ligne à
+    ligne), le mapping CONFIRMÉ de chaque onglet fusionné est mémorisé
+    par sa propre forme de fichier, puis la session passe au statut
+    'mapped'."""
     session = _get_pipeline_session_or_404(ctx, org_id, session_id)
     master_cols = get_org_master_columns(ctx.client, org_id)
 
-    # `real_columns` = TOUTES les colonnes détectées à l'import (voir
-    # trieur/pipeline_memory.py:create_session), jamais recalculées depuis
-    # un simple échantillon de lignes : avec plusieurs fichiers importés
-    # dans le même batch, les colonnes du 2e fichier n'apparaissent jamais
-    # dans les toutes premières lignes (stockées fichier par fichier) --
-    # elles restaient sinon "(non assigné)" après auto-assignation, alors
-    # que l'algorithme de trieur/matching.py fonctionne correctement (bug
-    # réel constaté par l'utilisateur, corrigé ici plutôt que dans
-    # l'algorithme lui-même). L'échantillon de contenu (sample_df, pour la
-    # détection téléphone par contenu) reste volontairement plus large que
-    # l'aperçu écran pour couvrir plusieurs fichiers/onglets.
-    real_columns = session.get("columns") or []
-    sample = pipeline_memory.list_rows(session_id, limit=PIPELINE_MAPPING_SAMPLE_SIZE)
-    if not real_columns:
-        real_columns = _detected_columns([r["data"] for r in sample])
-    sample_df = pd.DataFrame([_without_sheet_key(r["data"]) for r in sample]) if sample else None
-    fingerprint = column_fingerprint(real_columns)
-    remembered = get_remembered_mapping_for_shape(ctx.client, org_id, fingerprint)
-    suggestion = auto_assign_with_memory(
-        real_columns, master_cols, sheet_df=sample_df, remembered_for_shape=remembered,
-    )
-    unknown = unknown_columns(real_columns, master_cols)
+    sheets = _group_rows_by_sheet(session_id)
+    if not sheets:
+        raise HTTPException(status_code=400, detail="Session de pipeline vide.")
 
     if body.dry_run:
-        return {
-            "session_id": session_id,
-            "suggested_mapping": suggestion,
-            "columns": real_columns,
-            "unknown_columns": unknown,
-            "remembered_for_shape": bool(remembered),
-        }
+        sheet_results = []
+        for sheet_key, rows in sheets.items():
+            sheet_df = pd.DataFrame(rows)
+            real_columns = list(sheet_df.columns)
+            fingerprint = column_fingerprint(real_columns)
+            remembered = get_remembered_mapping_for_shape(ctx.client, org_id, fingerprint)
+            suggestion = auto_assign_with_memory(
+                real_columns, master_cols, sheet_df=sheet_df, remembered_for_shape=remembered,
+            )
+            preview = sheet_df.head(PIPELINE_PREVIEW_SIZE).where(
+                pd.notnull(sheet_df.head(PIPELINE_PREVIEW_SIZE)), None,
+            )
+            sheet_results.append({
+                "sheet_key": sheet_key,
+                "columns": real_columns,
+                "row_count": len(sheet_df),
+                "n_duplicates": int(sheet_df.duplicated().sum()),
+                "preview_rows": preview.to_dict(orient="records"),
+                "suggested_mapping": suggestion,
+                "unknown_columns": unknown_columns(real_columns, master_cols),
+                "remembered_for_shape": bool(remembered),
+            })
+        return {"session_id": session_id, "sheets": sheet_results}
 
-    mapping = body.mapping if body.mapping is not None else suggestion
-    if not any(m and m != "(non assigne)" for m in mapping.values()):
-        raise HTTPException(status_code=400, detail="Aucune colonne assignée dans ce mapping.")
+    mapping_by_sheet = body.mapping or {}
+    excluded = set(body.excluded_sheets or [])
+    used_master_cols: set[str] = set()
+    merged_parts: list[pd.DataFrame] = []
+    remembered_updates: list[tuple[str, dict]] = []
 
-    def _apply_mapping(data: dict) -> dict:
-        return {
-            master: data[src]
-            for src, master in mapping.items()
-            if master and master != "(non assigne)" and src in data
-        }
+    for sheet_key, rows in sheets.items():
+        if sheet_key in excluded:
+            continue
+        sheet_df = pd.DataFrame(rows)
+        mapping = mapping_by_sheet.get(sheet_key)
+        if mapping is None:
+            fingerprint = column_fingerprint(list(sheet_df.columns))
+            remembered = get_remembered_mapping_for_shape(ctx.client, org_id, fingerprint)
+            mapping = auto_assign_with_memory(
+                list(sheet_df.columns), master_cols, sheet_df=sheet_df, remembered_for_shape=remembered,
+            )
+        assigned_cols = [m for m in mapping.values() if m and m != PIPELINE_UNASSIGNED]
+        if not assigned_cols:
+            continue
 
-    # Un seul passage O(n) sur toutes les lignes déjà en mémoire (voir
-    # trieur/pipeline_memory.py:map_rows) -- remplace l'ancienne boucle
-    # paginée qui faisait un UPDATE réseau PAR LIGNE (le coût qui rendait
-    # cette étape lente sur un gros fichier) ; le résultat (chaque ligne
-    # réécrite avec les clés colonnes maîtres) est identique.
-    n_updated = pipeline_memory.map_rows(session_id, _apply_mapping)
+        source_file, source_sheet = _split_sheet_key(sheet_key)
+        sub = pd.DataFrame(index=sheet_df.index)
+        for master_col in master_cols:
+            src_cols_for_master = [s for s, m in mapping.items() if m == master_col and s in sheet_df.columns]
+            if master_col == "Source Data":
+                sub[master_col] = f"{source_file} ({source_sheet})"
+                used_master_cols.add(master_col)
+            elif not src_cols_for_master:
+                sub[master_col] = None
+            elif len(src_cols_for_master) == 1:
+                sub[master_col] = sheet_df[src_cols_for_master[0]]
+                used_master_cols.add(master_col)
+            else:
+                # Plusieurs colonnes source sur la MÊME colonne maître :
+                # garde la première valeur non vide, jamais juste la
+                # dernière écrite -- même règle que
+                # views/tab2_import_mapping.py (revue PR #24 levée).
+                combined = sheet_df[src_cols_for_master[0]].copy()
+                for extra_col in src_cols_for_master[1:]:
+                    is_empty = combined.isna() | (combined.astype(str).str.strip() == "")
+                    combined = combined.where(~is_empty, sheet_df[extra_col])
+                sub[master_col] = combined
+                used_master_cols.add(master_col)
 
-    # Mémorise le mapping CONFIRMÉ pour cette forme de fichier (pas la
-    # suggestion en dry_run) -- rejoué automatiquement au prochain import
-    # de même forme dans cet environnement (voir docstring ci-dessus).
-    save_remembered_mapping_for_shape(
-        ctx.client, org_id, fingerprint, mapping_to_remembered(mapping),
-    )
+            if is_iban_master(master_col) or detect_iban_column(sub[master_col]):
+                sub[master_col] = sub[master_col].map(clean_iban)
 
-    pipeline_memory.set_session_mapping(session_id, mapping)
+        merged_parts.append(sub)
+        fingerprint = column_fingerprint(list(sheet_df.columns))
+        remembered_updates.append((fingerprint, mapping_to_remembered(mapping)))
+
+    if not merged_parts:
+        raise HTTPException(status_code=400, detail="Aucun onglet avec assignation trouvé.")
+
+    final_df = pd.concat(merged_parts, ignore_index=True)
+    cols_hors_source = [c for c in final_df.columns if c != "Source Data"]
+    if cols_hors_source:
+        final_df = final_df.dropna(how="all", subset=cols_hors_source)
+    final_df = final_df[[c for c in final_df.columns if c in used_master_cols]]
+
+    if len(final_df) == 0:
+        raise HTTPException(status_code=400, detail="La base fusionnée est vide après nettoyage.")
+
+    # Checksum IBAN (ISO 7064 mod 97) -- signale sans jamais rien
+    # supprimer, même principe que views/tab2_import_mapping.py.
+    iban_warnings = []
+    for c in final_df.columns:
+        if is_iban_master(c) or detect_iban_column(final_df[c]):
+            n_invalid = int((final_df[c].map(iban_is_valid) == False).sum())  # noqa: E712 (None != False)
+            if n_invalid:
+                iban_warnings.append({"column": c, "n_invalid": n_invalid})
+
+    final_df = final_df.where(pd.notnull(final_df), None)
+    n_updated = pipeline_memory.replace_rows(session_id, final_df.to_dict(orient="records"))
+
+    for fingerprint, remembered_mapping in remembered_updates:
+        save_remembered_mapping_for_shape(ctx.client, org_id, fingerprint, remembered_mapping)
+
     pipeline_memory.update_session_status(session_id, "mapped")
-    return {"session_id": session_id, "status": "mapped", "mapping": mapping, "n_rows_updated": n_updated}
+    return {
+        "session_id": session_id,
+        "status": "mapped",
+        "n_rows_updated": n_updated,
+        "used_master_columns": sorted(used_master_cols),
+        "iban_warnings": iban_warnings,
+    }
 
 
 # ---------------------------------------------------------------

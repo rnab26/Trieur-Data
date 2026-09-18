@@ -65,7 +65,6 @@ from __future__ import annotations
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Callable
 
 PIPELINE_TTL_HOURS = 24
 
@@ -235,19 +234,25 @@ def list_rows(session_id: str, limit: int | None = None, offset: int = 0) -> lis
         return rows[offset:offset + limit]
 
 
-def map_rows(session_id: str, transform: Callable[[dict], dict]) -> int:
-    """Réécrit CHAQUE ligne de la session avec `transform(data) ->
-    new_data` (le mapping colonnes source -> colonnes maîtres, voir
-    api/main.py:apply_pipeline_mapping) en UN SEUL passage O(n) -- pas un
-    appel par ligne comme l'ancien `update_pipeline_row_data` (qui
-    coûtait un aller-retour réseau par ligne ; ici tout est déjà en
-    mémoire donc un seul passage suffit, plus rapide ET plus simple).
-    Renvoie le nombre de lignes réécrites."""
+def replace_rows(session_id: str, rows: list[dict], columns: list[str] | None = None) -> int:
+    """Remplace TOUTES les lignes de la session par `rows` (le résultat
+    du mapping colonnes source -> colonnes maîtres, voir
+    api/main.py:apply_pipeline_mapping) -- contrairement à un simple
+    passage ligne à ligne, le nombre de lignes peut changer (une ligne
+    entièrement vide après mapping est retirée, comme
+    final_df.dropna(how="all") dans views/tab2_import_mapping.py) et les
+    colonnes aussi (colonnes maîtres jamais assignées sur aucun onglet
+    fusionné, retirées). Remplace `session["columns"]` par les colonnes
+    maîtres réellement utilisées, pour que le reste du pipeline (filtre,
+    export...) les voie immédiatement. Renvoie le nombre de lignes
+    écrites."""
     with _LOCK:
         session = _SESSIONS.get(session_id)
         if session is None:
             return 0
-        rows = session["rows"]
-        for row in rows:
-            row["data"] = transform(row["data"])
-        return len(rows)
+        session["rows"] = [
+            {"id": f"{session_id}:{i}", "row_index": i, "data": row} for i, row in enumerate(rows)
+        ]
+        session["row_count"] = len(session["rows"])
+        session["columns"] = columns if columns is not None else (list(rows[0].keys()) if rows else [])
+        return len(session["rows"])

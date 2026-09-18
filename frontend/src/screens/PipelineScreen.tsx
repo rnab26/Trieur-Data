@@ -293,6 +293,17 @@ export function PipelineScreen() {
                     (staging temporaire, 24h).
                   </p>
 
+                  {buildResult.iban_warnings.length > 0 && (
+                    <p className="text-sm text-[var(--danger)]">
+                      ⚠️{' '}
+                      {buildResult.iban_warnings
+                        .map((w) => `${w.n_invalid} IBAN(s) suspect(s) sur "${w.column}"`)
+                        .join(', ')}{' '}
+                      (checksum invalide) -- rien n'est supprimé automatiquement, à vérifier avant
+                      l'export final.
+                    </p>
+                  )}
+
                   <PipelineFilterGroups
                     orgId={orgId}
                     sessionId={pipelineSession.session_id}

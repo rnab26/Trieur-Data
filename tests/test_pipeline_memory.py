@@ -74,7 +74,7 @@ def test_list_rows_unknown_session_is_empty_list():
     assert pm.list_rows("does-not-exist") == []
 
 
-def test_map_rows_rewrites_every_row_in_one_pass():
+def test_replace_rows_rewrites_the_whole_session():
     session = pm.create_session("org-1", "user-1")
     pm.append_rows(session["id"], [
         {"nom_client": "Dupont", "iban_ref": "FR76A"},
@@ -82,10 +82,12 @@ def test_map_rows_rewrites_every_row_in_one_pass():
     ])
 
     mapping = {"nom_client": "NOM", "iban_ref": "IBAN"}
-    n_updated = pm.map_rows(
-        session["id"],
-        lambda data: {master: data[src] for src, master in mapping.items() if src in data},
-    )
+    old_rows = [r["data"] for r in pm.list_rows(session["id"])]
+    new_rows = [
+        {master: data[src] for src, master in mapping.items() if src in data}
+        for data in old_rows
+    ]
+    n_updated = pm.replace_rows(session["id"], new_rows)
     assert n_updated == 2
 
     rows = pm.list_rows(session["id"])
@@ -93,6 +95,7 @@ def test_map_rows_rewrites_every_row_in_one_pass():
         {"NOM": "Dupont", "IBAN": "FR76A"},
         {"NOM": "Martin", "IBAN": "FR76B"},
     ]
+    assert pm.get_session(session["id"])["columns"] == ["NOM", "IBAN"]
 
 
 def test_update_session_status_and_dedup_and_mapping():

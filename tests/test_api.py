@@ -1318,6 +1318,9 @@ def test_pipeline_mapping_wrong_org_is_404(client_factory):
     assert rows[0] == {"NOM": "Dupont", "_sheet": "clients.csv :: clients"}
 
 
+SHEET_KEY_CLIENTS_CSV = "clients.csv :: clients"
+
+
 def test_pipeline_mapping_dry_run_suggests_without_writing(client_factory):
     fake = _make_client()  # master_columns = ["NOM", "IBAN"]
     tc = client_factory(fake)
@@ -1330,7 +1333,10 @@ def test_pipeline_mapping_dry_run_suggests_without_writing(client_factory):
     )
     assert res.status_code == 200
     body = res.json()
-    assert body["suggested_mapping"] == {"NOM": "NOM", "IBAN": "IBAN"}
+    assert len(body["sheets"]) == 1
+    sheet = body["sheets"][0]
+    assert sheet["sheet_key"] == SHEET_KEY_CLIENTS_CSV
+    assert sheet["suggested_mapping"] == {"NOM": "NOM", "IBAN": "IBAN"}
 
     # dry_run : rien n'est modifié en base.
     session = tc.get(f"/orgs/org-1/pipeline/sessions/{session_id}", headers={"Authorization": f"Bearer {TOKEN}"}).json()
@@ -1344,13 +1350,14 @@ def test_pipeline_mapping_apply_rekeys_rows_and_marks_mapped(client_factory):
 
     res = tc.post(
         f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
-        json={"mapping": {"nom_client": "NOM", "iban_ref": "IBAN"}},
+        json={"mapping": {SHEET_KEY_CLIENTS_CSV: {"nom_client": "NOM", "iban_ref": "IBAN"}}},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 200
     body = res.json()
     assert body["status"] == "mapped"
     assert body["n_rows_updated"] == 1
+    assert body["used_master_columns"] == ["IBAN", "NOM"]
 
     rows = _pipeline_rows_data(session_id)
     assert rows[0] == {"NOM": "Dupont", "IBAN": "FR7630006000011234567890189"}
@@ -1374,7 +1381,7 @@ def test_pipeline_mapping_applies_suggestion_when_no_mapping_given(client_factor
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 200
-    assert res.json()["mapping"] == {"NOM": "NOM", "IBAN": "IBAN"}
+    assert sorted(res.json()["used_master_columns"]) == ["IBAN", "NOM"]
     rows = _pipeline_rows_data(session_id)
     assert rows[0] == {"NOM": "Dupont", "IBAN": "FR7630006000011234567890189"}
 
@@ -1386,7 +1393,7 @@ def test_pipeline_mapping_all_unassigned_is_400(client_factory):
 
     res = tc.post(
         f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
-        json={"mapping": {"colonneinconnue": "(non assigne)"}},
+        json={"mapping": {SHEET_KEY_CLIENTS_CSV: {"colonneinconnue": "(non assigne)"}}},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 400
@@ -1453,16 +1460,24 @@ def _upload_pipeline_rows(tc, org_id, content: bytes):
     return _upload_csv(tc, org_id, content).json()["session_id"]
 
 
-def test_pipeline_rows_filter_contient(client_factory):
+def test_pipeline_rows_filter_groups_valeurs_exact_match(client_factory):
+    """L'onglet "Filtrer" n'a JAMAIS eu de recherche libre ni d'opérateur
+    par colonne façon Google Sheets dans l'original (views/
+    tab3_filtrage_dedup.py) -- seulement des groupes de critères
+    (valeurs exactes ou préfixes de département), voir
+    trieur/filters.py:apply_filter_groups. Correspondance EXACTE
+    (sensible à la casse, comme apply_single_criterion), pas une
+    recherche "contient"."""
     fake = _make_client()
     tc = client_factory(fake)
     session_id = _upload_pipeline_rows(
         tc, "org-1", b"NOM,VILLE\nDupont,Paris\nMartin,Lyon\n",
     )
 
+    groups = [[{"column": "VILLE", "kind": "valeurs", "values": ["Paris"]}]]
     res = tc.get(
         f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
-        params={"col_filters": json.dumps({"VILLE": {"op": "contient", "value": "par"}})},
+        params={"filter_groups": json.dumps(groups)},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 200
@@ -1472,73 +1487,60 @@ def test_pipeline_rows_filter_contient(client_factory):
     assert [r["NOM"] for r in body["rows"]] == ["Dupont"]
 
 
-def test_pipeline_rows_filter_egal_a(client_factory):
+def test_pipeline_rows_filter_groups_departements_prefix(client_factory):
     fake = _make_client()
     tc = client_factory(fake)
     session_id = _upload_pipeline_rows(
-        tc, "org-1", b"NOM,VILLE\nDupont,Paris\nMartin,Lyon\n",
+        tc, "org-1", b"NOM,CP\nDupont,75001\nMartin,69001\n",
     )
 
+    groups = [[{"column": "CP", "kind": "departements", "values": ["75"]}]]
     res = tc.get(
         f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
-        params={"col_filters": json.dumps({"VILLE": {"op": "égal à", "value": "paris"}})},
-        headers={"Authorization": f"Bearer {TOKEN}"},
-    )
-    assert res.json()["count"] == 1
-
-
-def test_pipeline_rows_filter_vide(client_factory):
-    fake = _make_client()
-    tc = client_factory(fake)
-    session_id = _upload_pipeline_rows(
-        tc, "org-1", b"NOM,SCORE\nDupont,\nMartin,5\n",
-    )
-
-    res = tc.get(
-        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
-        params={"col_filters": json.dumps({"SCORE": {"op": "vide", "value": ""}})},
+        params={"filter_groups": json.dumps(groups)},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert [r["NOM"] for r in res.json()["rows"]] == ["Dupont"]
 
 
-def test_pipeline_rows_filter_non_vide_traite_zero_comme_une_vraie_valeur(client_factory):
-    """Une valeur "fausse" (0) est une vraie valeur, pas une case vide --
-    même règle que _matches_filter (views/tab_database.py), déjà couverte
-    côté /records ; ce test vérifie qu'elle s'applique aussi au pipeline."""
+def test_pipeline_rows_filter_groups_ou_entre_groupes(client_factory):
+    """Plusieurs groupes = OU entre eux (chaque groupe combine ses
+    propres critères en ET) -- voir describe_filter_groups."""
     fake = _make_client()
     tc = client_factory(fake)
     session_id = _upload_pipeline_rows(
-        tc, "org-1", b"NOM,SCORE\nDupont,0\nMartin,\n",
+        tc, "org-1", b"NOM,VILLE\nA,Paris\nB,Lyon\nC,Marseille\n",
     )
 
+    groups = [
+        [{"column": "VILLE", "kind": "valeurs", "values": ["Paris"]}],
+        [{"column": "VILLE", "kind": "valeurs", "values": ["Lyon"]}],
+    ]
     res = tc.get(
         f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
-        params={"col_filters": json.dumps({"SCORE": {"op": "non vide", "value": ""}})},
+        params={"filter_groups": json.dumps(groups)},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
-    body = res.json()
-    assert body["count"] == 1
-    assert body["rows"][0]["NOM"] == "Dupont"
-    # Lu en dtype=str (trieur/io_excel.py:read_csv_file, garde les zéros
-    # initiaux) : "0" reste la chaîne "0", falsy en Python mais une vraie
-    # valeur pour _matches_filter (pas None/"").
-    assert body["rows"][0]["SCORE"] == "0"
+    assert sorted(r["NOM"] for r in res.json()["rows"]) == ["A", "B"]
 
 
-def test_pipeline_rows_search(client_factory):
+def test_pipeline_rows_filter_groups_incomplete_group_is_ignored(client_factory):
+    """Un groupe encore en cours de saisie (valeurs pas encore choisies)
+    est ignoré plutôt que de tout masquer -- même règle que
+    trieur/filters.py:apply_filter_groups."""
     fake = _make_client()
     tc = client_factory(fake)
     session_id = _upload_pipeline_rows(
         tc, "org-1", b"NOM,VILLE\nDupont,Paris\nMartin,Lyon\n",
     )
 
+    groups = [[{"column": "VILLE", "kind": "valeurs", "values": []}]]
     res = tc.get(
         f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
-        params={"search": "martin"},
+        params={"filter_groups": json.dumps(groups)},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
-    assert [r["NOM"] for r in res.json()["rows"]] == ["Martin"]
+    assert res.json()["count"] == 2
 
 
 def test_pipeline_rows_paginates_with_page_and_page_size(client_factory):
@@ -1582,13 +1584,10 @@ def test_pipeline_rows_pagination_applies_after_filtering(client_factory):
         tc, "org-1", b"NOM,VILLE\nA,Paris\nB,Lyon\nC,Paris\nD,Lyon\nE,Paris\n",
     )
 
+    groups = [[{"column": "VILLE", "kind": "valeurs", "values": ["Paris"]}]]
     res = tc.get(
         f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
-        params={
-            "page": 2,
-            "page_size": 2,
-            "col_filters": json.dumps({"VILLE": {"op": "égal à", "value": "paris"}}),
-        },
+        params={"page": 2, "page_size": 2, "filter_groups": json.dumps(groups)},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     body = res.json()
@@ -1657,9 +1656,10 @@ def test_pipeline_export_respects_filters(client_factory):
         params={"format": "csv"},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
+    groups = [[{"column": "NOM", "kind": "valeurs", "values": ["Dupont"]}]]
     filtered = tc.get(
         f"/orgs/org-1/pipeline/sessions/{session_id}/export",
-        params={"format": "csv", "search": "dupont"},
+        params={"format": "csv", "filter_groups": json.dumps(groups)},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     n_unfiltered = len(unfiltered.content.decode("utf-8-sig").splitlines())
@@ -1729,7 +1729,7 @@ def test_pipeline_mapping_remembers_confirmed_mapping_for_next_import_of_same_sh
     session_1 = _upload_csv(tc, "org-1", b"nom_client,iban_ref\nDupont,FR7630006000011234567890189\n").json()["session_id"]
     res = tc.post(
         f"/orgs/org-1/pipeline/sessions/{session_1}/mapping",
-        json={"mapping": {"nom_client": "NOM", "iban_ref": "IBAN"}},
+        json={"mapping": {SHEET_KEY_CLIENTS_CSV: {"nom_client": "NOM", "iban_ref": "IBAN"}}},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 200
@@ -1745,8 +1745,9 @@ def test_pipeline_mapping_remembers_confirmed_mapping_for_next_import_of_same_sh
     )
     assert res.status_code == 200
     body = res.json()
-    assert body["suggested_mapping"] == {"nom_client": "NOM", "iban_ref": "IBAN"}
-    assert body["remembered_for_shape"] is True
+    sheet = body["sheets"][0]
+    assert sheet["suggested_mapping"] == {"nom_client": "NOM", "iban_ref": "IBAN"}
+    assert sheet["remembered_for_shape"] is True
 
 
 def test_pipeline_mapping_remembered_mapping_is_scoped_to_org(client_factory):
@@ -1767,7 +1768,7 @@ def test_pipeline_mapping_remembered_mapping_is_scoped_to_org(client_factory):
     session_1 = _upload_csv(tc, "org-1", b"nom_client,iban_ref\nDupont,FR7630006000011234567890189\n").json()["session_id"]
     tc.post(
         f"/orgs/org-1/pipeline/sessions/{session_1}/mapping",
-        json={"mapping": {"nom_client": "NOM", "iban_ref": "IBAN"}},
+        json={"mapping": {SHEET_KEY_CLIENTS_CSV: {"nom_client": "NOM", "iban_ref": "IBAN"}}},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
 
@@ -1777,7 +1778,7 @@ def test_pipeline_mapping_remembered_mapping_is_scoped_to_org(client_factory):
         json={"dry_run": True},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
-    assert res.json()["remembered_for_shape"] is False
+    assert res.json()["sheets"][0]["remembered_for_shape"] is False
 
 
 # ---------------------------------------------------------------

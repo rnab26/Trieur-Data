@@ -8,3 +8,6 @@ lxml
 python-calamine
 pdfplumber
 streamlit-sortables
+fastapi
+uvicorn
+python-multipart

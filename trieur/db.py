@@ -600,3 +600,139 @@ def get_active_column_set(client: Client, profile: dict) -> dict | None:
         return None
     res = _td(client, "user_master_column_sets").select("*").eq("id", set_id).limit(1).execute()
     return res.data[0] if res.data else None
+
+
+# ---------------------------------------------------------------
+# Staging du pipeline "Trieur de Data" (import -> mapping colonnes ->
+# filtre/dedup -> export, onglets 1-4 encore à porter vers FastAPI) --
+# voir supabase/migrations/0010_pipeline_staging.sql et PROJECT_LOG.md
+# ("Migration React", décision d'architecture du 2026-09-18). Ces
+# fonctions remplacent ce que `st.session_state` portait jusqu'ici
+# (all_sheets/final_df/filtered_df) : un backend FastAPI stateless n'a
+# rien d'équivalent, donc l'état intermédiaire passe désormais par ces
+# deux tables scratch (TTL 24h, jamais une donnée permanente -- la
+# donnée permanente reste `trieur_data.records`, écrite seulement à la
+# validation finale du pipeline). Pas encore appelées par une route API
+# (portage des onglets 2-4 non commencé) -- juste la couche de données.
+# ---------------------------------------------------------------
+
+def create_pipeline_session(client: Client, org_id: str, created_by: str, source_filename: str | None = None) -> dict:
+    """Ouvre une nouvelle session de pipeline (étape import) -- statut
+    initial 'importing', expire par défaut 24h après création (colonne
+    générée côté SQL, voir migration 0010). `row_count` est mis à jour
+    ensuite par `append_pipeline_rows`, jamais fourni ici (il n'y a
+    encore aucune ligne à l'ouverture de la session)."""
+    res = _td(client, "pipeline_sessions").insert({
+        "org_id": org_id,
+        "created_by": created_by,
+        "source_filename": source_filename,
+    }).execute()
+    return res.data[0]
+
+
+def delete_expired_pipeline_sessions_for_org(client: Client, org_id: str) -> int:
+    """Nettoie les sessions de pipeline expirées (TTL 24h, colonne
+    `expires_at`) de CET environnement seulement -- appelé opportunément
+    au début de la création d'une nouvelle session (voir
+    api/main.py:create_pipeline_session_endpoint), pour borner le
+    problème "les sessions abandonnées ne sont jamais nettoyées" sans
+    dépendre d'une tâche planifiée externe (revue PR #24, point #8).
+
+    Volontairement PAS `trieur_data.cleanup_expired_pipeline_sessions()`
+    (le RPC SECURITY DEFINER de la migration 0010) : ce nettoyage-ci
+    passe par le client normal de l'appelant, scopé à son propre org_id,
+    permis nativement par la policy RLS `pipeline_sessions_rw` (un membre
+    peut déjà supprimer les sessions de sa propre org) -- pas besoin d'un
+    rôle privilégié. Le RPC cross-org reste réservé à service_role/pg_cron
+    (voir migration 0011) : un vrai nettoyage global periodique serait
+    préférable à long terme, mais suppose une tâche planifiée externe
+    (pg_cron ou un scheduler type Render Cron Job appelant ce RPC avec la
+    clé service_role) -- décision d'infra hors périmètre de ce correctif."""
+    from datetime import datetime, timezone
+
+    res = (
+        _td(client, "pipeline_sessions")
+        .delete()
+        .eq("org_id", org_id)
+        .lt("expires_at", datetime.now(timezone.utc).isoformat())
+        .execute()
+    )
+    return len(res.data or [])
+
+
+def get_pipeline_session(client: Client, session_id: str) -> dict | None:
+    """Une session de pipeline, ou `None` si elle n'existe plus --
+    supprimée par `cleanup_expired_pipeline_sessions()` (TTL dépassée) ou
+    jamais créée dans cette organisation (RLS). L'appelant doit traiter
+    ce cas comme "session introuvable/expirée", pas comme une erreur
+    serveur."""
+    res = _td(client, "pipeline_sessions").select("*").eq("id", session_id).limit(1).execute()
+    return res.data[0] if res.data else None
+
+
+def update_pipeline_session_status(client: Client, session_id: str, status: str) -> None:
+    """Fait avancer une session d'une étape à l'autre du pipeline
+    (importing -> mapped -> filtered -> exported). Ne valide pas la
+    valeur ici -- la contrainte `check` de la migration 0010 est la seule
+    source de vérité, pour ne jamais avoir deux listes de statuts
+    valides qui divergent."""
+    _td(client, "pipeline_sessions").update({"status": status}).eq("id", session_id).execute()
+
+
+def append_pipeline_rows(client: Client, session_id: str, rows: list[dict], start_index: int = 0) -> int:
+    """Ajoute des lignes à une session de pipeline, à partir de
+    `start_index` (0-based, voir `pipeline_rows.row_index`) -- permet un
+    import par lots (fichier volumineux envoyé en plusieurs appels) sans
+    jamais recalculer l'index depuis le nombre de lignes déjà en base à
+    chaque appel (l'appelant connaît déjà sa position dans le fichier
+    source). Met aussi à jour `pipeline_sessions.row_count` en conséquence
+    -- une seule source de vérité pour ce compteur, jamais recalculé par
+    un `count` séparé côté appelant. Retourne le nombre de lignes
+    insérées."""
+    if not rows:
+        return 0
+    payload = [
+        {"session_id": session_id, "row_index": start_index + i, "data": row}
+        for i, row in enumerate(rows)
+    ]
+    _td(client, "pipeline_rows").insert(payload).execute()
+    session = get_pipeline_session(client, session_id)
+    new_count = (session["row_count"] if session else 0) + len(rows)
+    _td(client, "pipeline_sessions").update({"row_count": new_count}).eq("id", session_id).execute()
+    return len(rows)
+
+
+def list_pipeline_rows(client: Client, session_id: str, limit: int = LIST_PAGE_SIZE, offset: int = 0) -> list[dict]:
+    """Lignes d'une session de pipeline, dans l'ordre du fichier importé
+    d'origine (`row_index`, pas l'ordre d'insertion Postgres) -- même
+    convention de pagination que `list_records` (`LIST_PAGE_SIZE`), pour
+    ne pas charger des millions de lignes en une seule réponse HTTP."""
+    res = (
+        _td(client, "pipeline_rows")
+        .select("id, row_index, data")
+        .eq("session_id", session_id)
+        .order("row_index")
+        .limit(limit)
+        .offset(offset)
+        .execute()
+    )
+    return res.data or []
+
+
+def update_pipeline_row_data(client: Client, row_id: str, data: dict) -> None:
+    """Remplace entièrement le jsonb d'une ligne de pipeline déjà en
+    staging -- utilisé par l'étape de mapping (onglet 2, voir api/main.py)
+    pour réécrire chaque ligne avec les clés COLONNES MAÎTRES une fois le
+    mapping appliqué. `data` remplace tout le contenu existant (même
+    convention que `update_record`) : l'appelant construit le dict final,
+    pas un patch partiel."""
+    _td(client, "pipeline_rows").update({"data": data}).eq("id", row_id).execute()
+
+
+def delete_pipeline_session(client: Client, session_id: str) -> None:
+    """Supprime une session de pipeline et toutes ses lignes (cascade,
+    voir migration 0010) -- abandon explicite du pipeline en cours par
+    l'utilisateur, distinct du nettoyage automatique par TTL
+    (`cleanup_expired_pipeline_sessions`, appelé séparément, jamais
+    depuis cette fonction)."""
+    _td(client, "pipeline_sessions").delete().eq("id", session_id).execute()

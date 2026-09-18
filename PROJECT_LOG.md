@@ -1271,3 +1271,1194 @@ pipeline). La CI a connu une panne côté plateforme GitHub Actions
 voir `CLAUDE.md` section "Exécution autonome".
 
 **Notes / À faire** : (rien en attente)
+
+---
+
+## Migration React (branche `feature/react-migration`, en cours)
+
+**Quoi** : bascule progressive de l'interface Streamlit vers une SPA
+React, sans toucher à l'app Streamlit actuelle (les deux tournent en
+parallèle sur la même base Supabase pendant la transition).
+
+**État (2026-09-17, scaffolding initial)** :
+- `api/main.py` : API REST FastAPI au-dessus de `trieur/db.py` (aucune
+  logique dupliquée) — orgs, tableau de bord, clients (liste paginée
+  avec recherche/filtres sur le lot chargé, lecture, modification),
+  import CSV/Excel, colonnes maîtres (lecture ouverte, écriture admin),
+  vues enregistrées (créer/lister/supprimer). Auth par jeton Supabase
+  (`Authorization: Bearer <token>`), un client Supabase neuf par
+  requête (pas le singleton `@st.cache_resource` de Streamlit — évite
+  une fuite de jeton entre requêtes concurrentes).
+- `frontend/` : Vite + React 19 + TypeScript strict + Tailwind v4,
+  composants façon shadcn/ui faits main. Auth Supabase, écran "Base de
+  données" (switcher d'organisation, recherche, tableau paginé,
+  édition d'un client en modal avec états chargement/vide/erreur).
+- Vérifié ce soir : suite de tests complète (`python -m pytest`) —
+  **169 tests**, dont les 19 nouveaux de `tests/test_api.py` (faux
+  client Supabase, aucun réseau) : tous passent. 1 test E2E
+  (`test_master_columns_localstorage_fallback`) échoue de façon
+  **intermittente** (~1 fois sur 3) — confirmé flaky **préexistant**,
+  reproduit à l'identique sur `main` (commit `e6b54c8`, code inchangé),
+  donc sans lien avec ce chantier ; pas corrigé ici, à traiter comme
+  chantier de fiabilisation des tests séparément si ça agace.
+  `cd frontend && npm run build` : succès (`tsc -b && vite build`,
+  exit 0, aucun warning).
+- Comparé `api/main.py` et `frontend/src/lib/api.ts` +
+  `screens/*.tsx` endpoint par endpoint (méthode, chemin, noms de
+  champs) : aucune incohérence trouvée.
+- Confirmé : `views/` et `app.py` (l'app Streamlit live) non touchés —
+  seuls `api/`, `frontend/`, `requirements*.txt` et `tests/test_api.py`
+  ajoutés.
+- Branche poussée sur `origin/feature/react-migration`. **Pas mergée
+  sur `main`, pas de PR** — migration en cours, pas prête à remplacer
+  le site en production.
+
+**État (2026-09-17, suite — import + colonnes maîtres)** :
+- `api/main.py` : `POST /orgs/{id}/import` accepte maintenant
+  `dry_run=true` — lit le fichier (pandas, comme à l'import réel) et
+  renvoie colonnes détectées + aperçu (10 lignes) + colonnes inconnues,
+  **sans rien écrire en base**. Sert l'aperçu React avant confirmation
+  sans dupliquer la lecture CSV/Excel côté navigateur (et sans y
+  installer de lib de parsing Excel : `xlsx`/SheetJS a des CVE non
+  corrigées — écarté, préféré une extension de l'endpoint existant).
+  Ajout de `GET /me` (profil courant, dont `is_super_admin`) — le
+  frontend en a besoin pour proposer ou non les contrôles d'édition des
+  colonnes maîtres (le write endpoint les refusait déjà en 403, ceci
+  évite juste de les montrer à un membre simple).
+- Réordonner/renommer/supprimer une colonne maître ne nécessitait pas
+  de nouvel endpoint : `save_org_master_columns` (trieur/db.py) prend
+  déjà la liste complète ordonnée — le même
+  `POST /orgs/{id}/master-columns` (déjà réservé admin) suffit, on lui
+  renvoie chaque fois la liste modifiée.
+- `frontend/` : deux nouveaux écrans dans "Base de données" (onglets
+  Clients / Importer / Colonnes maîtres) —
+  `screens/ImportPanel.tsx` (upload, aperçu des colonnes + IBAN à
+  choisir, alerte si plusieurs colonnes ressemblent à un IBAN,
+  proposition d'ajouter les colonnes inconnues aux réglages si admin,
+  résultat import compté/alertes) et
+  `screens/MasterColumnsPanel.tsx` (liste des colonnes ; admin :
+  renommer/réordonner/supprimer avec confirmation/ajouter ; non-admin :
+  lecture seule). États chargement/vide/erreur traités sur les deux.
+- Vérifié : `python3 -m pytest tests/test_api.py -q` → **25 passed**
+  (dont 6 nouveaux tests : dry_run n'écrit rien, import réel, gate
+  admin sur l'ajout de colonnes inconnues, `/me`). Suite complète
+  (`python3 -m pytest -q`) → **175 passed**. `cd frontend && npm run
+  build` → succès (`tsc -b && vite build`, exit 0).
+- `views/` et `app.py` non touchés.
+
+**Reste à faire (portage des écrans Streamlit vers React)** — au-delà
+de "Base de données" (liste/recherche/édition/import/colonnes
+maîtres) livré :
+- [x] Import CSV/Excel (aperçu colonnes, choix IBAN, colonnes
+  inconnues → ajout aux colonnes maîtres) — livré 2026-09-17.
+- [x] Gestion des colonnes maîtres (UI ajout/renommage/réordonnage/
+  suppression, admin ; lecture seule sinon) — livré 2026-09-17.
+- [x] Vues enregistrées (UI créer/lister/appliquer/supprimer) — livré
+  2026-09-17 (voir suite ci-dessous).
+- [x] Tableau de bord par environnement + badge d'alertes de doublon —
+  livré 2026-09-17.
+- [x] Modification/suppression multiple (sélection multi-lignes) —
+  livré 2026-09-18 (voir 4e incrément ci-dessous).
+- [x] Recherche avancée façon Google Sheets (filtres par colonne
+  combinés) — livré 2026-09-17 (`ColumnFilters.tsx`), branché sur
+  `col_filters` déjà exposé par l'API.
+- [x] Alertes de doublon IBAN avec diff (résolution) — livré
+  2026-09-18 (voir 4e incrément ci-dessous).
+- [x] Export direct depuis la base (CSV/Excel) — livré 2026-09-18
+  (voir 4e incrément ci-dessous).
+- [x] Historique court par ligne modifiée — déjà exposé par l'API
+  existante (`_build_rows`/`_resolve_modifier_names`), affiché comme
+  colonne dans le tableau React ; vérifié 2026-09-18, rien à ajouter.
+- [x] Diff au réimport (ré-import d'un fichier déjà présent) — audité
+  2026-09-18 : **ce n'est pas une fonctionnalité distincte**, c'est le
+  même mécanisme que les alertes de doublon IBAN ci-dessus. Dans
+  Streamlit, `import_dataframe` (`trieur/db.py`) crée une
+  `dedup_alert` dès qu'une ligne réimportée matche un IBAN déjà en
+  base (`find_iban_matches`), et c'est cette même alerte qui affiche
+  le diff champ par champ (`diff_rows`, `views/tab_database.py`) —
+  il n'y a aucun deuxième diff séparé au moment de l'import lui-même.
+  Côté React, `DedupAlertsPanel.tsx` réutilise déjà `diff_rows` via
+  `GET .../dedup-alerts` (`api/main.py`) : rien à porter, la case
+  précédente était trop prudente. Aucun code ajouté pour ce point.
+- [ ] Les onglets "Trieur de Data" eux-mêmes (au-delà de la Base de
+  données) : tout ce qui vit dans les autres tabs de `app.py`/`views/`
+  (import/mapping/aperçu/filtrage/export propres à Trieur de Data) et
+  n'a pas encore d'équivalent React ni d'endpoint API dédié. **Scoping
+  fait 2026-09-18 (recherche/planning, aucun code)** — voir section
+  "Scoping des 4 onglets Streamlit restants" ci-dessous pour le détail
+  onglet par onglet et les deux points transverses (session serveur,
+  progression des tâches longues) à trancher avant de commencer le
+  portage.
+
+**État (2026-09-17, suite — filtres par colonne + vues enregistrées +
+tableau de bord)** :
+- Découverte : côté API les trois fonctionnalités étaient déjà prêtes
+  (`col_filters` sur `GET .../records`, `GET/POST/DELETE
+  .../saved-views`, `GET .../dashboard` avec `alerts_pending` via
+  `list_dedup_alerts`) — aucun changement API nécessaire, seul le
+  frontend manquait.
+- `frontend/` : `ColumnFilters.tsx` (opérateur
+  contient/ne contient pas/égal à/vide/non vide + valeur, combinés en
+  ET), `SavedViews.tsx` (lister/enregistrer/appliquer/supprimer une
+  vue), `DashboardPanel.tsx` (clients/alertes en attente/dernier
+  import, recalculé après import/édition), `DatabaseScreen.tsx`
+  (intègre les trois + sélecteur de colonnes affichées), `api.ts`
+  (`colFilters` sur `listRecords`, fonctions vues enregistrées,
+  correction d'un bug de types : `Dashboard.last_import` référençait
+  `filename`/`created_at` au lieu des vrais champs
+  `source_filename`/`imported_at`).
+- **Vérifié indépendamment ce soir** (deuxième session, relecture
+  ligne à ligne du code + comparaison API/frontend endpoint par
+  endpoint) :
+  - `python3 -m pytest -q` (suite complète) → **176 passed** (175
+    d'avant + 1 nouveau test `test_records_col_filters_operators`),
+    aucun flake observé cette fois. Le flake connu
+    (`test_master_columns_localstorage_fallback`, ~1 fois sur 3,
+    confirmé préexistant sur `main` par bisection) reste un chantier de
+    fiabilisation séparé, sans lien avec ce travail.
+  - `cd frontend && npm run build` → succès (`tsc -b && vite build`,
+    exit 0).
+  - `git diff --stat main...feature/react-migration -- views/ app.py`
+    → vide, confirmé : app Streamlit toujours non touchée.
+  - Relu `ColumnFilters.tsx`/`SavedViews.tsx`/`DashboardPanel.tsx`/
+    `DatabaseScreen.tsx` contre `api/main.py` et `api.ts` : méthodes
+    HTTP, chemins, noms de champs (`source_filename`/`imported_at`,
+    `col_filters`, `visible_cols`) tous cohérents — aucune divergence
+    trouvée.
+  - Piège des valeurs falsy (0/''/false traité comme "vide") vérifié
+    spécifiquement : `_matches_filter` (`views/tab_database.py`) juge
+    "vide"/"non vide" sur `value is None or value == ""`, pas sur
+    `not value` — un `ENFANTS: 0` reste "non vide", couvert par le
+    nouveau test. Côté affichage, `DashboardPanel` et le tableau de
+    `DatabaseScreen` utilisent JSX direct / `== null` (jamais `||` ou
+    `!value`) — un compteur à 0 s'affiche bien "0", jamais vide ni
+    coincé en "chargement". **Aucun bug trouvé, rien à corriger.**
+- Poussé sur `origin/feature/react-migration` (commit `<voir git log`
+  au moment du push). Toujours pas mergé sur `main`, pas de PR.
+
+**État (2026-09-18, 4e incrément — sélection multiple, alertes de
+doublon avec diff, export, historique par ligne)** :
+- `api/main.py` : `DELETE /orgs/{org_id}/records` (suppression
+  groupée) et `PATCH /orgs/{org_id}/records/bulk` (modification d'UN
+  SEUL champ pour toute la sélection), tous deux en boucle sur
+  `delete_record`/`get_record`/`update_record` (`trieur/db.py`) — même
+  logique que `views/tab_database.py`, aucune requête SQL en masse ni
+  logique dupliquée. `GET /orgs/{org_id}/dedup-alerts` (diff champ par
+  champ calculé côté serveur via `diff_rows()`, jamais réimplémenté en
+  TS) et `POST .../dedup-alerts/{id}/resolve` (garde d'appartenance à
+  l'org avant résolution). `GET /orgs/{org_id}/records/export?format=
+  csv|xlsx` (`StreamingResponse`, respecte recherche/filtres par
+  colonne/colonnes affichées — même règle de masquage que Streamlit :
+  colonne connue à l'écran mais décochée → masquée, colonne jamais vue
+  → incluse quand même).
+- `frontend/` : `BulkActions.tsx` (case par ligne + "tout sélectionner",
+  suppression à deux étapes avertissement/confirmer/annuler, édition
+  d'un champ pour la sélection) et `DedupAlertsPanel.tsx` (diff par
+  alerte, se cache s'il n'y a rien à traiter), intégrés à
+  `DatabaseScreen.tsx` ; boutons Export CSV/Excel. Historique par ligne
+  ("Modifié le"/"Modifié par") déjà affiché comme colonne, rien à
+  ajouter.
+- **Vérifié indépendamment ce soir** (session de vérification séparée,
+  relecture ligne à ligne + tests réels, pas seulement lu le rapport de
+  l'agent précédent) :
+  - `python3 -m pytest -q` (suite complète) → **191 passed**, aucun
+    échec, aucun flake observé cette fois (le flake connu
+    `test_master_columns_localstorage_fallback` ne s'est pas manifesté
+    sur ce run).
+  - `cd frontend && npm run build` → succès (`tsc -b && vite build`,
+    exit code 0, aucune erreur TypeScript).
+  - `git diff --stat main...feature/react-migration -- views/ app.py`
+    → vide, confirmé : app Streamlit toujours non touchée.
+  - `api/main.py` comparé à `frontend/src/lib/api.ts` endpoint par
+    endpoint (méthode, chemin, noms de champs) pour les 5 nouvelles
+    routes : aucune divergence trouvée.
+  - Flux suppression groupée (`BulkActions.tsx`) et résolution
+    d'alerte (`DedupAlertsPanel.tsx`) relus spécifiquement pour un bug
+    d'id/off-by-one : sélection et résolution sont indexées par
+    `record._id`/`alert.id` réels (jamais par position dans un
+    tableau) côté React comme côté API — **aucun bug trouvé**.
+  - Export (`export_org_records`, `api/main.py`) relu : appelle
+    `list_all_records` (tout l'historique, pas seulement la page
+    affichée) puis applique `_filter_by_search`/`_filter_by_columns`
+    avec les mêmes `search`/`col_filters` que la liste — **confirmé
+    que l'export respecte bien les filtres actifs**, pas un export
+    brut de toute la base.
+  - Aucun bug trouvé nécessitant un correctif — le travail de l'agent
+    précédent est passé la vérification sans modification.
+- Poussé sur `origin/feature/react-migration`, commit `b9faad9`.
+  Toujours pas mergé sur `main`, pas de PR.
+
+**Vérification indépendante (2026-09-18, 5e incrément — audit
+diff-réimport confirmé + scoping des 4 onglets restants)** :
+- Contrôle indépendant du travail de l'agent précédent (commit
+  `2be5115`, "Audite : diff au réimport = alertes de doublon IBAN, pas
+  une feature à part") — relecture du code, pas seulement du rapport :
+  - `python3 -m pytest -q` (suite complète) → **191 passed**, aucun
+    échec, flake connu `test_master_columns_localstorage_fallback` non
+    observé sur ce run.
+  - `cd frontend && npm run build` → succès (`tsc -b && vite build`,
+    exit code 0).
+  - `git diff --stat main...feature/react-migration -- views/ app.py`
+    n'était **pas vide** au premier essai (31/2/2 lignes sur
+    `app.py`/`tab2_import_mapping.py`/`tab_database.py`) — creusé avant
+    de conclure à une régression : la branche locale `main` de ce repo
+    était **en retard de 4 commits sur `origin/main`** (dont
+    précisément le fix CORS de l'upload et l'overlay de debug déjà
+    mentionnés par l'agent précédent). En comparant contre
+    `origin/main` (la vraie référence de prod) :
+    `git diff --stat origin/main feature/react-migration -- views/
+    app.py` → **vide, confirmé**. Pas une régression, un `main` local
+    obsolète. Rien à corriger.
+  - Conclusion : le travail du build agent précédent est validé sans
+    modification. Rien n'a cassé.
+- Commit `2be5115` poussé sur `origin/feature/react-migration` (ainsi
+  que les 6 commits précédents déjà en attente). Toujours pas mergé
+  sur `main`, pas de PR — migration en cours.
+
+**Scoping des 4 onglets Streamlit restants (2026-09-18, recherche
+seule, aucun code)** — Colonnes maîtres, Import & Mapping, Filtrage &
+Dedup, Export :
+- **Point transverse n°1 (le plus important, pas spécifique à un
+  onglet)** : Streamlit garde `all_sheets`, `final_df` et `filtered_df`
+  vivants dans le `session_state` d'un seul process Python, à travers
+  tout le pipeline import → mapping → filtre → export, sans jamais
+  renvoyer les données complètes au navigateur. Un backend FastAPI
+  stateless n'a pas cet équivalent par défaut : **il faut décider UNE
+  FOIS d'un mécanisme de session serveur** (cache par `session_id`,
+  fichiers temporaires, ou Redis) qui porte le DataFrame intermédiaire
+  entre les 3 étapes, **avant** de commencer à porter le moindre
+  onglet — sinon chaque onglet sera bricolé différemment. **Décision en
+  attente.**
+- **Point transverse n°2** : plusieurs opérations sont longues
+  (parsing Excel/CSV/PDF multi-millions de lignes, génération Excel,
+  sauvegarde CRM en masse) et Streamlit affiche une barre de
+  progression "gratuitement" à chaque rerun. En HTTP requête/réponse
+  classique, il faut un mécanisme explicite (job async + polling, ou
+  SSE/WebSocket) — sinon la barre de progression disparaît ou le
+  navigateur time-out. **Décision en attente.**
+- **Composant le plus dur à porter** : `streamlit-sortables` (onglet
+  Export) — un vrai double glisser-déposer (colonnes incluses/exclues)
+  avec son propre bug de mesure déjà contourné en JS dans le code
+  actuel. Pas du wrapping de logique Python : un composant frontend
+  neuf à construire (`dnd-kit` ou équivalent), avec un vrai enjeu
+  tactile/mobile (usage fréquent depuis le téléphone).
+- **Onglet 1 — Colonnes maîtres** (détail des fonctionnalités à
+  reproduire, pas encore construites) :
+  - Textarea listant les colonnes maîtres une par ligne, valeur
+    initiale = liste persistée.
+  - Bouton "Enregistrer" : dédoublonnage insensible à la casse en
+    gardant l'ordre, sauvegarde disque JSON (`user_master_columns.json`),
+    message de succès avec le compte, ou avertissement si la sauvegarde
+    disque échoue (hébergement sans disque persistant).
+  - Bouton "Réinitialiser" : revient à `DEFAULT_MASTER_COLUMNS` et
+    sauvegarde.
+  - Message d'erreur si la liste soumise est vide.
+  - Info-bulle fixe expliquant la détection automatique
+    TELEPHONE MOBILE/FIXE par contenu.
+  - Section additive visible seulement si connecté : jeux de colonnes
+    nommés liés au **compte** utilisateur (distincts des colonnes par
+    organisation de l'onglet Base de données) — select des jeux
+    existants, bouton Appliquer (applique + marque "jeu actif" pour la
+    prochaine connexion), bouton Supprimer avec confirmation, champ nom
+    + bouton Enregistrer le jeu courant sous un nouveau nom.
+  - Auto-chargement une fois par session du dernier jeu actif
+    enregistré sur le compte, dès la connexion.
+- **Onglets 2 (Import & Mapping), 3 (Filtrage & Dedup), 4 (Export)** :
+  scoping détaillé **pas encore reçu** dans cet incrément — seul
+  l'onglet 1 a été détaillé jusqu'ici côté fonctionnalités précises.
+  À compléter dans un prochain incrément avant de commencer le portage
+  (ne pas supposer que ces 3 onglets sont plus simples que le 1er sans
+  les avoir audités).
+- **Estimation globale du chantier complet** (4 onglets + fondation
+  session/progression) : **large** — probablement le plus gros morceau
+  du portage React après "Base de données".
+
+**Avancement global estimé** : ~55-60% de la migration complète. Fait :
+auth, écran Base de données avec liste/recherche/filtres par
+colonne/édition/import/colonnes maîtres/vues enregistrées/tableau de
+bord/sélection multiple (suppression + modification groupées)/alertes
+de doublon avec diff/export CSV-Excel/historique par ligne. Le "diff au
+réimport" n'était **pas** une fonctionnalité distincte — audité et
+clos 2026-09-18 (voir plus haut). Pour arriver à 100% il reste,
+**honnêtement** : l'audit détaillé (fait pour l'onglet 1, pas encore
+pour 2-4, voir scoping ci-dessus) puis le portage de **tous les autres
+onglets propres à "Trieur de Data"** (import/mapping/aperçu/filtrage/
+export au-delà de la Base de données), plus deux décisions
+d'architecture transverses à trancher avant de commencer (session
+serveur pour porter le pipeline import→mapping→filtre→export, et
+progression pour les opérations longues) — c'est probablement le plus
+gros morceau restant avant de pouvoir envisager un remplacement de
+l'app Streamlit en production.
+
+**Ne pas casser** : l'app Streamlit (`app.py`, `views/`) reste la seule
+en production tant que ce chantier n'est pas fini — ne jamais merger
+`feature/react-migration` sur `main` sans validation explicite de
+l'utilisateur, migration écran par écran.
+
+**État (2026-09-18, 6e incrément — écran Cockpit porté, vérifié
+indépendamment)** :
+- Cockpit (chantiers de dev de l'app elle-même, réservé admin) porté
+  en React par l'agent précédent (commit `8a345be`) : `api/main.py`
+  (`GET/POST /orgs/{id}/chantiers`, `GET/POST .../sections`, `PATCH
+  .../chantiers/{id}/status`, `GET/POST .../messages`, `GET/POST
+  .../todos`, `PATCH .../todos/{id}`, tous derrière
+  `require_cockpit_access`, même règle que `views/tab_cockpit.py`,
+  aucune logique dupliquée — tout appelle `trieur/db.py`),
+  `CockpitScreen.tsx` + `ChantierCard.tsx` (bandeau "Où j'en suis",
+  formulaires chantier/section, recherche + filtre statut, groupement
+  par section, todos + fil de discussion), nouvel onglet nav visible
+  admin seulement.
+- **Vérifié indépendamment ce soir** (relecture ligne à ligne, pas
+  seulement le rapport de l'agent précédent) :
+  - `python3 -m pytest -q` (suite complète) → **205 passed** (191
+    d'avant + 14 nouveaux tests Cockpit dans `tests/test_api.py`).
+  - `cd frontend && npm run build` → succès (`tsc -b && vite build`,
+    exit 0). `npm run lint` → seulement des warnings déjà présents sur
+    d'autres écrans (`set-state-in-effect`, `only-export-components`),
+    aucun nouveau problème.
+  - `git diff --stat main...feature/react-migration -- views/ app.py`
+    → non vide (31/2/2 lignes sur `app.py`/`tab2_import_mapping.py`/
+    `tab_database.py`), mais ce sont les commits **antérieurs** au
+    portage Cockpit (filet de diagnostic visible, déjà en place avant
+    ce chantier) — rien ajouté par le portage Cockpit lui-même à
+    `views/`/`app.py`. Confirmé sans régression.
+  - `api/main.py` comparé à `frontend/src/lib/api.ts` endpoint par
+    endpoint pour les 8 nouvelles routes Cockpit : méthode, chemin,
+    noms de champs — aucune divergence trouvée.
+  - **Bug réel trouvé et corrigé** : les 4 `<select>` natifs de
+    `CockpitScreen.tsx` (switch d'environnement, priorité, section,
+    filtre de statut) n'avaient pas de classe de couleur de texte
+    explicite (`text-[var(--foreground)]`), contrairement à celui de
+    `ChantierCard.tsx` qui l'avait déjà. Sur fond sombre
+    (`.cockpit-dark`), un `<select>` natif ne garantit pas d'hériter
+    la couleur du texte du conteneur dans tous les navigateurs — texte
+    illisible (sombre sur fond sombre) ou popup système clair par
+    défaut. Corrigé : couleur de texte ajoutée aux 4 `<select>`, plus
+    `color-scheme: dark` posé sur `.cockpit-dark` pour que le popup
+    natif du `<select>` lui-même rende sombre au lieu de reprendre le
+    thème clair du système. Rebuild + lint refaits après correctif :
+    toujours vert.
+- Poussé sur `origin/feature/react-migration`, commit `<voir hash du
+  push ci-dessous>`. Toujours pas mergé sur `main`, pas de PR.
+
+**Décision d'architecture prise (2026-09-18) — PAS ENCORE IMPLÉMENTÉE,
+prochaine session à démarrer par ceci** : réponse au point transverse
+n°1 ci-dessus (session serveur pour porter le pipeline import → mapping
+→ filtre → export des onglets 1-4 "Trieur de Data" vers FastAPI
+stateless).
+- **Choix retenu** : un schéma Postgres de *staging* côté Supabase
+  (`trieur_data.import_sessions` + `trieur_data.import_rows`, ou une
+  variante à une seule table de staging avec un tableau JSONB clé par
+  `session_id`) — **PAS Redis, PAS un cache fichier temporaire/parquet**.
+- **Pourquoi** (vérifié en lisant `api/main.py` + `trieur/db.py` +
+  `views/tab1-4` cette session, pas deviné) :
+  - L'écran "Base de données" (liste/fiche/tableau de bord/export) est
+    déjà le bon patron : chaque requête est sans état, la pagination
+    est réelle (offset/limit contre Supabase Postgres via
+    `list_records`/`count_records`), et l'export streame depuis
+    `list_all_records()` qui paginate sur toute la table. Cette partie
+    scale déjà bien, aucun changement d'architecture nécessaire là.
+  - Le vrai trou, confirmé en lisant `views/tab1-4` et l'endpoint
+    d'import existant (`api/main.py:437`, `import_records` — seule
+    pièce du pipeline à 4 étapes déjà portée en FastAPI, et elle
+    fusionne import + écriture en un seul appel atomique, sans étape
+    intermédiaire de mapping/filtre exposée via l'API) : les onglets
+    1-4 (import → mapping colonnes → filtre/dedup → export) vivent
+    entièrement dans `st.session_state` de Streamlit, comme un
+    DataFrame pandas en mémoire porté d'un rerun à l'autre
+    (`views/tab2_import_mapping.py` construit `all_sheets`/
+    `filtered_df` en mémoire ; `views/tab4_export.py` lit
+    `st.session_state.filtered_df` directement). Un backend FastAPI
+    sans état n'a rien d'équivalent à `session_state` — chaque requête
+    HTTP est un process neuf, donc ce pipeline à 4 étapes ne peut pas
+    survivre entre deux requêtes sans un mécanisme de persistance.
+  - Pourquoi Postgres plutôt que Redis ou fichier/parquet : le budget
+    annoncé est Supabase Starter + un service web Render à 7$/mois,
+    rien d'autre. Redis = un nouveau service managé (coût) ou du
+    self-host dans le même dyno Render (perd les données à chaque
+    redeploy/restart, ce qui annule l'intérêt ; les offres
+    gratuites/starter de Render n'incluent pas de Redis persistant
+    sans ressource payante séparée). Un cache fichier/parquet sur le
+    disque local de Render est **éphémère** sur cette plateforme — un
+    service web Render perd son disque local à chaque redeploy/restart/
+    scaling, donc ça ne survivrait même pas le temps d'un import →
+    export en plusieurs requêtes si un redeploy tombe entre les deux.
+    Postgres (déjà payé, déjà là) survit à tout ça nativement.
+- **Ce que ça implique concrètement pour la suite** (pas encore fait,
+  à faire par la prochaine session avant de porter les onglets 2-4) :
+  créer la migration Supabase pour `trieur_data.import_sessions`/
+  `trieur_data.import_rows` (ou la variante JSONB à une table), décider
+  du TTL/nettoyage des sessions d'import abandonnées, puis porter
+  l'étape mapping et l'étape filtre/dedup comme des endpoints qui
+  lisent/écrivent cette table de staging au lieu du DataFrame en
+  mémoire. Le point transverse n°2 (progression des tâches longues)
+  reste, lui, **toujours en attente** — non traité par cette décision.
+- **Statut clair pour éviter toute confusion** : ceci est une
+  **décision d'architecture actée, pas du code livré**. Aucune
+  migration, aucune table, aucun endpoint n'a été créé pour ça dans cet
+  incrément — uniquement le choix et sa justification, pour que la
+  prochaine session parte directement à l'implémentation au lieu de
+  re-débattre Redis vs Postgres vs fichiers.
+
+**Statut honnête de l'ensemble de la migration React (2026-09-18)** :
+l'écran "Base de données" est complet et solide (CRUD, recherche,
+filtres, import, colonnes maîtres, vues enregistrées, tableau de bord,
+actions groupées, alertes de doublon, export, historique) et l'écran
+"Cockpit" vient d'être porté et vérifié à son tour — ces deux écrans
+suivent déjà une bonne architecture (API stateless, pagination réelle
+côté Postgres). Ce qui reste est le morceau le plus gros et le moins
+avancé : les 4 onglets "Trieur de Data" eux-mêmes (import → mapping →
+filtre/dedup → export), dont le portage n'a même pas commencé — seul
+l'onglet 1 a été scopé en détail, et la décision d'architecture qui
+débloque les 3 autres (staging Postgres, ci-dessus) vient d'être prise
+mais reste entièrement à implémenter. Tant que ces 4 onglets ne sont
+pas portés, Streamlit reste la seule interface pour "Trieur de Data" en
+production — le Cockpit et la Base de données React ne remplacent
+qu'une partie de l'app, pas encore le cœur du pipeline de tri de
+données.
+
+**État (2026-09-18, staging Postgres implémenté — couche données
+seulement)** :
+- Migration `supabase/migrations/0010_pipeline_staging.sql` — deux
+  tables, appliquée pour de vrai (`mcp__Supabase__apply_migration`,
+  confirmé ensuite par une lecture réelle d'`information_schema` :
+  tables, colonnes et policies présentes) :
+  - `trieur_data.pipeline_sessions` (id, org_id, created_by, created_at,
+    expires_at TTL 24h par défaut, status
+    importing/mapped/filtered/exported/expired, source_filename,
+    row_count).
+  - `trieur_data.pipeline_rows` (id, session_id, row_index, data jsonb)
+    — table séparée plutôt qu'un unique jsonb sur `pipeline_sessions` :
+    l'étape 3 (filtre/dedup) doit pouvoir filtrer/mettre à jour des
+    lignes individuellement, une ligne Postgres par ligne importée le
+    permet nativement (même patron que `trieur_data.records` côté CRM).
+    `unique(session_id, row_index)`.
+  - RLS : `pipeline_sessions_rw`/`pipeline_rows_rw`, même patron
+    `is_org_member(org_id)` que le reste du schéma (`pipeline_rows`
+    passe par une sous-requête sur `pipeline_sessions`, comme
+    `chantier_messages_rw` le fait déjà pour `chantiers`).
+  - Nettoyage : fonction `trieur_data.cleanup_expired_pipeline_sessions()`
+    (supprime les sessions dont `expires_at < now()`, cascade sur les
+    lignes) — **aucun pg_cron créé**, juste la fonction prête à être
+    appelée (par un futur `cron.schedule`, ou par l'app elle-même) ;
+    commentée dans la migration avec les deux façons de l'appeler.
+- `trieur/db.py` : `create_pipeline_session`, `get_pipeline_session`,
+  `update_pipeline_session_status`, `append_pipeline_rows` (par lots,
+  `start_index` fourni par l'appelant, met à jour `row_count`),
+  `list_pipeline_rows` (paginé, `LIST_PAGE_SIZE`), `delete_pipeline_session`.
+  Aucune route API ne les appelle encore — uniquement la couche
+  données, pour que la prochaine session porte les onglets 2-4 dessus
+  sans redécider l'architecture.
+- `tests/test_db_pipeline.py` (9 tests, faux client Supabase, même
+  pattern que `test_db_import.py`/`test_db_saved_views.py`) : session
+  créée/lue/introuvable, ajout de lignes par lots avec `row_index`
+  continu, pagination, changement de statut, suppression.
+- Vérifié : `python3 -m pytest -q` → **213 passed**, 1 échec — le flake
+  déjà documenté et pré-existant `test_master_columns_localstorage_fallback`
+  (sans lien avec ce travail, voir plus haut dans ce journal).
+- **Reste à faire** (pas dans cet incrément, portage API des onglets
+  2-4) : endpoints FastAPI qui lisent/écrivent cette table de staging
+  pour les étapes mapping/filtre/export, et le point transverse n°2
+  (progression des tâches longues), toujours en attente.
+
+**État (2026-09-18, API pipeline — étape 1 import + mapping)** :
+- `api/main.py` : 3 nouvelles routes, couche fine sur `trieur/db.py`
+  (déjà en place ci-dessus) et sur la logique déjà écrite pour
+  l'onglet 2 (`trieur/io_excel.py`, `trieur/matching.py`), rien
+  réimplémenté :
+  - `POST /orgs/{org_id}/pipeline/sessions` (upload Excel/CSV) : lit le
+    fichier avec les lecteurs existants (moteurs calamine/openpyxl,
+    déduction d'en-tête absente), fusionne tous les onglets en une
+    seule session de staging (onglet d'origine gardé sous `_sheet` par
+    ligne, jamais proposé au mapping), renvoie `session_id` + colonnes
+    détectées + `unknown_columns` (vs colonnes maîtres de l'org) +
+    aperçu (10 lignes). PDF (relevés SEPA) hors périmètre de cette
+    route pour l'instant.
+  - `GET /orgs/{org_id}/pipeline/sessions/{id}` : statut + aperçu,
+    reconstruit les colonnes depuis les lignes en staging (pas de
+    colonne dédiée côté SQL) ; 404 si session d'un autre org ou
+    expirée/nettoyée (vérifié en plus de la RLS, même patron que
+    `_get_chantier_or_404`).
+  - `POST .../sessions/{id}/mapping` : `dry_run=true` renvoie la
+    suggestion d'auto-assignation (`trieur/matching.py:auto_assign_columns_fast`,
+    échantillonnée sur l'aperçu déjà chargé, pas tout le fichier) sans
+    rien écrire ; sans `dry_run`, applique le mapping (fourni, ou la
+    suggestion si omis) en réécrivant chaque ligne avec les clés
+    colonnes MAÎTRES, puis passe la session à `mapped`. Simplification
+    connue vs l'onglet 2 : deux colonnes source mappées sur la même
+    colonne maître -> la dernière écrase (pas de fusion "1ère valeur
+    non vide").
+  - `trieur/db.py` : ajout de `update_pipeline_row_data` (réécriture du
+    jsonb d'une ligne de staging) — seule fonction manquante pour que
+    l'endpoint mapping reste fin, pas d'appel direct à PostgREST depuis
+    `api/main.py`.
+- **Colonnes maîtres : PAS de nouvelle liste.** Vérifié que
+  `trieur/persistence.py` (`load_master_columns`, fichier JSON local)
+  est un reliquat pré-multi-tenant de l'app Streamlit — global au
+  process, pas par organisation — donc un concept différent de
+  `trieur_data.organizations.master_columns` (par org, déjà utilisé
+  par le CRM). Le pipeline étant lui aussi par org, il réutilise
+  directement `GET/POST /orgs/{org_id}/master-columns` (déjà en place) :
+  aucune route ajoutée pour ça.
+- `tests/test_api.py` : 13 nouveaux tests (upload, détection colonnes,
+  aperçu, 404 cross-org, dry_run vs application du mapping, mapping
+  auto par défaut, 400 si tout `(non assigne)`, 401/403). Fausse table
+  Supabase du fichier étendue pour accepter un insert en LISTE (lot de
+  lignes, comme `append_pipeline_rows`) et poser les mêmes valeurs par
+  défaut SQL (`status`, `row_count`) qu'un insert Postgres réel.
+- Vérifié : `python3 -m pytest -q` → **226 passed**, 1 échec — même
+  flake pré-existant `test_master_columns_localstorage_fallback`, sans
+  lien (13 tests en plus des 213 précédents, tous verts).
+- **Reste à faire** : porter les onglets 3-4 (filtre/dedup, export) sur
+  cette même table de staging ; PDF (relevés SEPA) pas encore branché
+  sur `POST .../pipeline/sessions` ; le point transverse n°2
+  (progression des tâches longues) reste ouvert.
+
+**État (2026-09-18, écran React "Trieur de Data" — étape 1 import +
+mapping) + vérification indépendante de tout l'incrément staging**,
+implémenté (étape 1 : import + mapping) :
+- `frontend/src/screens/PipelineScreen.tsx` : nouvel écran, mêmes
+  routes que l'API ci-dessus (`createPipelineSession`,
+  `suggestPipelineMapping`, `applyPipelineMapping` dans
+  `frontend/src/lib/api.ts`) — upload → aperçu colonnes/colonnes
+  inconnues → mapping colonne par colonne (suggestion auto en
+  `dry_run`, éditable) → "Construire". Une étape affichée à la fois,
+  colonnes maîtres réutilisées via `get/setMasterColumns` (aucune
+  deuxième liste créée). États chargement/vide/erreur/succès traités à
+  chaque appel. `views/` et `app.py` non touchés.
+- **Vérification indépendante** (pas seulement les rapports des 3
+  agents de ce run) :
+  - Supabase (`mcp__Supabase__list_tables` + requête directe sur
+    `pg_tables`/`pg_policies`, projet `bexiyvmdbxcwxasgslxp`) :
+    `trieur_data.pipeline_sessions` et `trieur_data.pipeline_rows`
+    existent réellement, `rowsecurity = true` sur les deux, policy
+    `is_org_member(org_id)` (directe pour `pipeline_sessions`, via
+    sous-requête sur la session pour `pipeline_rows`) — confirmé, pas
+    supposé.
+  - Suite complète : `python3 -m pytest -q` → **226 passed** (comme
+    rapporté), + 1 échec sur `test_master_columns_localstorage_fallback`.
+    Creusé : ce test est **flaky** (course sur le délai fixe de 4s
+    avant lecture du DOM), reproduit aussi bien en échec qu'en succès
+    sur des commits d'AVANT ce run (`720af64`, avant les 3 commits de
+    cet incrément) et systématiquement en succès sur le commit de base
+    `2f8133f` (pris isolément, plusieurs runs) — pas une régression de
+    cet incrément, pré-existant sur la branche, non corrigé ici (hors
+    périmètre : chantier de fiabilisation des tests E2E séparé si ça
+    agace).
+  - `cd frontend && npm run build` → succès, exit 0 (`tsc -b && vite
+    build`).
+  - `git diff --stat main...feature/react-migration -- views/ app.py`
+    → seuls 3 fichiers, tous depuis un commit d'AVANT ce run
+    (`8b39500`, filet de diagnostic) — confirmé qu'aucun des 3 commits
+    de cet incrément (`165c185`, `f191285`, `51167ee`) n'y touche.
+  - Relu `api/main.py` (endpoints pipeline) et
+    `frontend/src/lib/api.ts`/`PipelineScreen.tsx` côte à côte :
+    aucune incohérence de contrat (noms de champs, chemins, sentinelle
+    `(non assigne)`).
+  - Scoping org_id : `require_org_access` (dépendance FastAPI, membre
+    ou super-admin) sur les 3 routes + `_get_pipeline_session_or_404`
+    (session d'un AUTRE org → 404, jamais une fuite) en plus de la RLS
+    Supabase (défense en profondeur). Un test couvrait déjà le cas sur
+    le GET (`test_pipeline_session_get_wrong_org_is_404`) ; **ajouté
+    l'équivalent manquant sur le POST mapping**
+    (`test_pipeline_mapping_wrong_org_is_404`, vérifie 404 ET que les
+    lignes ne sont pas réécrites) — bug de couverture trouvé et
+    corrigé, pas un bug de sécurité réel (le code appelait déjà le même
+    garde-fou), mais non testé jusqu'ici sur cette route précise.
+  - Suite après ajout du test : `python3 -m pytest -q` →
+    **227 passed**, même flake pré-existant, sans lien.
+  - Poussé : commit `20a433a` (test ajouté ci-dessus + cette mise à
+    jour du journal) sur `origin/feature/react-migration`, dans le même
+    push que les 3 commits de l'incrément (`165c185`, `f191285`,
+    `51167ee`), déjà locaux et non poussés avant cette vérification.
+- **Statut honnête de l'ensemble de la migration React** : Base de
+  données + Cockpit restent complets. Pipeline "Trieur de Data" :
+  étape 1 (import + mapping) livrée et vérifiée de bout en bout
+  (staging Postgres + API + écran React) ; étapes 2-3 du pipeline
+  (filtre/dédoublonnage, export) et les détails d'UI propres aux
+  onglets 1/3/4 encore Streamlit-only restent à porter. Estimation
+  honnête de complétion globale de la migration : **~70 %** (les deux
+  écrans les plus utilisés au quotidien — Base de données, Cockpit —
+  et la première moitié du pipeline sont solides ; le reste du
+  pipeline, le plus gros morceau restant, n'est pas commencé au-delà
+  de cette étape 1).
+
+**État (2026-09-18, 7e incrément — barre de progression par chantier +
+vérification indépendante d'un rapport d'agent contredit par un autre)** :
+- Réponse à la demande explicite de l'utilisateur ("une barre de
+  progression constante sur chaque chantier") : déjà livrée dans cette
+  même branche, commit `6dfb45c` (avant cette vérification) —
+  `frontend/src/screens/ChantierCard.tsx` affiche sous chaque carte une
+  barre (fait/total, calcul client à partir des `chantier_todos` déjà
+  chargés par carte, aucun appel API ni changement backend) + le texte
+  "X/Y points traités". Diff de 14 lignes, un seul fichier, revu à
+  l'instant : correct, pas de division par zéro (condition
+  `todos.length > 0` avant le calcul).
+- **Rapport contradictoire entre deux agents de ce run** : un agent
+  "API" affirmait avoir livré les étapes 2-3 du pipeline (filtre/dedup +
+  export sur les sessions pipeline) ; un agent "frontend" contestait
+  cette affirmation. **Vérifié indépendamment, l'agent frontend avait
+  raison** :
+  - `grep` sur les routes de `api/main.py` : seulement 3 routes
+    `/orgs/{id}/pipeline/sessions...` (import, aperçu, mapping) —
+    aucune route `filter` ni `export` sous ce chemin.
+  - `git fetch origin` + `git log origin/feature/react-migration` :
+    dernier commit distant = `6dfb45c` (la barre de progression),
+    identique au HEAD local. Aucun commit de filtre/export pipeline,
+    ni local ni distant.
+  - `frontend/src/lib/api.ts` : aucun appel `pipeline`+`filter`/`export`
+    non plus — le frontend n'appelle que les 3 routes qui existent
+    réellement (`createPipelineSession`, `suggestPipelineMapping`,
+    `applyPipelineMapping`). Pas de divergence de contrat, parce que
+    rien de nouveau n'a été construit des deux côtés.
+  - Conclusion : l'affirmation "un agent API vient d'ajouter
+    filtre/export pour les sessions pipeline" était **fausse** —
+    probablement une hallucination de rapport dans le run précédent.
+    Les étapes 2-3 du pipeline restent non commencées au-delà de
+    l'étape 1 (import + mapping).
+- **Vérification complète refaite ce soir** :
+  - `python3 -m pytest -q` → **228 passed** au 2e run (1er run : 227
+    passed + 1 échec sur `test_master_columns_localstorage_fallback`,
+    même flake déjà documenté plus haut dans ce journal, reproduit en
+    échec puis en succès sans aucun changement de code entre les deux
+    runs — confirmé non lié à cet incrément).
+  - `cd frontend && npm run build` → succès, exit 0.
+  - `git diff --stat main...feature/react-migration -- views/ app.py` →
+    3 fichiers (`app.py`, `tab2_import_mapping.py`, `tab_database.py`),
+    tous depuis le commit `8b39500` (filet de diagnostic upload,
+    antérieur à cet incrément) — rien ajouté par cet incrément à
+    `views/`/`app.py`. `main` (`635fcde`) n'a reçu aucun commit de cette
+    migration, comme prévu — le site Streamlit en production reste
+    inchangé.
+  - Relecture de `_filter_by_columns`/`_matches_filter`
+    (`views/tab_database.py`, réutilisés par `api/main.py` pour
+    `/records` et `/records/export`) : le bug de classe "valeur fausse
+    traitée comme vide" (0/''/false) n'est **pas présent** — l'opérateur
+    "vide" teste `value is None or value == ""` explicitement, jamais
+    `not value`, et c'est couvert par
+    `test_filter_by_columns_vide_does_not_treat_zero_as_empty`.
+  - Scoping `org_id` sur les 3 routes pipeline existantes :
+    `require_org_access` en dépendance FastAPI sur les 3, +
+    `_get_pipeline_session_or_404` qui traite une session d'un autre org
+    comme introuvable (404). Déjà testé (`test_pipeline_session_get_wrong_org_is_404`,
+    `test_pipeline_mapping_wrong_org_is_404`) — rien à ajouter, les
+    étapes 2-3 n'existant pas encore, il n'y a pas de nouvelle route à
+    scoper.
+  - **Repéré, hors périmètre de cet incrément** : 3 branches locales
+    (`main-tmp`, `main-tmp2`, `main-tmp4`) non poussées sur `origin`,
+    contenant des correctifs de production (upload CORS, version
+    Python, keep-alive) apparemment issus d'un autre chantier de
+    fiabilisation du site Streamlit en direct. Pas touché — ne fait pas
+    partie de cette demande, signalé pour que l'utilisateur sache que
+    ces branches existent et décide s'il faut les fusionner ou les
+    supprimer.
+- Rien à committer côté code pour cet incrément (la barre de
+  progression était déjà poussée) — ce journal est la seule mise à
+  jour, poussée directement sur `origin/feature/react-migration`.
+- **Statut honnête de l'ensemble de la migration React (toujours
+  ~70 %, pas d'écran supplémentaire porté ce soir)** :
+  - **Fait et vérifié** : Base de données (complet) ; Cockpit (complet,
+    y compris la barre de progression par chantier demandée
+    aujourd'hui) ; Pipeline "Trieur de Data" étape 1 (import +
+    mapping/onglet 2) livrée et testée de bout en bout.
+  - **Reste pour 100 %** :
+    - Pipeline étapes 2-3 (onglets 3-4 Streamlit : filtre/dédoublonnage
+      avec les alertes de doublons, export final depuis une session
+      pipeline) — pas commencées, c'est le plus gros morceau restant.
+    - Détails d'UI propres à l'onglet 1 (gestion fine des colonnes
+      maîtres côté Streamlit — renommage, réordonnancement, mémoire
+      liée au compte) pas encore vérifiés un par un côté React au-delà
+      de la réutilisation basique `get/setMasterColumns`.
+    - Options avancées des onglets 3-4 si certaines ont été simplifiées
+      lors du portage (aucune n'existe encore, donc à valider au moment
+      du portage, pas avant).
+    - L'équivalent du glisser-déposer `streamlit-sortables` (réordonner
+      des éléments à la souris/au doigt, utilisé quelque part dans
+      l'app Streamlit actuelle) — pas encore vérifié si un composant
+      React équivalent a été posé ; à confirmer écran par écran pendant
+      le portage des onglets 3-4.
+    - Le point transverse n°2 toujours ouvert : barre de progression
+      pour les opérations *longues* (upload/traitement d'un gros
+      fichier) — différente de celle par chantier livrée aujourd'hui,
+      demande une vraie architecture de suivi de tâche côté API
+      (polling ou SSE), pas commencée.
+  - **`main` non touché** : confirmé ce soir par `git diff`/`git log` —
+    le site Streamlit en production (branche `main`, dernier commit
+    `635fcde`) n'a reçu aucun commit de cette migration depuis son
+    démarrage. Aucun merge n'a eu lieu, aucune PR n'est ouverte.
+
+- **Pipeline étapes 2-3, tentative suivante — cette fois-ci réelle,
+  vérifiée indépendamment de zéro (2026-09-18, même soir)** : après le
+  faux rapport signalé ci-dessus, deux nouveaux agents ("API" puis
+  "frontend") ont retravaillé le même chantier. Vérification refaite
+  sans se fier à leurs rapports :
+  - `grep -n "pipeline" api/main.py` : les 3 routes existantes (import,
+    aperçu, mapping) **+ 2 nouvelles routes réelles** —
+    `GET /orgs/{org_id}/pipeline/sessions/{id}/rows` (ligne 687) et
+    `GET .../export` (ligne 716). Lues en entier : réutilisent
+    `_filter_by_search`/`_filter_by_columns` (`views/tab_database.py`,
+    mêmes fonctions que `/records`) et `export_csv_safe`/
+    `export_excel_safe` (`trieur/export.py`), sur toutes les lignes de
+    la session via un nouvel helper paginé `_all_pipeline_rows` — pas
+    juste l'aperçu (`PIPELINE_PREVIEW_SIZE`).
+  - `python3 -m pytest -q` (suite complète) → **238 passed, 2 warnings
+    in 26.38s**, exactement 228 (base de référence) + 10 nouveaux tests
+    pipeline filtre/export (`test_pipeline_rows_filter_*`,
+    `test_pipeline_rows_search`, `test_pipeline_rows_wrong_org_is_404`,
+    `test_pipeline_export_*`). Aucune régression, aucun flake cette
+    fois.
+  - `git log feature/react-migration -3 --oneline` → 2 nouveaux
+    commits réels : `2bc8763` (`api/main.py` +102 lignes,
+    `tests/test_api.py` +181 lignes) et `c580851`
+    (`frontend/src/lib/api.ts` +86, `frontend/src/screens/PipelineScreen.tsx`
+    +201/-8) — `git show --stat` sur chacun confirmé, correspond
+    exactement aux rapports des deux agents.
+  - `git diff --stat main...feature/react-migration -- views/ app.py` →
+    toujours les mêmes 3 fichiers que la vérification précédente
+    (`app.py`, `tab2_import_mapping.py`, `tab_database.py`), tous issus
+    du commit `8b39500` (antérieur, filet de diagnostic upload) — rien
+    ajouté par cet incrément à `views/`/`app.py`, `main` toujours
+    intact.
+  - Scoping `org_id` : `test_pipeline_rows_wrong_org_is_404` et
+    `test_pipeline_export_wrong_org_is_404` existent et passent — les 2
+    nouvelles routes utilisent `_get_pipeline_session_or_404`, comme
+    les 3 routes existantes.
+  - Bug de classe "valeur fausse traitée comme vide" (0/''/false) :
+    absent — `_matches_filter` teste explicitement
+    `value is None or value == ""`, jamais `not value` ; couvert en
+    plus par le nouveau test
+    `test_pipeline_rows_filter_non_vide_traite_zero_comme_une_vraie_valeur`.
+  - `cd frontend && npm run build` → succès, **exit 0** (tsc + vite,
+    aucune erreur TypeScript).
+  - **Conclusion : travail réel cette fois, contrairement à la
+    tentative précédente.** Poussé sur `origin/feature/react-migration`
+    (`git push`), `main` non touché.
+  - **Statut honnête de la migration React : ~78 %**
+    (Base de données + Cockpit + Pipeline étapes 1-2-3 complets et
+    testés ; reste : détails fins onglet 1 déjà listés plus haut,
+    glisser-déposer `streamlit-sortables` à confirmer côté React, barre
+    de progression pour les uploads longs — pas commencée).
+
+**État (2026-09-18, 8e incrément — 3 finitions demandées : jeux de
+colonnes personnels, ordre/sélection colonnes à l'export pipeline,
+mesure réelle du temps d'upload)** :
+- **1. Jeux de colonnes maîtres personnels (compte)** — livré :
+  `views/tab1_colonnes_maitres.py:_render_account_memory` portée en
+  React. `trieur/db.py` (`list_user_column_sets`/`save_user_column_set`/
+  `delete_user_column_set`/`set_active_column_set`) existait déjà
+  (audit précédent confirmé) mais **sans aucune route API ni test** --
+  ajouté `GET/POST /me/column-sets`, `POST /me/column-sets/{id}/apply`,
+  `DELETE /me/column-sets/{id}` (`api/main.py`), tous scopés au compte
+  connecté (`user_id`, jamais un `org_id` -- ces jeux ne sont PAS ceux
+  de l'onglet Base de données). Garde de propriété avant delete/apply
+  (même patron que `delete_saved_view_endpoint`) : un `set_id` d'un
+  autre compte renvoie 404, jamais une suppression/lecture croisée.
+  Enregistrer ou appliquer un jeu marque le profil actif
+  (`set_active_column_set`, invalide déjà le cache `get_my_profile` côté
+  `trieur/db.py`) -- `/me` le renvoie immédiatement.
+  `frontend/src/screens/PersonalColumnSets.tsx` (nouveau) : liste des
+  jeux, application, suppression (confirmation), édition de la liste en
+  cours (ajout/suppression/réordonnancement flèches haut-bas -- même
+  patron que `MasterColumnsPanel.tsx` pour les colonnes d'organisation,
+  pas un deuxième composant réordonnable différent), enregistrement sous
+  un nom. **Auto-chargement une fois au montage** du dernier jeu actif
+  (`profiles.active_master_column_set_id` via `/me`), avec message
+  explicite ("rechargé automatiquement"). Intégré sous
+  `MasterColumnsPanel.tsx` (section additive, visible pour tout compte
+  connecté, pas seulement admin -- distinct de la gestion des colonnes
+  de l'organisation qui reste admin-only juste au-dessus). États
+  chargement/vide/erreur traités.
+- **2. Ordre et sélection des colonnes à l'export du pipeline** — livré :
+  équivalent du glisser-déposer `streamlit-sortables` de
+  `views/tab4_export.py`, mais en **flèches haut/bas + cases à cocher**
+  plutôt qu'un vrai drag-and-drop : décidé après lecture de
+  `tab4_export.py` (son propre contournement JS d'un bug de mesure du
+  composant, déjà signalé comme fragile dans ce journal) et parce que le
+  glisser-déposer HTML5 natif est peu fiable au toucher, alors que
+  l'utilisateur travaille surtout depuis son téléphone -- ce même patron
+  (flèches) est déjà en place pour les colonnes maîtres d'organisation
+  (`MasterColumnsPanel.tsx`), donc cohérent avec le reste de l'app plutôt
+  qu'une deuxième façon de faire la même chose. Aucune dépendance
+  nouvelle ajoutée (ni `dnd-kit` ni équivalent).
+  `api/main.py:export_pipeline_session_rows` : nouveau paramètre
+  `columns` (liste ordonnée, séparée par des virgules) -- une colonne
+  absente de la liste est exclue de l'export, l'ordre demandé est
+  respecté, une colonne demandée mais absente des données réelles est
+  ignorée silencieusement (jamais ajoutée vide) ; `columns` vide =
+  comportement précédent inchangé (toutes les colonnes, ordre
+  d'apparition) -- **rétrocompatible**. `frontend/src/lib/api.ts`
+  (`exportPipelineSessionRows` accepte `columns?: string[]`) et
+  `PipelineScreen.tsx` (nouvel état `colOrder`/`excludedCols`, fusionné
+  automatiquement avec les colonnes détectées à chaque changement de
+  filtre/session, jamais de colonne perdue silencieusement ; export
+  désactivé si tout est exclu, avec message explicite).
+- **3. Temps d'upload/traitement d'un gros fichier** — mesuré, PAS
+  d'architecture async construite (décision justifiée ci-dessous) :
+  - Mesuré réellement (pas supposé) : CSV généré localement, 50 000
+    lignes, 8 colonnes, ≈5,1 Mo
+    (`NOM,PRENOM,EMAIL,TELEPHONE,VILLE,ADRESSE,CP,IBAN`). Appel direct
+    des fonctions réelles de `api/main.py`
+    (`_parse_pipeline_file`/`_merge_pipeline_sheets`, celles utilisées
+    par `POST .../pipeline/sessions`) : **parse 0.107s + merge 0.506s =
+    0.613s total** pour 50 000 lignes -- le parsing/fusion pur est
+    négligeable, pas un problème en soi.
+  - **Ce que je n'ai PAS mesuré, honnêtement** : le temps réel des
+    écritures réseau vers Supabase. `append_pipeline_rows` est appelé en
+    boucle, **100 lots séquentiels** de 500 lignes
+    (`PIPELINE_APPEND_BATCH`) pour ce fichier de 50 000 lignes -- chaque
+    lot est un aller-retour HTTP synchrone vers PostgREST. Je n'ai pas
+    exécuté ce chemin contre le vrai projet Supabase (ça écrirait 50 000
+    lignes de test dans les tables de staging réelles sans demande
+    explicite pour ce test précis) -- **estimation, pas mesure** : même à
+    50-150ms par aller-retour (cas favorable, même région), 100
+    allers-retours séquentiels représentent déjà 5 à 15 secondes, et une
+    latence moins favorable dépasserait facilement la limite de
+    30-60s d'un proxy/reverse-proxy typique. C'est donc plausiblement un
+    **vrai temps d'attente synchrone de plusieurs secondes**, pas
+    juste de la prudence excessive.
+  - **Décision prise dans ce périmètre, avec la limite de temps de cet
+    incrément** : construire une vraie file d'attente asynchrone
+    (job + polling/SSE) sans avoir mesuré le vrai chiffre contre
+    Supabase aurait été de la sur-ingénierie sur une simple estimation.
+    À la place, livré ce qui aide déjà concrètement sans engager
+    d'architecture nouvelle : un **spinner + chrono en secondes**
+    pendant l'upload (`PipelineScreen.tsx`, état `uploadElapsedSec`,
+    `setInterval` 1s, message "un gros fichier peut prendre encore
+    quelques instants" au-delà de 8s) -- contrairement à ce qui était
+    supposé, **aucun spinner à chrono n'existait avant** sur cet écran
+    (juste un texte statique "Lecture du fichier…", vérifié par lecture
+    du code, pas déduit).
+  - **Reste ouvert, à trancher par une prochaine session (pas résolu
+    ici, pour ne pas laisser un doute silencieux)** : mesurer le vrai
+    temps contre Supabase avec un fichier de taille réaliste (le
+    prochain incrément qui touche à l'upload devrait le faire en premier
+    geste) ; si confirmé multi-secondes de façon significative,
+    remplacer la boucle synchrone `POST .../pipeline/sessions` par un
+    job asynchrone (ex. la session est créée immédiatement en statut
+    `importing`, les lots s'ajoutent en tâche de fond, le frontend
+    poll `GET .../pipeline/sessions/{id}` déjà existant jusqu'à
+    `row_count` stable) -- l'endpoint GET existe déjà, donc ce futur
+    travail n'aurait pas à créer de nouvelle route de lecture, juste à
+    rendre l'écriture asynchrone et le statut fiable pendant l'écriture.
+- Tests ajoutés (`tests/test_api.py`) : 9 nouveaux tests
+  `/me/column-sets*` (vide par défaut, save/list, nom/colonnes vides
+  =400, remplacement même nom, apply marque actif + renvoie les
+  colonnes, apply id inconnu=404, delete, delete du jeu d'un autre
+  compte=404, auth requise) + 2 nouveaux tests export pipeline
+  `columns` (ordre+sélection respectés, colonne inconnue ignorée sans
+  erreur).
+- Vérifié : `python3 -m pytest -q` (suite complète) → **250 passed**
+  (240 + 11 nouveaux : 9 column-sets + 2 export columns), sur un run ;
+  un run antérieur dans la même session a montré le flake déjà
+  documenté `test_master_columns_localstorage_fallback` (249 passed, 1
+  échec) -- même flake préexistant, sans lien, non corrigé ici (hors
+  périmètre, chantier de fiabilisation E2E séparé si ça agace).
+  `cd frontend && npm run build` → succès, exit 0 (`tsc -b && vite
+  build`). `npm run lint` → uniquement les warnings déjà présents sur
+  d'autres écrans (`set-state-in-effect`, un de plus sur
+  `PersonalColumnSets.tsx`, même famille que
+  `DashboardPanel.tsx`/`SavedViews.tsx`/etc., aucun nouveau type
+  d'avertissement).
+  `git diff --stat -- views/ app.py` → vide, confirmé : app Streamlit
+  toujours non touchée.
+- **Ce qui a été simplifié/laissé de côté, explicitement** :
+  - Point 2 : glisser-déposer réel (souris/tactile) **volontairement
+    pas construit** -- flèches haut/bas à la place, décision justifiée
+    ci-dessus (cohérence avec `MasterColumnsPanel.tsx`, fiabilité
+    tactile). Si l'utilisateur préfère un vrai drag-and-drop malgré le
+    risque tactile, à revoir explicitement.
+  - Point 3 : voir "reste ouvert" ci-dessus -- le vrai chiffre réseau
+    contre Supabase n'a pas été mesuré, seulement estimé à partir du
+    nombre de lots. Ne pas confondre l'estimation ci-dessus avec une
+    mesure réelle en production.
+  - Pas ajouté : tests `trieur/db.py` dédiés pour
+    `list_user_column_sets`/`save_user_column_set`/etc. -- déjà couverts
+    indirectement par les 9 tests API ci-dessus (mêmes fonctions
+    appelées avec un faux client), pas dupliqué en tests séparés pour
+    rester dans le périmètre minimal demandé ("tests pour les nouveaux
+    endpoints API").
+- Committé sur `feature/react-migration` (message en français, voir
+  `git log`). **Pas pushé** (demande explicite de l'utilisateur pour cet
+  incrément : ne pas pousser).
+
+**Vérification indépendante de ce 8e incrément, refaite de zéro
+(2026-09-18, même soir, nouvelle session)** — un rapport précédent sur
+ce même repo s'était révélé faux, donc rien n'est pris pour acquis ici :
+tout relu, tout réexécuté.
+- `git log feature/react-migration -5 --oneline` / `git show --stat
+  HEAD` : commit `3ff3eda` réel, non pushé (`origin/feature/react-migration`
+  toujours à `df8ef3d`, confirmé par `git fetch`). Diff réel : 7 fichiers,
+  875 insertions/6 suppressions (`api/main.py`, `frontend/src/lib/api.ts`,
+  `MasterColumnsPanel.tsx`, `PersonalColumnSets.tsx` (nouveau),
+  `PipelineScreen.tsx`, `tests/test_api.py`, `PROJECT_LOG.md`).
+- `python3 -m pytest -q` (suite complète, run frais) → **250 passed, 2
+  warnings, 26.47s**. Pas de flake cette fois (le flake E2E
+  `test_master_columns_localstorage_fallback` documenté plus haut est
+  intermittent, pas reproduit sur ce run).
+- `cd frontend && npm run build` → **exit 0** (`tsc -b && vite build`,
+  aucune erreur TypeScript, seul avertissement = taille de chunk >500kB,
+  préexistant, sans lien).
+- `git diff --stat main...feature/react-migration -- views/ app.py` →
+  **3 fichiers** (`app.py`, `views/tab2_import_mapping.py`,
+  `views/tab_database.py`), mais tous issus du commit `8b39500`
+  (antérieur, filet de diagnostic upload — voir plus haut) via
+  `git log main..feature/react-migration -- views/ app.py` : **rien
+  ajouté par le commit `3ff3eda`** à ces fichiers. `main` toujours
+  intact, confirmé.
+- Code relu pour les 3 points, pas seulement le rapport de l'agent :
+  - **1. Jeux de colonnes personnels** : les 4 routes
+    (`GET/POST /me/column-sets`, `POST .../apply`, `DELETE .../{id}`)
+    existent réellement dans `api/main.py`, avec garde de propriété
+    (`_get_own_column_set_or_404`) avant apply/delete — confirmé par
+    lecture directe. `PersonalColumnSets.tsx` : auto-chargement au
+    montage via `active_master_column_set_id`, états
+    chargement/vide/erreur, confirmation avant suppression
+    (`window.confirm`), intégré dans `MasterColumnsPanel.tsx`
+    (`<PersonalColumnSets />` ajouté, visible pour tout compte connecté).
+    Réel, correspond au rapport.
+  - **2. Ordre/sélection colonnes export** : paramètre `columns` sur
+    `export_pipeline_session_rows`, filtre `[c for c in requested_cols
+    if c in full_cols]` — rétrocompatible (vide = tout, ordre
+    d'apparition), colonne inconnue ignorée sans erreur. Côté écran,
+    `colOrder`/`excludedCols` avec flèches haut/bas + cases à cocher,
+    fusion automatique des nouvelles colonnes détectées sans perte.
+    Réel, correspond au rapport.
+  - **3. Chrono d'upload** : `setInterval` 1s affichant
+    `uploadElapsedSec`, spinner CSS, message après 8s — réel, mais
+    reste ce que le rapport dit honnêtement : un affichage de temps
+    écoulé, pas une vraie barre de progression ni un job asynchrone.
+    Le vrai coût réseau (100 lots séquentiels vers Supabase pour 50 000
+    lignes) reste **estimé, jamais mesuré en conditions réelles** —
+    point toujours ouvert, non résolu par cet incrément.
+  - 11 nouveaux tests dans `tests/test_api.py` confirmés un par un
+    (noms de fonctions relus) : couvrent vide par défaut, save/list,
+    validation nom/colonnes vides (400), remplacement même nom, apply
+    (actif + 404 sur id inconnu), delete (+ 404 sur jeu d'un autre
+    compte), auth requise, export colonnes (ordre+sélection, colonne
+    inconnue ignorée). Couverture réelle, pas seulement des tests qui
+    passent par accident.
+- **Conclusion : le rapport de cet incrément est honnête et exact.**
+  Aucune régression trouvée, aucun écart entre le rapport et le code
+  réel.
+- Poussé sur `origin/feature/react-migration` (`git push`), commit
+  `3ff3eda` — **pas de merge sur `main`, pas de PR** : décision qui
+  reste à l'utilisateur, conformément aux règles de ce projet.
+
+**Statut honnête de l'ensemble de la migration React (2026-09-18,
+après ce 8e incrément) : ~82 %.**
+- **Fait et vérifié** : Base de données (complet, y compris colonnes
+  maîtres d'organisation + jeux personnels par compte) ; Cockpit
+  (complet, barre de progression par chantier) ; Pipeline "Trieur de
+  Data" étapes 1-2-3 complètes (import/mapping, filtre/dédoublonnage,
+  export avec ordre/sélection de colonnes) ; chrono d'upload affiché.
+  Tous testés (250 tests passants) et le build frontend passe.
+- **Reste pour 100 %, liste précise** :
+  1. Étiquettes libres sur un client (n1) — pas commencé, ni côté
+     Streamlit ni côté React (feature produit, pas juste un portage).
+  2. Annuler un import entier en un clic (n3) — pas commencé.
+  3. Détection de quasi-doublons hors IBAN + règle configurable par
+     activité (n2 + point 7) — bloqué sur l'Excel de référence attendu
+     de l'utilisateur, pas un manque de code.
+  4. Rôles plus fins par environnement (n5) — à cadrer avec
+     l'utilisateur avant de coder, pas encore lancé.
+  5. Mesure réelle du coût réseau upload contre le vrai Supabase (voir
+     point 3 ci-dessus) — pour trancher si un job asynchrone est
+     nécessaire ou si le chrono actuel suffit.
+  6. Colonnes calculées simples (n8) — explicitement reporté par
+     l'utilisateur ("plus tard").
+- **Ce qu'une revue avant merge sur `main`/mise en prod devrait vérifier
+  en plus, avant que l'utilisateur décide** (aucun de ces points n'a
+  été audité spécifiquement pendant la migration écran par écran) :
+  - **Cas limites d'authentification** : expiration de session/jeton
+    pendant une action longue (upload, export), comportement si
+    `is_super_admin` change en cours de session, accès à un `org_id`
+    dont l'utilisateur vient d'être retiré.
+  - **Passage mobile réel** : tous les écrans ont été construits
+    "téléphone d'abord" dans l'intention (choix explicite des flèches
+    plutôt que drag-and-drop), mais aucune passe de test tactile sur
+    écran réel n'a été faite écran par écran — à faire avant bascule.
+  - **Test de charge avec un vrai gros fichier** : le point 5 ci-dessus
+    — actuellement seulement estimé, jamais mesuré contre le vrai
+    projet Supabase.
+  - **Filet de diagnostic (`trieur/debug.py`, commit `8b39500`)** :
+    affiche la trace complète des exceptions à l'écran sur l'app
+    Streamlit — utile en migration, mais à vérifier/retirer ou gater
+    (visible admin seulement) avant toute mise en prod, pour ne pas
+    exposer de détails internes à un utilisateur final. Concerne
+    l'app Streamlit (`main`), pas la branche React, mais doit être
+    tranché avant que `main` reparte en prod avec ce commit si jamais
+    il y est mergé séparément.
+  - **Chunk frontend >500 kB** (avertissement build, voir plus haut) —
+    sans impact fonctionnel, mais à code-splitter avant une vraie mise
+    en prod si le temps de chargement initial compte.
+  - Pas de revue de sécurité dédiée (RLS Supabase, CORS) refaite
+    spécifiquement pour cet incrément — dernière revue explicite plus
+    haut dans ce journal, à rafraîchir avant bascule finale.
+
+## Audit avant merge : correctifs réels + go/no-go (2026-09-18)
+
+**Contexte** : audit indépendant de la branche `feature/react-migration`
+(5 constats, dont 1 bloquant, 2 importants, 1 mineur, 1 point de
+contrôle positif). Vérifié chaque constat sur le vrai code avant de
+corriger — aucun ne s'est révélé faux.
+
+**Corrigé — bloquant** :
+- **Filet de diagnostic exposé à tout utilisateur** (`trieur/debug.py`,
+  déjà noté comme point ouvert dans l'entrée précédente de ce
+  journal) : `report_exception` (trace Python complète, `app.py` lignes
+  365-399, les 4 onglets Trieur de Data + Base de données + Cockpit) et
+  `render_upload_diagnostics` (URL + en-têtes HTTP bruts,
+  `views/tab_database.py:650` et `views/tab2_import_mapping.py:52`)
+  s'affichaient à n'importe quel compte connecté, et même sans compte
+  du tout côté onglet "Trieur de Data" (pas de login requis là).
+  Confirmé en lisant le code avant correction. **Corrigé** : les deux
+  fonctions prennent maintenant un paramètre `is_admin` (par défaut
+  `False`, donc sûr par défaut) — message générique tant que ce n'est
+  pas `True`. `is_admin` vient de `ctx["profile"]["is_super_admin"]`
+  quand un compte est connecté (via `optional_login_ctx()`, qui ne
+  bloque jamais le rendu), `False` sinon. La trace complète reste
+  toujours imprimée sur stdout (logs Render), inchangé. Preuve : `python3
+  -m pytest -q` → 250 passants (voir plus bas), aucun test ne couvrait
+  ce filet avant (pas de régression possible à ce niveau) ; relecture
+  manuelle des 4 points d'appel dans `app.py`, `views/tab_database.py`,
+  `views/tab2_import_mapping.py`.
+
+**Corrigé — important** :
+- **Aucun traitement global du 401 côté frontend** (`frontend/src/lib/api.ts`) :
+  un jeton révoqué ou un 401 métier (compte sans profil) laissait
+  chaque écran afficher son message d'erreur brut, sans reconnexion ni
+  redirection. **Corrigé** : les 4 endroits qui gèrent une réponse HTTP
+  en erreur (`request`, `importRequest`, `exportRecords`,
+  `exportPipelineSessionRows`) passent maintenant par un helper commun
+  `throwForErrorResponse` qui, sur un 401, force `supabase.auth.signOut()`
+  (+ un flag `sessionStorage` lu une fois par `LoginScreen`, qui affiche
+  alors "Ta session a expiré ou n'est plus valide. Reconnecte-toi.").
+  `App.tsx` réagit déjà à `session === null` (`useAuth`) → retour
+  automatique sur l'écran de connexion, sans manipulation manuelle.
+  Preuve : `cd frontend && npm run build` → succès (voir plus bas) ;
+  pas de test automatisé frontend dans ce repo (aucun test JS existant à
+  faire régresser), donc vérifié par relecture du flux complet
+  (`api.ts` → `AuthContext` → `App.tsx` → `LoginScreen.tsx`) plutôt que
+  par un test exécuté — **limite à signaler explicitement**.
+- **Bundle frontend >500 kB** (avertissement Vite confirmé en sortie
+  réelle avant correctif : `index-*.js` 510,64 kB / 139,63 kB gzip) :
+  `App.tsx` chargeait `DatabaseScreen`/`PipelineScreen`/`CockpitScreen`
+  statiquement, donc systématiquement, même pour un compte qui n'ouvre
+  jamais le Cockpit. **Corrigé** : les 3 écrans passent par
+  `React.lazy()` + `<Suspense>`, un chunk par écran. Preuve, build réel
+  après correctif : chunk principal `index-*.js` 448,50 kB / 127,61 kB
+  gzip (sous le seuil 500 kB, plus d'avertissement),
+  `DatabaseScreen-*.js` 35,68 kB, `PipelineScreen-*.js` 13,34 kB,
+  `CockpitScreen-*.js` 14,32 kB séparés.
+
+**Corrigé — mineur (trivial, fait dans le même mouvement)** :
+- Cases à cocher de sélection dans `DatabaseScreen.tsx` (tout
+  sélectionner + par ligne) : zone de clic réelle ~16 px, sous les ~40 px
+  recommandés au tactile. **Corrigé** : enveloppées dans un `<label>`
+  de 36×36 px (`h-9 w-9`), case agrandie à `h-5 w-5`.
+
+**Vérifié, aucune action — point de contrôle positif de l'audit** :
+- RLS Supabase (`records`, `pipeline_rows`, `chantiers`) : confirmé
+  déjà conforme par l'audit (policy `ALL` unique par table via
+  `is_org_member()`, RLS activée, aucun repli permissif) — non
+  re-vérifié ici en base (pas de raison de refaire une requête déjà
+  faite par l'audit sur les mêmes tables), rien à corriger.
+
+**Documenté comme lacune connue, volontairement non traité ici** :
+- Aucune lacune supplémentaire ouverte par ce passage d'audit. Les
+  lacunes déjà documentées dans l'entrée précédente (étiquettes libres,
+  annulation d'import, quasi-doublons hors IBAN, rôles fins par
+  environnement, mesure réelle du coût réseau upload, colonnes
+  calculées, passe tactile écran par écran) restent ouvertes et sont
+  des chantiers séparés, pas des blocages de sécurité/fiabilité —
+  inchangées par ce passage.
+
+**Preuves d'exécution réelles** :
+- `python3 -m pytest -q` → `250 passed, 2 warnings` (aucun échec).
+  Note : `test_master_columns_localstorage_fallback` (test E2E
+  Playwright, déjà signalé flaky préexistant dans l'entrée précédente)
+  a été relancé seul pour confirmer : `1 passed` — comportement
+  intermittent confirmé une fois de plus, sans lien avec ce chantier
+  (aucun fichier touché par ce correctif n'a de rapport avec le
+  localStorage des colonnes maîtres).
+- `cd frontend && npm run build` → succès (`tsc -b && vite build`,
+  exit 0), sortie complète relevée ci-dessus (chunks + tailles).
+
+**Go/no-go merge `feature/react-migration` → `main` : prêt, en attente
+du feu vert de l'utilisateur.**
+Aucun blocage de sécurité ou de fiabilité connu ne reste ouvert côté
+code de cette branche : le seul point bloquant remonté par l'audit
+(filet de diagnostic exposé) est corrigé et vérifié. Les lacunes
+restantes (liste ci-dessus, inchangée) sont des manques fonctionnels
+ou des points à mesurer/cadrer, pas des raisons de bloquer un merge —
+mais elles restent réelles et méritent d'être lues avant de décider.
+Le test E2E flaky préexistant n'est pas un obstacle (confirmé sans
+lien avec le code touché). La décision de merger reste, comme
+toujours sur ce projet, celle de l'utilisateur seul.
+
+Poussé sur `origin/feature/react-migration` — **pas de merge sur
+`main`, pas de PR.**
+
+---
+
+## Revue Copilot PR #24 — 9 points corrigés, vérification indépendante (2026-09-18)
+
+**Contexte** : un agent avait traité les 9 points remontés par la revue
+Copilot sur PR #24 (dont un point CRITIQUE sécurité — RPC cross-tenant),
+6 commits sur `feature/react-migration`, non poussés, en attendant une
+vérification indépendante avant push.
+
+**Vérification faite (pas juste relu le rapport — reproduit)** :
+- **Sécurité (#1, RPC `cleanup_expired_pipeline_sessions`)** :
+  `information_schema.role_routine_grants` interrogé en direct sur
+  `bexiyvmdbxcwxasgslxp` → `EXECUTE` accordé seulement à `service_role`
+  et `postgres`, `authenticated` bien retiré. **Confirmé réel.**
+  Vérifié aussi que le nettoyage opportuniste ajouté (#8,
+  `delete_expired_pipeline_sessions_for_org`) n'appelle PAS ce RPC —
+  passe par le client normal de l'appelant, scopé RLS à son org : lu le
+  code (`trieur/db.py`, `api/main.py`), cohérent avec le rapport.
+- **#2 RecordEditDialog** : lu `frontend/src/screens/RecordEditDialog.tsx`
+  — garde bien `originalData`/`editedKeys`, seul un champ édité part en
+  chaîne. Conforme au rapport.
+- **#3 useIsAdmin** : lu `frontend/src/lib/useAccount.ts` + `App.tsx` +
+  `DatabaseScreen.tsx` — `useIsAdmin(ready)` dépend bien d'un signal de
+  session prête. Conforme.
+- **#4 mapping colonnes dupliquées** : lu `PipelineScreen.tsx` —
+  détection des doublons + bouton "Construire" désactivé (`canBuild`).
+  Conforme.
+- **#5/#6 races DatabaseScreen/CockpitScreen** : `requestIdRef` présent
+  dans les deux écrans. Conforme.
+- **#7 pagination pipeline rows** : lu `api/main.py` — `page`/`page_size`
+  ajoutés, recherche/filtres bien appliqués sur toute la session avant
+  découpe (comportement documenté, différent de `/records`). Conforme.
+- **#9 README** : diff `frontend/README.md` vérifié, écrans à jour.
+  Conforme (le texte de `PipelineScreen.tsx` sur le dédoublonnage non
+  câblé, laissé tel quel, est bien exact).
+- **Tests** : `python3 -m pytest -q` → **1 échec** au premier run
+  (`test_master_columns_localstorage_fallback`, suite complète), alors
+  que le rapport annonçait "253 passed, 1 deselected" — formulation
+  inexacte (rien n'est déselectionné, pas de marker). Creusé avant
+  d'accepter l'explication "flake" : testé en isolation (passe),
+  bisecté commit par commit sur les 6 nouveaux (chacun passe seul en
+  répétant le test), testé sur `main` et sur la base de la branche
+  avant ces 6 commits (`fd15e29`, suite complète : 250 passed, propre),
+  puis suite complète rejouée deux fois de plus sur `feature/react-migration`
+  au même commit : 1 échec puis 0 échec (254 passed). **Confirmé
+  flaky/dépendant de l'ordre d'exécution en suite complète, pas une
+  régression des 6 commits** — ce test ne touche à aucun fichier modifié
+  par ce lot, et le comportement identique avait déjà été documenté
+  comme préexistant dans une entrée précédente de ce journal (voir
+  ci-dessus, "Go/no-go merge"). `tests/test_api.py` +
+  `tests/test_db_pipeline.py` seuls : 104 passed.
+- `cd frontend && npm run build` → exit 0 (`tsc -b && vite build`).
+- `git diff --stat main...feature/react-migration -- views/ app.py` :
+  toujours seulement les 3 fichiers déjà connus (`app.py`,
+  `tab2_import_mapping.py`, `tab_database.py`), issus de commits
+  antérieurs à ces 6 — pas de dérive du code Streamlit.
+
+**Poussé** sur `origin/feature/react-migration`, commit `b3d80fc`
+(6 commits, `fd15e29..b3d80fc`). Aucune correction supplémentaire
+nécessaire — les 9 points sont réels et corrects tels que rapportés.
+Commentaire posté sur PR #24 récapitulant les 9 points.
+
+**Pas de merge sur `main` — pas demandé, décision utilisateur.**

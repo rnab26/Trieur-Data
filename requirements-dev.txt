@@ -3,3 +3,4 @@
 -r requirements.txt
 pytest
 playwright
+httpx

@@ -589,26 +589,38 @@ export function applyPipelineMapping(orgId: string, sessionId: string, mapping: 
 // mirroir de views/tab3_filtrage_dedup.py.
 // ---------------------------------------------------------------
 
+// Groupe manuel (<= DEDUP_GROUP_THRESHOLD groupes, voir api/main.py) :
+// chaque ligne du groupe + la présélection "la plus complète" -- permet
+// la revue groupe par groupe de views/tab3_filtrage_dedup.py. Au-delà,
+// seul le compte (n_rows) est renvoyé : l'écran retombe sur la règle
+// globale (`keep`).
+export type PipelineDedupManualGroup = {
+  value: unknown
+  default_keep_index: number
+  rows: { index: number; data: Record<string, unknown> }[]
+}
+export type PipelineDedupSummaryGroup = { value: unknown; n_rows: number }
+
 export type PipelineDedupPreview = {
   session_id: string
   column: string
   n_duplicate_groups: number
   n_duplicate_rows: number
-  groups: { value: unknown; n_rows: number }[]
+  manual_review_available: boolean
+  groups: PipelineDedupManualGroup[] | PipelineDedupSummaryGroup[]
 }
 
 export function previewPipelineDedup(
   orgId: string,
   sessionId: string,
-  opts: { column: string; keep?: 'first' | 'complete'; search?: string; colFilters?: ColFilters },
+  opts: { column: string; keep?: 'first' | 'complete'; filterGroups?: FilterGroup[] },
 ) {
   return request<PipelineDedupPreview>(`/orgs/${orgId}/pipeline/sessions/${sessionId}/dedup`, {
     method: 'POST',
     body: JSON.stringify({
       column: opts.column,
       keep: opts.keep ?? 'first',
-      search: opts.search ?? '',
-      col_filters: opts.colFilters ?? {},
+      filter_groups: opts.filterGroups ?? [],
       dry_run: true,
     }),
   })
@@ -616,7 +628,7 @@ export function previewPipelineDedup(
 
 export type PipelineDedupResult = {
   session_id: string
-  dedup_config: { column: string; keep: string } | null
+  dedup_config: { column: string; keep: string } | { column: string; mode: 'manual'; keep_indices: number[] } | null
   n_before: number
   n_after: number
   n_removed: number
@@ -625,15 +637,34 @@ export type PipelineDedupResult = {
 export function activatePipelineDedup(
   orgId: string,
   sessionId: string,
-  opts: { column: string; keep?: 'first' | 'complete'; search?: string; colFilters?: ColFilters },
+  opts: { column: string; keep?: 'first' | 'complete'; filterGroups?: FilterGroup[] },
 ) {
   return request<PipelineDedupResult>(`/orgs/${orgId}/pipeline/sessions/${sessionId}/dedup`, {
     method: 'POST',
     body: JSON.stringify({
       column: opts.column,
       keep: opts.keep ?? 'first',
-      search: opts.search ?? '',
-      col_filters: opts.colFilters ?? {},
+      filter_groups: opts.filterGroups ?? [],
+      dry_run: false,
+    }),
+  })
+}
+
+// Revue manuelle groupe par groupe -- `keepIndices` = un index CHOISI
+// par groupe (voir trieur/filters.py:dedupe_dataframe_manual), dans le
+// MÊME ORDRE que les groupes renvoyés par previewPipelineDedup.
+export function activatePipelineDedupManual(
+  orgId: string,
+  sessionId: string,
+  opts: { column: string; keepIndices: number[]; filterGroups?: FilterGroup[] },
+) {
+  return request<PipelineDedupResult>(`/orgs/${orgId}/pipeline/sessions/${sessionId}/dedup`, {
+    method: 'POST',
+    body: JSON.stringify({
+      column: opts.column,
+      mode: 'manual',
+      keep_indices: opts.keepIndices,
+      filter_groups: opts.filterGroups ?? [],
       dry_run: false,
     }),
   })
@@ -681,12 +712,95 @@ export function deletePipelineExportPreset(orgId: string, presetId: string) {
   )
 }
 
+// Renomme SANS toucher au contenu (ordre/colonnes) -- bouton "Renommer"
+// distinct de "Enregistrer" dans views/tab4_export.py.
+export function renamePipelineExportPreset(orgId: string, presetId: string, name: string) {
+  return request<PipelineExportPreset>(
+    `/orgs/${orgId}/pipeline/export-presets/${presetId}/rename`,
+    { method: 'POST', body: JSON.stringify({ name }) },
+  )
+}
+
+// ---------------------------------------------------------------
+// Filtres multi-critères (onglet "Filtrer", voir
+// views/tab3_filtrage_dedup.py -- trieur/filters.py:apply_filter_groups).
+// Un critère = {column, kind, values} ; un groupe = critères combinés
+// en ET ; le filtre = groupes combinés en OU. C'est le SEUL mécanisme
+// de filtre du Pipeline -- il n'y a jamais eu de recherche libre ni de
+// filtre par colonne façon Google Sheets (ColFilters) dans l'original.
+// ---------------------------------------------------------------
+
+export type FilterCriterionKind = 'departements' | 'valeurs'
+export type FilterCriterion = { column: string; kind: FilterCriterionKind; values: string[] }
+export type FilterGroup = FilterCriterion[]
+
+export type PipelineSavedFilter = {
+  id: string
+  name: string
+  groups: FilterGroup[]
+  [key: string]: unknown
+}
+
+export function listPipelineSavedFilters(orgId: string) {
+  return request<PipelineSavedFilter[]>(`/orgs/${orgId}/pipeline/saved-filters`)
+}
+
+export function savePipelineSavedFilter(orgId: string, body: { name: string; groups: FilterGroup[] }) {
+  return request<PipelineSavedFilter>(`/orgs/${orgId}/pipeline/saved-filters`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function renamePipelineSavedFilter(orgId: string, filterId: string, name: string) {
+  return request<PipelineSavedFilter>(`/orgs/${orgId}/pipeline/saved-filters/${filterId}/rename`, {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  })
+}
+
+export function deletePipelineSavedFilter(orgId: string, filterId: string) {
+  return request<{ id: string; deleted: boolean }>(
+    `/orgs/${orgId}/pipeline/saved-filters/${filterId}`,
+    { method: 'DELETE' },
+  )
+}
+
+// Code texte copiable ("TRIEUR-FILTRES-v1:...") -- secours hors de
+// l'environnement (note, message...) si les filtres enregistrés sont
+// perdus -- voir trieur/persistence.py:encode_filters_code/decode_filters_code.
+export function encodePipelineFiltersCode(orgId: string, filters: { name: string; groups: FilterGroup[] }[]) {
+  return request<{ code: string }>(`/orgs/${orgId}/pipeline/saved-filters/encode`, {
+    method: 'POST',
+    body: JSON.stringify({ filters }),
+  })
+}
+
+export function decodePipelineFiltersCode(orgId: string, code: string) {
+  return request<{ filters: { name: string; groups: FilterGroup[] }[] }>(
+    `/orgs/${orgId}/pipeline/saved-filters/decode`,
+    { method: 'POST', body: JSON.stringify({ code }) },
+  )
+}
+
+// Résumé lisible d'un filtre ("(CP dept 34) OU (CP dept 71 ET VILLE =
+// Lyon)") -- même règle que trieur/filters.py:describe_filter_groups,
+// reproduite ici (pure fonction d'affichage, aucune I/O) pour ne pas
+// faire un aller-retour réseau juste pour un libellé.
+export function describeFilterGroups(groups: FilterGroup[]): string {
+  if (groups.length === 0) return '(vide)'
+  const describeCriterion = (c: FilterCriterion) => {
+    const vals = c.values.length > 0 ? c.values.join(', ') : '(vide)'
+    return c.kind === 'departements' ? `${c.column} dept ${vals}` : `${c.column} = ${vals}`
+  }
+  const groupStrs = groups.map((g) => (g.length > 0 ? g.map(describeCriterion).join(' ET ') : '(vide)'))
+  return groupStrs.length > 1 ? groupStrs.map((s) => `(${s})`).join(' OU ') : groupStrs[0]
+}
+
 // ---------------------------------------------------------------
 // Pipeline "Trieur de Data" -- étape 2 (filtrer/exporter les lignes en
 // staging), voir api/main.py:list_pipeline_session_rows /
-// export_pipeline_session_rows. Mêmes opérateurs de filtre (FILTER_OPERATORS
-// ci-dessus) et même normalisation casse que côté /records -- une seule
-// source de vérité, ne pas dupliquer une deuxième liste d'opérateurs.
+// export_pipeline_session_rows.
 // ---------------------------------------------------------------
 
 export type PipelineRowsPage = {
@@ -698,10 +812,18 @@ export type PipelineRowsPage = {
   rows: Record<string, unknown>[]
 }
 
-// _matches_filter (views/tab_database.py) met en minuscules la VALEUR du
-// champ mais pas `needle` -- même normalisation côté appelant que
-// toApiColFilters/toApiColFiltersExport ci-dessus, dupliquée ici pour que
-// les deux fonctions pipeline restent autonomes.
+// Valeurs distinctes de `column` sur TOUTE la session (pas juste la
+// page affichée) -- peuple le multiselect d'un critère de filtre, voir
+// api/main.py:get_pipeline_column_unique_values /
+// views/tab3_filtrage_dedup.py:_render_value_picker. `values: null` =
+// trop de valeurs distinctes (> 1000) : l'écran doit basculer sur un
+// champ texte libre.
+export function getPipelineColumnUniqueValues(orgId: string, sessionId: string, column: string) {
+  return request<{ count: number; values: string[] | null }>(
+    `/orgs/${orgId}/pipeline/sessions/${sessionId}/columns/${encodeURIComponent(column)}/unique-values`,
+  )
+}
+
 // Même règle que trieur/export.py:sanitize_filename côté serveur --
 // dupliquée ici car ce renommage reste purement client (voir
 // exportPipelineSessionRows) : retire les caractères interdits sur
@@ -713,25 +835,16 @@ function sanitizeFilenameClient(name: string): string {
   return cleaned || 'export_pipeline'
 }
 
-function toApiColFiltersPipeline(filters: ColFilters): ColFilters {
-  const out: ColFilters = {}
-  for (const [col, f] of Object.entries(filters)) {
-    out[col] = { op: f.op, value: f.value.toLowerCase() }
-  }
-  return out
-}
-
 export function listPipelineSessionRows(
   orgId: string,
   sessionId: string,
-  opts: { page?: number; pageSize?: number; search?: string; colFilters?: ColFilters } = {},
+  opts: { page?: number; pageSize?: number; filterGroups?: FilterGroup[] } = {},
 ) {
   const params = new URLSearchParams()
   params.set('page', String(opts.page ?? 1))
   params.set('page_size', String(opts.pageSize ?? 50))
-  if (opts.search) params.set('search', opts.search)
-  if (opts.colFilters && Object.keys(opts.colFilters).length > 0) {
-    params.set('col_filters', JSON.stringify(toApiColFiltersPipeline(opts.colFilters)))
+  if (opts.filterGroups && opts.filterGroups.length > 0) {
+    params.set('filter_groups', JSON.stringify(opts.filterGroups))
   }
   return request<PipelineRowsPage>(
     `/orgs/${orgId}/pipeline/sessions/${sessionId}/rows?${params.toString()}`,
@@ -745,8 +858,7 @@ export async function exportPipelineSessionRows(
   sessionId: string,
   opts: {
     format: 'csv' | 'xlsx'
-    search?: string
-    colFilters?: ColFilters
+    filterGroups?: FilterGroup[]
     columns?: string[]
     // Nom de fichier voulu par l'utilisateur (voir views/tab4_export.py:
     // champ texte pré-rempli, sanitize_filename) -- le backend ne connaît
@@ -759,9 +871,8 @@ export async function exportPipelineSessionRows(
   const headers = await authHeader()
   const params = new URLSearchParams()
   params.set('format', opts.format)
-  if (opts.search) params.set('search', opts.search)
-  if (opts.colFilters && Object.keys(opts.colFilters).length > 0) {
-    params.set('col_filters', JSON.stringify(toApiColFiltersPipeline(opts.colFilters)))
+  if (opts.filterGroups && opts.filterGroups.length > 0) {
+    params.set('filter_groups', JSON.stringify(opts.filterGroups))
   }
   // Ordre + sélection des colonnes (équivalent glisser-déposer de l'onglet
   // 4 Streamlit) -- voir api/main.py:export_pipeline_session_rows. Absent

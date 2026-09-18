@@ -882,6 +882,41 @@ def get_pipeline_session_endpoint(org_id: str, session_id: str, ctx: AuthCtx = D
     }
 
 
+# Seuil au-delà duquel le sélecteur de valeurs d'un critère de filtre
+# (voir POST .../filter-values ci-dessous) bascule sur un champ texte
+# libre côté écran -- même seuil que views/tab3_filtrage_dedup.py:
+# _render_value_picker (n_unique > 1000).
+PIPELINE_FILTER_UNIQUE_VALUES_MAX = 1000
+
+
+@app.get("/orgs/{org_id}/pipeline/sessions/{session_id}/columns/{column}/unique-values")
+def get_pipeline_column_unique_values(
+    org_id: str, session_id: str, column: str, ctx: AuthCtx = Depends(require_org_access),
+):
+    """Valeurs distinctes non vides de `column` sur TOUTE la session
+    (jamais juste la page affichée), pour peupler le multiselect de
+    valeurs d'un critère de filtre -- même besoin que `df[column]
+    .dropna().unique()` dans views/tab3_filtrage_dedup.py:
+    _render_value_picker, qui lisait `st.session_state.final_df` (base
+    complète) en mémoire. Au-delà de PIPELINE_FILTER_UNIQUE_VALUES_MAX
+    valeurs distinctes, ne renvoie que le compte -- l'écran retombe sur
+    un champ texte libre, comme l'original, plutôt que de transférer
+    des milliers de valeurs inutilisables dans un menu."""
+    _get_pipeline_session_or_404(ctx, org_id, session_id)
+    rows = pipeline_memory.list_rows(session_id)
+    values: set[str] = set()
+    for r in rows:
+        v = r["data"].get(column)
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s:
+            values.add(s)
+    if len(values) > PIPELINE_FILTER_UNIQUE_VALUES_MAX:
+        return {"count": len(values), "values": None}
+    return {"count": len(values), "values": sorted(values)}
+
+
 class PipelineMapping(BaseModel):
     # `None` : pas de mapping fourni -> la suggestion d'auto-assignation
     # est appliquée telle quelle. Fournir un dict explicite, même partiel,

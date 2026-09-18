@@ -1,21 +1,20 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import { useAuth } from '@/lib/AuthContext'
 import { useIsAdmin, useOrgs } from '@/lib/useAccount'
 import {
   ApiError,
   getMasterColumns,
   listPipelineSessionRows,
-  type ColFilters,
+  type FilterGroup,
   type PipelineMappingResult,
   type PipelineSessionCreated,
 } from '@/lib/api'
-import { ColumnFilters } from './ColumnFilters'
 import { MasterColumnsPanel } from './MasterColumnsPanel'
 import { PipelineImportPanel } from './PipelineImportPanel'
 import { PipelineDedupPanel } from './PipelineDedupPanel'
 import { PipelineExportPanel } from './PipelineExportPanel'
+import { PipelineFilterGroups } from './PipelineFilterGroups'
 
 // Trieur de Data -- MÊME architecture à 4 onglets que la version
 // Streamlit (views/tab1_colonnes_maitres.py .. tab4_export.py), portée
@@ -48,13 +47,15 @@ export function PipelineScreen() {
   const [masterColumns, setMasterColumns] = useState<string[]>([])
   const [masterColumnsError, setMasterColumnsError] = useState<string | null>(null)
 
-  // Filtrage/recherche + dédoublonnage -- partagés par Filtrer et
-  // Exporter (l'export utilise EXACTEMENT le même résultat que ce que
-  // l'écran de filtrage affiche, jamais une deuxième logique).
-  const [search, setSearch] = useState('')
-  const [searchInput, setSearchInput] = useState('')
-  const [colFilters, setColFilters] = useState<ColFilters>({})
-  const [dedupConfig, setDedupConfig] = useState<{ column: string; keep: string } | null>(null)
+  // Filtre multi-critères (groupes OU de critères ET, copie conforme de
+  // views/tab3_filtrage_dedup.py -- voir PipelineFilterGroups) +
+  // dédoublonnage -- partagés par Filtrer et Exporter (l'export utilise
+  // EXACTEMENT le même résultat que ce que l'écran de filtrage affiche,
+  // jamais une deuxième logique).
+  const [filterGroups, setFilterGroups] = useState<FilterGroup[]>([[]])
+  const [dedupConfig, setDedupConfig] = useState<
+    { column: string; keep: string } | { column: string; mode: 'manual'; keep_indices: number[] } | null
+  >(null)
 
   const [rowsLoading, setRowsLoading] = useState(false)
   const [rowsLoadingMore, setRowsLoadingMore] = useState(false)
@@ -79,7 +80,7 @@ export function PipelineScreen() {
     return cols
   }, [rows])
 
-  const colFiltersKey = useMemo(() => JSON.stringify(colFilters), [colFilters])
+  const filterGroupsKey = useMemo(() => JSON.stringify(filterGroups), [filterGroups])
 
   // Fusionne les colonnes nouvellement vues dans l'ordre existant, en fin
   // de liste (jamais de colonne perdue silencieusement) -- une colonne
@@ -117,8 +118,7 @@ export function PipelineScreen() {
     async (
       orgIdVal: string,
       sessionId: string,
-      targetSearch: string,
-      targetColFilters: ColFilters,
+      targetFilterGroups: FilterGroup[],
       targetPage: number,
       append: boolean,
     ) => {
@@ -129,8 +129,7 @@ export function PipelineScreen() {
         const data = await listPipelineSessionRows(orgIdVal, sessionId, {
           page: targetPage,
           pageSize: ROWS_PAGE_SIZE,
-          search: targetSearch,
-          colFilters: targetColFilters,
+          filterGroups: targetFilterGroups,
         })
         setRows((prev) => (append ? [...prev, ...data.rows] : data.rows))
         setRowsPage(data.page)
@@ -146,36 +145,29 @@ export function PipelineScreen() {
     [],
   )
 
-  // Recharge les lignes dès que la session est construite, que la
-  // recherche/les filtres changent, OU que le dédoublonnage change (le
-  // serveur le réapplique lui-même -- on relit juste pour refléter le
-  // nouveau compte de lignes à l'écran).
+  // Recharge les lignes dès que la session est construite, que le
+  // filtre change, OU que le dédoublonnage change (le serveur le
+  // réapplique lui-même -- on relit juste pour refléter le nouveau
+  // compte de lignes à l'écran).
   useEffect(() => {
     if (!orgId || !pipelineSession) return
-    void fetchRows(orgId, pipelineSession.session_id, search, colFilters, 1, false)
-    // colFiltersKey sert de dépendance stable (colFilters change de
-    // référence à chaque frappe côté ColumnFilters) -- colFilters lui-même
-    // reste utilisé dans le corps de l'effet.
+    void fetchRows(orgId, pipelineSession.session_id, filterGroups, 1, false)
+    // filterGroupsKey sert de dépendance stable (filterGroups change de
+    // référence à chaque frappe côté PipelineFilterGroups) -- filterGroups
+    // lui-même reste utilisé dans le corps de l'effet.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orgId, pipelineSession, search, colFiltersKey, dedupConfig, fetchRows])
+  }, [orgId, pipelineSession, filterGroupsKey, dedupConfig, fetchRows])
 
   function handleLoadMoreRows() {
     if (!orgId || !pipelineSession) return
-    void fetchRows(orgId, pipelineSession.session_id, search, colFilters, rowsPage + 1, true)
-  }
-
-  function handleSearchSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    setSearch(searchInput.trim())
+    void fetchRows(orgId, pipelineSession.session_id, filterGroups, rowsPage + 1, true)
   }
 
   function handleBuilt(newSession: PipelineSessionCreated, result: PipelineMappingResult) {
     setPipelineSession(newSession)
     setBuildResult(result)
     setDedupConfig(null)
-    setSearch('')
-    setSearchInput('')
-    setColFilters({})
+    setFilterGroups([[]])
     setRows([])
     setRowsPage(1)
     setRowCount(0)
@@ -301,26 +293,21 @@ export function PipelineScreen() {
                     (staging temporaire, 24h).
                   </p>
 
-                  <form onSubmit={handleSearchSubmit} className="flex flex-wrap gap-2">
-                    <Input
-                      placeholder="Rechercher…"
-                      value={searchInput}
-                      onChange={(e) => setSearchInput(e.target.value)}
-                      className="max-w-xs"
-                    />
-                    <Button type="submit" variant="secondary">
-                      Rechercher
-                    </Button>
-                  </form>
+                  <PipelineFilterGroups
+                    orgId={orgId}
+                    sessionId={pipelineSession.session_id}
+                    masterColumns={masterColumns}
+                    groups={filterGroups}
+                    onChange={setFilterGroups}
+                  />
 
-                  <ColumnFilters columns={rowsColumns} filters={colFilters} onChange={setColFilters} />
+                  <hr className="border-[var(--border)]" />
 
                   <PipelineDedupPanel
                     orgId={orgId}
                     sessionId={pipelineSession.session_id}
                     columns={rowsColumns}
-                    search={search}
-                    colFilters={colFilters}
+                    filterGroups={filterGroups}
                     activeDedup={dedupConfig}
                     onDedupChanged={setDedupConfig}
                   />
@@ -331,9 +318,7 @@ export function PipelineScreen() {
                   )}
                   {!rowsLoading && !rowsError && rows.length === 0 && (
                     <p className="text-sm text-[var(--muted)]">
-                      {search || Object.keys(colFilters).length > 0
-                        ? 'Aucun résultat pour cette recherche/ces filtres.'
-                        : 'Aucune ligne dans cette session.'}
+                      Aucun résultat pour ce filtre, ou aucune ligne dans cette session.
                     </p>
                   )}
 
@@ -398,8 +383,8 @@ export function PipelineScreen() {
               )}
               {pipelineSession && filteredCount === 0 && rows.length === 0 && !rowsLoading && (
                 <p className="text-sm text-[var(--danger)]">
-                  Le résultat filtré est vide -- ajuste la recherche/les filtres dans l'onglet
-                  "Filtrer" avant d'exporter.
+                  Le résultat filtré est vide -- ajuste le filtre dans l'onglet "Filtrer" avant
+                  d'exporter.
                 </p>
               )}
               {pipelineSession && (
@@ -410,8 +395,7 @@ export function PipelineScreen() {
                   excludedCols={excludedCols}
                   onColOrderChange={setColOrder}
                   onExcludedColsChange={setExcludedCols}
-                  search={search}
-                  colFilters={colFilters}
+                  filterGroups={filterGroups}
                   rowCount={rowCount}
                   filteredCount={filteredCount}
                 />

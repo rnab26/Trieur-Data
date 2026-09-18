@@ -6,8 +6,9 @@ import {
   deletePipelineExportPreset,
   exportPipelineSessionRows,
   listPipelineExportPresets,
+  renamePipelineExportPreset,
   savePipelineExportPreset,
-  type ColFilters,
+  type FilterGroup,
   type PipelineExportPreset,
 } from '@/lib/api'
 
@@ -23,8 +24,7 @@ export function PipelineExportPanel({
   excludedCols,
   onColOrderChange,
   onExcludedColsChange,
-  search,
-  colFilters,
+  filterGroups,
   rowCount,
   filteredCount,
 }: {
@@ -34,14 +34,13 @@ export function PipelineExportPanel({
   excludedCols: Set<string>
   onColOrderChange: (next: string[]) => void
   onExcludedColsChange: (next: Set<string>) => void
-  search: string
-  colFilters: ColFilters
+  filterGroups: FilterGroup[]
   rowCount: number
   filteredCount: number
 }) {
   const [exporting, setExporting] = useState<'csv' | 'xlsx' | null>(null)
   const [exportError, setExportError] = useState<string | null>(null)
-  const [filename, setFilename] = useState('export_pipeline')
+  const [filename, setFilename] = useState('export_leads')
 
   const [presets, setPresets] = useState<PipelineExportPreset[] | null>(null)
   const [presetsError, setPresetsError] = useState<string | null>(null)
@@ -49,6 +48,7 @@ export function PipelineExportPanel({
   const [savingPreset, setSavingPreset] = useState(false)
   const [presetActionError, setPresetActionError] = useState<string | null>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const [renameDrafts, setRenameDrafts] = useState<Record<string, string>>({})
 
   useEffect(() => {
     let cancelled = false
@@ -92,8 +92,7 @@ export function PipelineExportPanel({
       const selectedColumns = colOrder.filter((c) => !excludedCols.has(c))
       await exportPipelineSessionRows(orgId, sessionId, {
         format,
-        search,
-        colFilters,
+        filterGroups,
         columns: selectedColumns.length > 0 ? selectedColumns : undefined,
         filename: filename.trim() || undefined,
       })
@@ -155,6 +154,18 @@ export function PipelineExportPanel({
     }
   }
 
+  async function handleRenamePreset(id: string) {
+    const name = (renameDrafts[id] ?? '').trim()
+    if (!name) return
+    setPresetActionError(null)
+    try {
+      const renamed = await renamePipelineExportPreset(orgId, id, name)
+      setPresets((prev) => (prev ?? []).map((p) => (p.id === id ? renamed : p)))
+    } catch (err) {
+      setPresetActionError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+    }
+  }
+
   const allExcluded = colOrder.length > 0 && colOrder.length === excludedCols.size
 
   return (
@@ -208,12 +219,19 @@ export function PipelineExportPanel({
           <ul className="mt-2 flex flex-col gap-2">
             {presets.map((p) => (
               <li key={p.id} className="flex flex-wrap items-center gap-2 rounded-md border border-[var(--border)] p-2">
-                <span className="text-sm font-medium">{p.name}</span>
+                <Input
+                  value={renameDrafts[p.id] ?? p.name}
+                  onChange={(e) => setRenameDrafts((prev) => ({ ...prev, [p.id]: e.target.value }))}
+                  className="max-w-[10rem]"
+                />
                 <span className="text-xs text-[var(--muted)]">
                   {p.included.length} incluse(s) / {p.excluded.length} exclue(s)
                 </span>
                 <Button variant="secondary" onClick={() => applyPreset(p)}>
                   Appliquer
+                </Button>
+                <Button variant="secondary" onClick={() => void handleRenamePreset(p.id)}>
+                  Renommer
                 </Button>
                 <Button
                   variant={confirmDeleteId === p.id ? 'danger' : 'secondary'}

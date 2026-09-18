@@ -905,3 +905,64 @@ export async function exportPipelineSessionRows(
   a.remove()
   URL.revokeObjectURL(url)
 }
+
+// ---------------------------------------------------------------
+// "💾 Enregistrer dans la base de données (CRM)" -- copie conforme de
+// views/tab4_export.py:_render_save_to_database. Enregistre le résultat
+// FILTRÉ de la session (pas juste les colonnes de l'export) dans un
+// environnement de destination, avec la même vérification de doublon
+// IBAN que l'import direct de la Base de données.
+// ---------------------------------------------------------------
+
+export type PipelineSaveToDatabasePreview = { row_count: number; unknown_columns: string[] }
+export type PipelineSaveToDatabaseResult = {
+  n_imported: number
+  n_alerts: number
+  unknown_columns: string[]
+  added_to_master_columns: string[]
+}
+
+export function previewSavePipelineSessionToDatabase(
+  orgId: string,
+  sessionId: string,
+  opts: { targetOrgId: string; filterGroups?: FilterGroup[] },
+) {
+  return request<PipelineSaveToDatabasePreview>(
+    `/orgs/${orgId}/pipeline/sessions/${sessionId}/save-to-database`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        target_org_id: opts.targetOrgId,
+        filter_groups: opts.filterGroups ?? [],
+        dry_run: true,
+      }),
+    },
+  )
+}
+
+export function savePipelineSessionToDatabase(
+  orgId: string,
+  sessionId: string,
+  opts: {
+    targetOrgId: string
+    filterGroups?: FilterGroup[]
+    ibanCol?: string
+    addUnknownColumns?: boolean
+    importName?: string
+  },
+) {
+  return request<PipelineSaveToDatabaseResult>(
+    `/orgs/${orgId}/pipeline/sessions/${sessionId}/save-to-database`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        target_org_id: opts.targetOrgId,
+        filter_groups: opts.filterGroups ?? [],
+        iban_col: opts.ibanCol || null,
+        add_unknown_columns: opts.addUnknownColumns ?? false,
+        import_name: opts.importName || null,
+        dry_run: false,
+      }),
+    },
+  )
+}

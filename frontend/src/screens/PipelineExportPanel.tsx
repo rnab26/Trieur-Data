@@ -1,13 +1,16 @@
 import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { useIsAdmin, useOrgs } from '@/lib/useAccount'
 import {
   ApiError,
   deletePipelineExportPreset,
   exportPipelineSessionRows,
   listPipelineExportPresets,
+  previewSavePipelineSessionToDatabase,
   renamePipelineExportPreset,
   savePipelineExportPreset,
+  savePipelineSessionToDatabase,
   type FilterGroup,
   type PipelineExportPreset,
 } from '@/lib/api'
@@ -290,7 +293,7 @@ export function PipelineExportPanel({
           {exporting === 'xlsx' ? 'Préparation…' : 'Exporter Excel'}
         </Button>
         <span className="text-xs text-[var(--muted)]">
-          {filteredCount} / {rowCount} ligne(s), avec la recherche/les filtres/le dédoublonnage actuels.
+          {filteredCount} / {rowCount} ligne(s), avec le filtre/le dédoublonnage actuels.
         </span>
       </div>
       {allExcluded && (
@@ -299,6 +302,154 @@ export function PipelineExportPanel({
         </p>
       )}
       {exportError && <p className="text-sm text-[var(--danger)]">Erreur d'export : {exportError}</p>}
+
+      <SaveToDatabasePanel orgId={orgId} sessionId={sessionId} filterGroups={filterGroups} rowCount={filteredCount} />
     </div>
+  )
+}
+
+// "💾 Enregistrer dans la base de données (CRM)" -- copie conforme de
+// views/tab4_export.py:_render_save_to_database. Enregistre le résultat
+// FILTRÉ (pas juste les colonnes de l'export ci-dessus) dans
+// l'environnement choisi, avec la même vérification de doublon IBAN
+// que l'import direct de la Base de données.
+function SaveToDatabasePanel({
+  orgId,
+  sessionId,
+  filterGroups,
+  rowCount,
+}: {
+  orgId: string
+  sessionId: string
+  filterGroups: FilterGroup[]
+  rowCount: number
+}) {
+  const { orgs, orgsError } = useOrgs()
+  const { isAdmin } = useIsAdmin(true)
+
+  const [targetOrgId, setTargetOrgId] = useState('')
+  const [ibanCol, setIbanCol] = useState('')
+  const [importName, setImportName] = useState('export_trieur')
+
+  const [unknownColumns, setUnknownColumns] = useState<string[]>([])
+  const [addUnknownColumns, setAddUnknownColumns] = useState(false)
+  const [checking, setChecking] = useState(false)
+  const [checkError, setCheckError] = useState<string | null>(null)
+
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [saveResult, setSaveResult] = useState<{ n_imported: number; n_alerts: number } | null>(null)
+
+  useEffect(() => {
+    if (orgs && orgs.length > 0 && !targetOrgId) setTargetOrgId(orgs[0].id)
+  }, [orgs, targetOrgId])
+
+  useEffect(() => {
+    if (!targetOrgId || rowCount === 0) {
+      setUnknownColumns([])
+      return
+    }
+    let cancelled = false
+    setChecking(true)
+    setCheckError(null)
+    previewSavePipelineSessionToDatabase(orgId, sessionId, { targetOrgId, filterGroups })
+      .then((data) => {
+        if (!cancelled) setUnknownColumns(data.unknown_columns)
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setCheckError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+      })
+      .finally(() => {
+        if (!cancelled) setChecking(false)
+      })
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orgId, sessionId, targetOrgId, JSON.stringify(filterGroups), rowCount])
+
+  async function handleSave() {
+    setSaving(true)
+    setSaveError(null)
+    setSaveResult(null)
+    try {
+      const data = await savePipelineSessionToDatabase(orgId, sessionId, {
+        targetOrgId,
+        filterGroups,
+        ibanCol: ibanCol || undefined,
+        addUnknownColumns,
+        importName,
+      })
+      setSaveResult({ n_imported: data.n_imported, n_alerts: data.n_alerts })
+    } catch (err) {
+      setSaveError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (orgsError || !orgs || orgs.length === 0 || rowCount === 0) return null
+
+  return (
+    <details className="rounded-md border border-[var(--border)] p-3">
+      <summary className="cursor-pointer text-sm font-medium">💾 Enregistrer dans la base de données (CRM)</summary>
+      <p className="mt-2 text-xs text-[var(--muted)]">
+        Enregistre les {rowCount} ligne(s) de la base filtrée (pas seulement les colonnes de l'export
+        ci-dessus) dans l'environnement choisi, avec la même vérification de doublon IBAN que l'import
+        direct de l'onglet Base de données. Si un fichier mélange plusieurs activités, filtre-le
+        d'abord ci-dessus, enregistre, puis refais une passe pour l'autre activité.
+      </p>
+
+      <div className="mt-3 flex flex-col gap-2">
+        <label className="text-xs text-[var(--muted)]">
+          Environnement de destination
+          <select
+            className="mt-1 block w-full rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-2 text-sm"
+            value={targetOrgId}
+            onChange={(e) => setTargetOrgId(e.target.value)}
+          >
+            {orgs.map((o) => (
+              <option key={o.id} value={o.id}>
+                {o.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="text-xs text-[var(--muted)]">
+          Colonne IBAN (optionnel, pour la vérification de doublon)
+          <Input value={ibanCol} onChange={(e) => setIbanCol(e.target.value)} className="mt-1" placeholder="IBAN" />
+        </label>
+
+        <label className="text-xs text-[var(--muted)]">
+          Nom de cet import
+          <Input value={importName} onChange={(e) => setImportName(e.target.value)} className="mt-1" />
+        </label>
+
+        {checking && <p className="text-sm text-[var(--muted)]">Vérification des colonnes…</p>}
+        {checkError && <p className="text-sm text-[var(--danger)]">Erreur : {checkError}</p>}
+        {unknownColumns.length > 0 && (
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={addUnknownColumns} onChange={(e) => setAddUnknownColumns(e.target.checked)} />
+            Ajouter {unknownColumns.join(', ')} aux colonnes maîtres de cet environnement
+            {!isAdmin && ' (réservé aux administrateurs)'}
+          </label>
+        )}
+
+        <div>
+          <Button onClick={() => void handleSave()} disabled={saving || !targetOrgId}>
+            {saving ? 'Enregistrement…' : '💾 Enregistrer dans cet environnement'}
+          </Button>
+        </div>
+
+        {saveError && <p className="text-sm text-[var(--danger)]">Erreur : {saveError}</p>}
+        {saveResult && (
+          <p className="text-sm text-[var(--success,#16a34a)]">
+            {saveResult.n_imported} ligne(s) enregistrée(s), {saveResult.n_alerts} alerte(s) de doublon IBAN
+            créée(s).
+          </p>
+        )}
+      </div>
+    </details>
   )
 }

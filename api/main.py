@@ -1098,6 +1098,76 @@ def export_pipeline_session_rows(
     )
 
 
+class PipelineSaveToDatabaseRequest(BaseModel):
+    target_org_id: str
+    filter_groups: list = []
+    iban_col: Optional[str] = None
+    add_unknown_columns: bool = False
+    import_name: Optional[str] = None
+    # true : renvoie juste l'aperçu (colonnes, colonnes inconnues) sans
+    # rien écrire -- même principe que dry_run sur /import.
+    dry_run: bool = False
+
+
+@app.post("/orgs/{org_id}/pipeline/sessions/{session_id}/save-to-database")
+def save_pipeline_session_to_database(
+    org_id: str, session_id: str, body: PipelineSaveToDatabaseRequest, ctx: AuthCtx = Depends(require_org_access),
+):
+    """Enregistre le résultat FILTRÉ (pas juste les colonnes de l'export,
+    voir docstring de _render_save_to_database) de cette session dans
+    `body.target_org_id`, avec la MÊME vérification de doublon IBAN que
+    l'import direct de la Base de données (trieur/db.py:import_dataframe)
+    -- copie conforme de la section "💾 Enregistrer dans la base de
+    données (CRM)" de views/tab4_export.py. `target_org_id` peut être un
+    environnement différent de `org_id` (celui de la session pipeline) :
+    vérifié séparément via `accessible_organizations`, jamais supposé
+    identique à `org_id`."""
+    session = _get_pipeline_session_or_404(ctx, org_id, session_id)
+    target_orgs = accessible_organizations(
+        {"client": ctx.client, "profile": ctx.profile, "memberships": ctx.memberships}
+    )
+    if body.target_org_id not in {o["id"] for o in target_orgs}:
+        raise HTTPException(status_code=403, detail="Accès refusé à cet environnement de destination.")
+
+    parsed_groups = _parse_filter_groups(body.filter_groups if isinstance(body.filter_groups, list) else [])
+    all_rows = _all_pipeline_rows(ctx.client, session_id)
+    rows = [_without_sheet_key(r["data"]) for r in all_rows]
+    rows = _apply_filter_groups_to_rows(rows, parsed_groups)
+    rows = _apply_active_dedup(rows, session)
+
+    if not rows:
+        raise HTTPException(status_code=400, detail="Aucune donnée à enregistrer après filtrage.")
+
+    df = pd.DataFrame(rows)
+    master_cols = get_org_master_columns(ctx.client, body.target_org_id)
+    unknown = unknown_columns(df.columns, master_cols)
+
+    if body.dry_run:
+        return {"row_count": len(df), "unknown_columns": unknown}
+
+    added: list[str] = []
+    if unknown and body.add_unknown_columns:
+        if not ctx.profile.get("is_super_admin"):
+            raise HTTPException(
+                status_code=403,
+                detail="Seul un administrateur peut ajouter des colonnes maîtres.",
+            )
+        add_org_master_columns(ctx.client, body.target_org_id, unknown)
+        added = unknown
+
+    import_name = body.import_name or session.get("source_filename") or "export_trieur"
+    n_imported, n_alerts = import_dataframe(
+        ctx.client, body.target_org_id, import_name, ctx.user.id, df,
+        iban_col=body.iban_col if body.iban_col else None,
+    )
+    return {
+        "n_imported": n_imported,
+        "n_alerts": n_alerts,
+        "unknown_columns": unknown,
+        "added_to_master_columns": added,
+    }
+
+
 @app.post("/orgs/{org_id}/pipeline/sessions/{session_id}/mapping")
 def apply_pipeline_mapping(
     org_id: str, session_id: str, body: PipelineMapping, ctx: AuthCtx = Depends(require_org_access),

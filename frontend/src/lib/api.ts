@@ -329,6 +329,115 @@ export function previewImport(orgId: string, file: File) {
   return importRequest<ImportPreview>(orgId, file, { dryRun: true })
 }
 
+// ---------------------------------------------------------------
+// Cockpit -- chantiers de développement du logiciel lui-même (voir
+// api/main.py, section "Cockpit"). Réservé aux administrateurs : ces
+// appels renvoient une ApiError 403 pour tout autre compte.
+// ---------------------------------------------------------------
+
+export const CHANTIER_STATUSES = ['a_faire', 'en_cours', 'attente_retour', 'termine', 'abandonne'] as const
+export type ChantierStatus = (typeof CHANTIER_STATUSES)[number]
+export const CHANTIER_PRIORITIES = ['basse', 'normale', 'haute'] as const
+export type ChantierPriority = (typeof CHANTIER_PRIORITIES)[number]
+
+export type Chantier = {
+  id: string
+  org_id: string
+  title: string
+  status: ChantierStatus
+  priority: ChantierPriority
+  theme: string | null
+  created_by: string
+  created_at: string
+  updated_at: string
+}
+
+export type Section = {
+  id: string
+  org_id: string
+  nom: string
+  position: number
+}
+
+export type ChantierMessage = {
+  id: string
+  chantier_id: string
+  author_type: 'user' | 'claude'
+  author: string
+  body: string
+  created_at: string
+}
+
+export type ChantierTodo = {
+  id: string
+  chantier_id: string
+  body: string
+  done: boolean
+  position: number
+  done_at: string | null
+}
+
+export function listChantiers(orgId: string) {
+  return request<Chantier[]>(`/orgs/${orgId}/chantiers`)
+}
+
+export function listSections(orgId: string) {
+  return request<Section[]>(`/orgs/${orgId}/sections`)
+}
+
+export function createChantier(
+  orgId: string,
+  body: { title: string; priority: ChantierPriority; theme?: string | null },
+) {
+  return request<Chantier>(`/orgs/${orgId}/chantiers`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function createSection(orgId: string, nom: string) {
+  return request<Section>(`/orgs/${orgId}/sections`, {
+    method: 'POST',
+    body: JSON.stringify({ nom }),
+  })
+}
+
+export function updateChantierStatus(orgId: string, chantierId: string, status: ChantierStatus) {
+  return request<{ id: string; status: ChantierStatus }>(
+    `/orgs/${orgId}/chantiers/${chantierId}/status`,
+    { method: 'PATCH', body: JSON.stringify({ status }) },
+  )
+}
+
+export function listChantierMessages(orgId: string, chantierId: string) {
+  return request<ChantierMessage[]>(`/orgs/${orgId}/chantiers/${chantierId}/messages`)
+}
+
+export function addChantierMessage(orgId: string, chantierId: string, body: string) {
+  return request<ChantierMessage[]>(`/orgs/${orgId}/chantiers/${chantierId}/messages`, {
+    method: 'POST',
+    body: JSON.stringify({ body }),
+  })
+}
+
+export function listChantierTodos(orgId: string, chantierId: string) {
+  return request<ChantierTodo[]>(`/orgs/${orgId}/chantiers/${chantierId}/todos`)
+}
+
+export function addChantierTodo(orgId: string, chantierId: string, body: string) {
+  return request<ChantierTodo[]>(`/orgs/${orgId}/chantiers/${chantierId}/todos`, {
+    method: 'POST',
+    body: JSON.stringify({ body }),
+  })
+}
+
+export function setChantierTodoDone(orgId: string, chantierId: string, todoId: string, done: boolean) {
+  return request<{ id: string; done: boolean }>(
+    `/orgs/${orgId}/chantiers/${chantierId}/todos/${todoId}`,
+    { method: 'PATCH', body: JSON.stringify({ done }) },
+  )
+}
+
 export function confirmImport(
   orgId: string,
   file: File,

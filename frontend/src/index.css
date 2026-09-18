@@ -29,6 +29,30 @@
   }
 }
 
+/* Cockpit : dark par défaut (demande explicite), palette réellement
+   copiée sur celle de Jarvis (shadcn/ui, tokens oklch -- voir
+   src/index.css de jarvis-assistant, bloc `.dark`), pas une devinette
+   ni le --background/--foreground générique du reste de l'app. Scopée
+   à .cockpit-dark (portée par CockpitScreen) : les autres écrans
+   gardent leur bascule par défaut du système (prefers-color-scheme)
+   sans qu'on y touche. */
+.cockpit-dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --muted-bg: oklch(0.269 0 0);
+  --muted: oklch(0.708 0 0);
+  --border: oklch(1 0 0 / 10%);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --danger: oklch(0.704 0.191 22.216);
+  --danger-foreground: oklch(0.985 0 0);
+  background: var(--background);
+  color: var(--foreground);
+  min-height: 100vh;
+}
+
 * {
   box-sizing: border-box;
 }

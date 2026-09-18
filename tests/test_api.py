@@ -893,3 +893,212 @@ def test_export_xlsx_returns_spreadsheet_content_type(client_factory):
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     assert len(res.content) > 0
+
+
+# ---------------------------------------------------------------
+# Cockpit -- chantiers de développement (réservé aux administrateurs)
+# ---------------------------------------------------------------
+
+ADMIN_PROFILE = {"id": "user-1", "full_name": "Alice", "is_super_admin": True}
+
+
+def test_cockpit_forbidden_for_non_admin(client_factory):
+    fake = _make_client()  # profil par défaut : is_super_admin=False
+    tc = client_factory(fake)
+    res = tc.get("/orgs/org-1/chantiers", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 403
+
+
+def test_cockpit_forbidden_for_member_without_org_access(client_factory):
+    """Un compte non-admin, même membre d'un AUTRE environnement, ne
+    peut pas voir les chantiers de org-1 -- require_org_access s'applique
+    avant require_cockpit_access."""
+    fake = _make_client(memberships=[])
+    tc = client_factory(fake)
+    res = tc.get("/orgs/org-1/chantiers", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 403
+
+
+def test_create_and_list_chantiers(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+
+    res = tc.post(
+        "/orgs/org-1/chantiers",
+        json={"title": "Migrer vers React", "priority": "haute", "theme": "Frontend"},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    created = res.json()
+    assert created["title"] == "Migrer vers React"
+    assert created["priority"] == "haute"
+    assert created["theme"] == "Frontend"
+
+    res = tc.get("/orgs/org-1/chantiers", headers=headers)
+    assert res.status_code == 200
+    assert [c["title"] for c in res.json()] == ["Migrer vers React"]
+
+
+def test_create_chantier_requires_title(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/chantiers",
+        json={"title": "   "},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_create_chantier_rejects_invalid_priority(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/chantiers",
+        json={"title": "X", "priority": "urgentissime"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_create_and_list_sections(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+
+    res = tc.post("/orgs/org-1/sections", json={"nom": "Frontend"}, headers=headers)
+    assert res.status_code == 200
+    assert res.json()["nom"] == "Frontend"
+
+    res = tc.get("/orgs/org-1/sections", headers=headers)
+    assert [s["nom"] for s in res.json()] == ["Frontend"]
+
+
+def test_update_chantier_status(client_factory):
+    fake = _make_client(
+        profiles=[ADMIN_PROFILE],
+        chantiers=[{
+            "id": "ch-1", "org_id": "org-1", "title": "X", "status": "a_faire",
+            "priority": "normale", "theme": None, "created_by": "user-1",
+        }],
+    )
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+
+    res = tc.patch("/orgs/org-1/chantiers/ch-1/status", json={"status": "en_cours"}, headers=headers)
+    assert res.status_code == 200
+
+    res = tc.get("/orgs/org-1/chantiers", headers=headers)
+    assert res.json()[0]["status"] == "en_cours"
+
+
+def test_update_chantier_status_rejects_invalid_status(client_factory):
+    fake = _make_client(
+        profiles=[ADMIN_PROFILE],
+        chantiers=[{"id": "ch-1", "org_id": "org-1", "title": "X", "status": "a_faire"}],
+    )
+    tc = client_factory(fake)
+    res = tc.patch(
+        "/orgs/org-1/chantiers/ch-1/status",
+        json={"status": "nimportequoi"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_update_chantier_status_wrong_org_is_404(client_factory):
+    """Un chantier d'un autre environnement ne doit pas être modifiable
+    en devinant juste son id -- même garde que resolve_dedup_alert."""
+    fake = _make_client(
+        profiles=[ADMIN_PROFILE],
+        chantiers=[{"id": "ch-1", "org_id": "org-autre", "title": "X", "status": "a_faire"}],
+    )
+    tc = client_factory(fake)
+    res = tc.patch(
+        "/orgs/org-1/chantiers/ch-1/status",
+        json={"status": "en_cours"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 404
+
+
+def test_chantier_messages_roundtrip(client_factory):
+    fake = _make_client(
+        profiles=[ADMIN_PROFILE],
+        chantiers=[{"id": "ch-1", "org_id": "org-1", "title": "X", "status": "a_faire"}],
+    )
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+
+    res = tc.get("/orgs/org-1/chantiers/ch-1/messages", headers=headers)
+    assert res.status_code == 200
+    assert res.json() == []
+
+    res = tc.post(
+        "/orgs/org-1/chantiers/ch-1/messages", json={"body": "Ça avance."}, headers=headers,
+    )
+    assert res.status_code == 200
+    assert [m["body"] for m in res.json()] == ["Ça avance."]
+    assert res.json()[0]["author_type"] == "user"
+
+
+def test_chantier_message_empty_body_is_400(client_factory):
+    fake = _make_client(
+        profiles=[ADMIN_PROFILE],
+        chantiers=[{"id": "ch-1", "org_id": "org-1", "title": "X", "status": "a_faire"}],
+    )
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/chantiers/ch-1/messages", json={"body": "   "},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_chantier_messages_wrong_org_is_404(client_factory):
+    fake = _make_client(
+        profiles=[ADMIN_PROFILE],
+        chantiers=[{"id": "ch-1", "org_id": "org-autre", "title": "X", "status": "a_faire"}],
+    )
+    tc = client_factory(fake)
+    res = tc.get("/orgs/org-1/chantiers/ch-1/messages", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 404
+
+
+def test_chantier_todos_roundtrip_and_toggle(client_factory):
+    fake = _make_client(
+        profiles=[ADMIN_PROFILE],
+        chantiers=[{"id": "ch-1", "org_id": "org-1", "title": "X", "status": "a_faire"}],
+    )
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+
+    res = tc.post("/orgs/org-1/chantiers/ch-1/todos", json={"body": "Écrire les tests"}, headers=headers)
+    assert res.status_code == 200
+    todos = res.json()
+    assert [t["body"] for t in todos] == ["Écrire les tests"]
+    assert not todos[0].get("done")
+    todo_id = todos[0]["id"]
+
+    res = tc.patch(
+        f"/orgs/org-1/chantiers/ch-1/todos/{todo_id}", json={"done": True}, headers=headers,
+    )
+    assert res.status_code == 200
+    assert res.json()["done"] is True
+
+    res = tc.get("/orgs/org-1/chantiers/ch-1/todos", headers=headers)
+    assert res.json()[0]["done"] is True
+
+
+def test_chantier_todo_unknown_id_is_404(client_factory):
+    fake = _make_client(
+        profiles=[ADMIN_PROFILE],
+        chantiers=[{"id": "ch-1", "org_id": "org-1", "title": "X", "status": "a_faire"}],
+    )
+    tc = client_factory(fake)
+    res = tc.patch(
+        "/orgs/org-1/chantiers/ch-1/todos/todo-inconnu", json={"done": True},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 404

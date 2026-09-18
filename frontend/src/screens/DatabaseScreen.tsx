@@ -2,15 +2,13 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { useAuth } from '@/lib/AuthContext'
+import { useIsAdmin, useOrgs } from '@/lib/useAccount'
 import {
   ApiError,
   exportRecords,
   getMasterColumns,
-  getMe,
-  listOrgs,
   listRecords,
   type ColFilters,
-  type Organization,
   type RecordRow,
 } from '@/lib/api'
 import { RecordEditDialog } from './RecordEditDialog'
@@ -43,11 +41,8 @@ type Tab = 'clients' | 'import' | 'columns'
 export function DatabaseScreen() {
   const { session, signOut } = useAuth()
 
-  const [orgs, setOrgs] = useState<Organization[] | null>(null)
-  const [orgsError, setOrgsError] = useState<string | null>(null)
-  const [orgId, setOrgId] = useState<string | null>(null)
-
-  const [isAdmin, setIsAdmin] = useState(false)
+  const { orgs, orgsError, orgId, setOrgId } = useOrgs()
+  const { isAdmin } = useIsAdmin()
 
   const [tab, setTab] = useState<Tab>('clients')
 
@@ -81,41 +76,6 @@ export function DatabaseScreen() {
   const [masterColumns, setMasterColumnsState] = useState<string[]>([])
   const [exporting, setExporting] = useState<'csv' | 'xlsx' | null>(null)
   const [exportError, setExportError] = useState<string | null>(null)
-
-  // Organisations accessibles (GET /orgs) -- une fois connecté.
-  useEffect(() => {
-    let cancelled = false
-    listOrgs()
-      .then((data) => {
-        if (cancelled) return
-        setOrgs(data)
-        if (data.length > 0) setOrgId(data[0].id)
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return
-        setOrgsError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  // Statut admin (GET /me) -- détermine si les contrôles d'édition des
-  // colonnes maîtres sont proposés (le write endpoint les refuse de
-  // toute façon en 403, ceci évite juste de les montrer pour rien).
-  useEffect(() => {
-    let cancelled = false
-    getMe()
-      .then((data) => {
-        if (!cancelled) setIsAdmin(Boolean(data.profile.is_super_admin))
-      })
-      .catch(() => {
-        // Pas bloquant : en cas d'échec, on reste en lecture seule.
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
 
   // Colonnes maîtres de l'environnement -- utilisées pour restreindre le
   // champ proposé en modification en masse (BulkActions) aux vraies clés

@@ -26,8 +26,12 @@ from fastapi.responses import StreamingResponse
 
 from trieur.db import (
     LIST_PAGE_SIZE,
+    add_chantier_message,
+    add_chantier_todo,
     add_org_master_columns,
     count_records,
+    create_chantier,
+    create_section,
     delete_record,
     delete_saved_view,
     get_last_import_batch,
@@ -37,12 +41,18 @@ from trieur.db import (
     get_record,
     import_dataframe,
     list_all_records,
+    list_chantier_messages,
+    list_chantier_todos,
+    list_chantiers,
     list_dedup_alerts,
     list_records,
     list_saved_views,
+    list_sections,
     resolve_dedup_alert,
     save_org_master_columns,
     save_saved_view,
+    set_chantier_todo_done,
+    update_chantier_status,
     update_record,
 )
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
@@ -149,6 +159,15 @@ def require_org_access(org_id: str, ctx: AuthCtx = Depends(get_current_ctx)) -> 
     )
     if org_id not in {o["id"] for o in orgs}:
         raise HTTPException(status_code=403, detail="Accès refusé à cet environnement.")
+    return ctx
+
+
+def require_cockpit_access(ctx: AuthCtx = Depends(require_org_access)) -> AuthCtx:
+    """Le Cockpit sert au développement du logiciel lui-même (chantiers),
+    pas aux données clients -- réservé aux administrateurs, même règle
+    que views/tab_cockpit.py:render()."""
+    if not ctx.profile.get("is_super_admin"):
+        raise HTTPException(status_code=403, detail="Le Cockpit est réservé aux administrateurs.")
     return ctx
 
 
@@ -549,3 +568,143 @@ def delete_saved_view_endpoint(org_id: str, view_id: str, ctx: AuthCtx = Depends
         raise HTTPException(status_code=404, detail="Vue enregistrée introuvable.")
     delete_saved_view(ctx.client, view_id)
     return {"id": view_id, "deleted": True}
+
+
+# ---------------------------------------------------------------
+# Cockpit -- chantiers de développement du logiciel lui-même.
+# Réservé aux administrateurs (require_cockpit_access), même périmètre
+# que views/tab_cockpit.py : aucune logique métier n'est réécrite ici,
+# uniquement des appels aux fonctions déjà en place dans trieur/db.py.
+# ---------------------------------------------------------------
+
+def _get_chantier_or_404(ctx: AuthCtx, org_id: str, chantier_id: str) -> dict:
+    """`update_chantier_status`/`list_chantier_messages`/etc. (trieur/db.py)
+    ne filtrent que par id de chantier, pas par org -- comme
+    delete_saved_view_endpoint ci-dessus, on vérifie ici que le chantier
+    appartient bien à CET environnement avant d'agir, pour qu'un id
+    deviné ne suffise pas à lire/modifier le chantier d'un autre org."""
+    chantiers = list_chantiers(ctx.client, org_id)
+    chantier = next((c for c in chantiers if c["id"] == chantier_id), None)
+    if chantier is None:
+        raise HTTPException(status_code=404, detail="Chantier introuvable.")
+    return chantier
+
+
+@app.get("/orgs/{org_id}/chantiers")
+def get_chantiers(org_id: str, ctx: AuthCtx = Depends(require_cockpit_access)):
+    return list_chantiers(ctx.client, org_id)
+
+
+@app.get("/orgs/{org_id}/sections")
+def get_sections(org_id: str, ctx: AuthCtx = Depends(require_cockpit_access)):
+    return list_sections(ctx.client, org_id)
+
+
+class ChantierCreate(BaseModel):
+    title: str
+    priority: str = "normale"
+    theme: Optional[str] = None
+
+
+@app.post("/orgs/{org_id}/chantiers")
+def post_chantier(org_id: str, body: ChantierCreate, ctx: AuthCtx = Depends(require_cockpit_access)):
+    if not body.title.strip():
+        raise HTTPException(status_code=400, detail="Le titre du chantier est obligatoire.")
+    if body.priority not in ("basse", "normale", "haute"):
+        raise HTTPException(status_code=400, detail="Priorité invalide.")
+    chantier = create_chantier(
+        ctx.client, org_id, body.title.strip(), body.priority, ctx.user.id,
+        theme=body.theme.strip() if body.theme and body.theme.strip() else None,
+    )
+    return chantier
+
+
+class SectionCreate(BaseModel):
+    nom: str
+
+
+@app.post("/orgs/{org_id}/sections")
+def post_section(org_id: str, body: SectionCreate, ctx: AuthCtx = Depends(require_cockpit_access)):
+    if not body.nom.strip():
+        raise HTTPException(status_code=400, detail="Le nom de la section est obligatoire.")
+    return create_section(ctx.client, org_id, body.nom.strip())
+
+
+CHANTIER_STATUSES = ("a_faire", "en_cours", "attente_retour", "termine", "abandonne")
+
+
+class ChantierStatusUpdate(BaseModel):
+    status: str
+
+
+@app.patch("/orgs/{org_id}/chantiers/{chantier_id}/status")
+def patch_chantier_status(
+    org_id: str, chantier_id: str, body: ChantierStatusUpdate, ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    if body.status not in CHANTIER_STATUSES:
+        raise HTTPException(status_code=400, detail="Statut invalide.")
+    _get_chantier_or_404(ctx, org_id, chantier_id)
+    update_chantier_status(ctx.client, chantier_id, body.status)
+    return {"id": chantier_id, "status": body.status}
+
+
+@app.get("/orgs/{org_id}/chantiers/{chantier_id}/messages")
+def get_chantier_messages(org_id: str, chantier_id: str, ctx: AuthCtx = Depends(require_cockpit_access)):
+    _get_chantier_or_404(ctx, org_id, chantier_id)
+    return list_chantier_messages(ctx.client, chantier_id)
+
+
+class ChantierMessageCreate(BaseModel):
+    body: str
+
+
+@app.post("/orgs/{org_id}/chantiers/{chantier_id}/messages")
+def post_chantier_message(
+    org_id: str, chantier_id: str, body: ChantierMessageCreate, ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    if not body.body.strip():
+        raise HTTPException(status_code=400, detail="Le message est vide.")
+    _get_chantier_or_404(ctx, org_id, chantier_id)
+    add_chantier_message(ctx.client, chantier_id, body.body.strip(), ctx.user.id)
+    return list_chantier_messages(ctx.client, chantier_id)
+
+
+@app.get("/orgs/{org_id}/chantiers/{chantier_id}/todos")
+def get_chantier_todos(org_id: str, chantier_id: str, ctx: AuthCtx = Depends(require_cockpit_access)):
+    _get_chantier_or_404(ctx, org_id, chantier_id)
+    return list_chantier_todos(ctx.client, chantier_id)
+
+
+class ChantierTodoCreate(BaseModel):
+    body: str
+
+
+@app.post("/orgs/{org_id}/chantiers/{chantier_id}/todos")
+def post_chantier_todo(
+    org_id: str, chantier_id: str, body: ChantierTodoCreate, ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    if not body.body.strip():
+        raise HTTPException(status_code=400, detail="Le point à suivre est vide.")
+    _get_chantier_or_404(ctx, org_id, chantier_id)
+    add_chantier_todo(ctx.client, chantier_id, body.body.strip())
+    return list_chantier_todos(ctx.client, chantier_id)
+
+
+class ChantierTodoUpdate(BaseModel):
+    done: bool
+
+
+@app.patch("/orgs/{org_id}/chantiers/{chantier_id}/todos/{todo_id}")
+def patch_chantier_todo(
+    org_id: str,
+    chantier_id: str,
+    todo_id: str,
+    body: ChantierTodoUpdate,
+    ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    _get_chantier_or_404(ctx, org_id, chantier_id)
+    todos = list_chantier_todos(ctx.client, chantier_id)
+    if not any(t["id"] == todo_id for t in todos):
+        raise HTTPException(status_code=404, detail="Point à suivre introuvable.")
+    set_chantier_todo_done(ctx.client, todo_id, body.done)
+    return {"id": todo_id, "done": body.done}

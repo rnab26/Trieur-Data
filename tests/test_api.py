@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app, get_supabase_client
+from trieur import pipeline_memory
 
 
 # ---------------------------------------------------------------
@@ -217,7 +218,14 @@ def _clear_streamlit_caches():
     get_my_memberships.clear()
     get_org_master_columns.clear()
     list_saved_views.clear()
+    # Le store de trieur/pipeline_memory.py est un dict de MODULE (donc
+    # partagé entre tous les tests du process, contrairement au faux
+    # client Supabase qui est reconstruit à chaque test) -- sans ce
+    # nettoyage, une session créée par un test resterait visible (et son
+    # id pourrait entrer en collision de comptage) dans le test suivant.
+    pipeline_memory._SESSIONS.clear()
     yield
+    pipeline_memory._SESSIONS.clear()
 
 
 @pytest.fixture
@@ -1140,6 +1148,23 @@ def _upload_csv(tc, org_id, content: bytes, filename="clients.csv"):
     )
 
 
+def _set_pipeline_session_org(session_id: str, org_id: str) -> None:
+    """Simule une session de pipeline qui appartient réellement à un
+    AUTRE org (même besoin que l'ancienne mutation directe de
+    fake.postgrest.tables["pipeline_sessions"], mais sur le store en
+    mémoire -- voir trieur/pipeline_memory.py, point 1 de sa docstring :
+    cette vérification d'org_id est maintenant la SEULE protection, donc
+    la seule chose à tester ici)."""
+    pipeline_memory._SESSIONS[session_id]["org_id"] = org_id
+
+
+def _pipeline_rows_data(session_id: str) -> list[dict]:
+    """Les lignes réellement stockées pour cette session (pas juste ce
+    qu'une route renvoie) -- équivalent de l'ancienne lecture directe de
+    fake.postgrest.tables["pipeline_rows"], sur le store en mémoire."""
+    return [r["data"] for r in pipeline_memory._SESSIONS[session_id]["rows"]]
+
+
 def _upload_files(tc, org_id, files: list[tuple], google_sheet_url: str | None = None):
     """`files` : liste de (filename, content, content_type) -- import
     MULTI-FICHIERS (voir create_pipeline_session_endpoint)."""
@@ -1169,11 +1194,11 @@ def test_pipeline_session_create_stages_rows_and_detects_columns(client_factory)
     # (colonne du fichier absente des colonnes maîtres).
     assert body["unknown_columns"] == ["EMAIL"]
 
-    # Les lignes sont bien en staging (pipeline_rows), pas juste renvoyées.
+    # Les lignes sont bien gardées en mémoire (trieur/pipeline_memory.py),
+    # pas juste renvoyées dans l'aperçu.
     session_id = body["session_id"]
-    rows = fake.postgrest.tables["pipeline_rows"]
+    rows = _pipeline_rows_data(session_id)
     assert len(rows) == 2
-    assert all(r["session_id"] == session_id for r in rows)
 
 
 def test_pipeline_session_create_cleans_up_expired_sessions_of_same_org_first(client_factory):
@@ -1192,15 +1217,15 @@ def test_pipeline_session_create_cleans_up_expired_sessions_of_same_org_first(cl
     fresh_own_org = _upload_csv(tc, "org-1", b"NOM\nC\n").json()["session_id"]
 
     now = datetime.now(timezone.utc)
-    by_id = {s["id"]: s for s in fake.postgrest.tables["pipeline_sessions"]}
-    by_id[expired_own_org]["expires_at"] = (now - timedelta(hours=1)).isoformat()
-    by_id[expired_other_org]["expires_at"] = (now - timedelta(hours=1)).isoformat()
+    by_id = pipeline_memory._SESSIONS
+    by_id[expired_own_org]["expires_at"] = now - timedelta(hours=1)
+    by_id[expired_other_org]["expires_at"] = now - timedelta(hours=1)
     by_id[expired_other_org]["org_id"] = "org-2"
-    by_id[fresh_own_org]["expires_at"] = (now + timedelta(hours=23)).isoformat()
+    by_id[fresh_own_org]["expires_at"] = now + timedelta(hours=23)
 
     _upload_csv(tc, "org-1", b"NOM\nD\n")
 
-    remaining_ids = {s["id"] for s in fake.postgrest.tables["pipeline_sessions"]}
+    remaining_ids = set(pipeline_memory._SESSIONS.keys())
     assert expired_own_org not in remaining_ids
     assert fresh_own_org in remaining_ids
     assert expired_other_org in remaining_ids
@@ -1265,7 +1290,7 @@ def test_pipeline_session_get_wrong_org_is_404(client_factory):
     # empêcherait normalement de la voir depuis /orgs/org-1/... -- ici on
     # vérifie que l'API elle-même, pas seulement Supabase, applique cette
     # règle).
-    fake.postgrest.tables["pipeline_sessions"][0]["org_id"] = "org-2"
+    _set_pipeline_session_org(session_id, "org-2")
 
     res = tc.get(f"/orgs/org-1/pipeline/sessions/{session_id}", headers={"Authorization": f"Bearer {TOKEN}"})
     assert res.status_code == 404
@@ -1278,7 +1303,7 @@ def test_pipeline_mapping_wrong_org_is_404(client_factory):
     fake = _make_client()
     tc = client_factory(fake)
     session_id = _upload_csv(tc, "org-1", b"NOM\nDupont\n").json()["session_id"]
-    fake.postgrest.tables["pipeline_sessions"][0]["org_id"] = "org-2"
+    _set_pipeline_session_org(session_id, "org-2")
 
     res = tc.post(
         f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
@@ -1289,8 +1314,8 @@ def test_pipeline_mapping_wrong_org_is_404(client_factory):
 
     # Les lignes n'ont pas été réécrites (toujours les clés source, pas
     # les clés colonnes maîtres qu'aurait produites le mapping).
-    rows = fake.postgrest.tables["pipeline_rows"]
-    assert rows[0]["data"] == {"NOM": "Dupont", "_sheet": "clients.csv :: clients"}
+    rows = _pipeline_rows_data(session_id)
+    assert rows[0] == {"NOM": "Dupont", "_sheet": "clients.csv :: clients"}
 
 
 def test_pipeline_mapping_dry_run_suggests_without_writing(client_factory):
@@ -1327,8 +1352,8 @@ def test_pipeline_mapping_apply_rekeys_rows_and_marks_mapped(client_factory):
     assert body["status"] == "mapped"
     assert body["n_rows_updated"] == 1
 
-    rows = fake.postgrest.tables["pipeline_rows"]
-    assert rows[0]["data"] == {"NOM": "Dupont", "IBAN": "FR7630006000011234567890189"}
+    rows = _pipeline_rows_data(session_id)
+    assert rows[0] == {"NOM": "Dupont", "IBAN": "FR7630006000011234567890189"}
 
     session = get_pipeline_session_via_api(tc, session_id)
     assert session["status"] == "mapped"
@@ -1350,8 +1375,8 @@ def test_pipeline_mapping_applies_suggestion_when_no_mapping_given(client_factor
     )
     assert res.status_code == 200
     assert res.json()["mapping"] == {"NOM": "NOM", "IBAN": "IBAN"}
-    rows = fake.postgrest.tables["pipeline_rows"]
-    assert rows[0]["data"] == {"NOM": "Dupont", "IBAN": "FR7630006000011234567890189"}
+    rows = _pipeline_rows_data(session_id)
+    assert rows[0] == {"NOM": "Dupont", "IBAN": "FR7630006000011234567890189"}
 
 
 def test_pipeline_mapping_all_unassigned_is_400(client_factory):
@@ -1411,11 +1436,11 @@ def test_pipeline_session_multi_file_merges_rows_and_dedupes_display_names(clien
     assert body["row_count"] == 2
     assert sorted(r["NOM"] for r in body["preview_rows"]) == ["Dupont", "Martin"]
 
-    rows = fake.postgrest.tables["pipeline_rows"]
+    rows = _pipeline_rows_data(body["session_id"])
     assert len(rows) == 2
     # Les deux fichiers de même nom ont bien des étiquettes "_sheet"
     # distinctes (suffixe " (2)"), pas confondues.
-    sheets = {r["data"]["_sheet"] for r in rows}
+    sheets = {r["_sheet"] for r in rows}
     assert len(sheets) == 2
     assert any(" (2)" in s for s in sheets)
 
@@ -1575,7 +1600,7 @@ def test_pipeline_rows_wrong_org_is_404(client_factory):
     fake = _make_client()
     tc = client_factory(fake)
     session_id = _upload_pipeline_rows(tc, "org-1", b"NOM\nDupont\n")
-    fake.postgrest.tables["pipeline_sessions"][0]["org_id"] = "org-2"
+    _set_pipeline_session_org(session_id, "org-2")
 
     res = tc.get(
         f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
@@ -1680,7 +1705,7 @@ def test_pipeline_export_wrong_org_is_404(client_factory):
     fake = _make_client()
     tc = client_factory(fake)
     session_id = _upload_pipeline_rows(tc, "org-1", b"NOM\nDupont\n")
-    fake.postgrest.tables["pipeline_sessions"][0]["org_id"] = "org-2"
+    _set_pipeline_session_org(session_id, "org-2")
 
     res = tc.get(
         f"/orgs/org-1/pipeline/sessions/{session_id}/export",
@@ -1859,7 +1884,7 @@ def test_pipeline_dedup_wrong_org_is_404(client_factory):
     fake = _make_client()
     tc = client_factory(fake)
     session_id = _upload_dedup_rows(tc, "org-1", b"NOM,IBAN\nDupont,FR76A\n")
-    fake.postgrest.tables["pipeline_sessions"][0]["org_id"] = "org-2"
+    _set_pipeline_session_org(session_id, "org-2")
 
     res = tc.post(
         f"/orgs/org-1/pipeline/sessions/{session_id}/dedup",

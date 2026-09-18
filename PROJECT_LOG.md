@@ -2572,3 +2572,92 @@ de merge reste sa décision.
 **Visuel/design** : l'utilisateur a indiqué qu'il fournira lui-même un
 template de design à suivre pour une prochaine passe — non traité dans
 ce lot, volontairement, en attendant ce template.
+
+---
+
+## Pipeline : staging Postgres remplacé par un store en mémoire (2026-09-18)
+
+**Contexte** : l'utilisateur travaille avec des fichiers jusqu'à 2
+millions de lignes, gérés instantanément par l'ancienne app Streamlit
+(`st.session_state`, zéro écriture réseau avant la validation finale).
+Sur un test réel de 92 000 lignes contre la nouvelle API FastAPI, même
+après le correctif de parallélisation des lots (`append_pipeline_rows_bulk`),
+c'est resté trop lent — cause racine : chaque ligne importée était
+écrite en Postgres (`trieur_data.pipeline_rows`) dès l'upload, avant
+tout mapping/confirmation, un coût réseau que Streamlit n'avait jamais
+eu et qui ne tient pas à l'échelle visée.
+
+**Fait** :
+- `trieur/pipeline_memory.py` (nouveau) : store en mémoire process
+  (dict de module + `threading.Lock`), TTL 24h avec balayage
+  opportuniste par org (même principe que l'ancien
+  `delete_expired_pipeline_sessions_for_org`, mais sans réseau).
+  Fonctions : `create_session`, `get_session`, `delete_session`,
+  `delete_expired_sessions_for_org`, `update_session_status`,
+  `update_session_dedup`, `set_session_mapping`, `append_rows`,
+  `list_rows`, `map_rows` (réécrit toutes les lignes en UN SEUL passage
+  O(n), remplace l'ancienne boucle `update_pipeline_row_data` par ligne
+  — plus rapide ET plus simple, plus de réseau à amortir).
+- `api/main.py` : les 6 routes pipeline (`POST/GET .../sessions`,
+  `GET .../rows`, `GET .../export`, `POST .../mapping`, `POST/DELETE
+  .../dedup`) lisent/écrivent ce store au lieu de `trieur/db.py`. Logique
+  métier (filtres, dédoublonnage, export, auto-assignation mapping)
+  inchangée — seule la couche de stockage change.
+- `trieur/db.py` : fonctions `pipeline_sessions`/`pipeline_rows`
+  (`create_pipeline_session`, `get_pipeline_session`,
+  `append_pipeline_rows(_bulk)`, `list_pipeline_rows`,
+  `update_pipeline_row_data`, `update_pipeline_session_status/dedup`,
+  `delete_pipeline_session`, `delete_expired_pipeline_sessions_for_org`)
+  **gardées mais plus appelées par l'API** — code mort. Idem pour les
+  tables `trieur_data.pipeline_sessions`/`pipeline_rows` et les
+  migrations 0010/0011/0012 qui les créent : **aucune suppression
+  destructrice faite ici**, décision volontairement laissée à
+  l'utilisateur. `pipeline_remembered_mappings` et
+  `pipeline_export_presets` (mapping mémorisé par forme de fichier,
+  presets d'export) restent en Postgres, inchangés — ce ne sont pas des
+  données de travail volumineuses, juste des petites préférences par
+  compte/org.
+- Tests : `tests/test_api.py` (tests pipeline réécrits contre le store
+  en mémoire au lieu du faux client Postgres) + nouveau
+  `tests/test_pipeline_memory.py` (13 tests directs du module, dont un
+  test à 500 000 lignes synthétiques mesurant le temps réel). Suite
+  complète : **291 passed** (`python3 -m pytest -q`).
+  `tests/test_db_pipeline.py` (9 tests) laissé tel quel : il teste
+  toujours les fonctions `trieur/db.py` ci-dessus, désormais du code mort
+  côté API mais toujours du code réel et fonctionnel — pas de couverture
+  supprimée, juste plus rien qui l'exerce en production.
+
+**Mesure réelle (pas une estimation)** : création d'une session + 500 000
+lignes synthétiques, 100% en mémoire, zéro réseau : **~0.56 à 0.78s**
+selon la machine (voir la sortie `[perf]` du test
+`test_large_scale_session_creation_is_fast`). Confirme que le coût
+mesuré à 92 000 lignes réelles (~2min, réseau Supabase) était bien le
+staging Postgres, pas la logique métier.
+
+**Sécurité — changement réel, pas cosmétique** : la RLS Postgres ne
+protège plus ces données de travail (elles ne passent plus par
+Supabase). `pipeline_memory.get_session()` ne filtre PAS par `org_id`
+lui-même — c'est `api/main.py:_get_pipeline_session_or_404` qui compare
+explicitement `session["org_id"]` (même code qu'avant ce changement),
+mais c'est DÉSORMAIS LA SEULE protection contre un accès cross-org, sans
+policy RLS en secours. Vérifié : les 3 tests `*_wrong_org_is_404`
+(session/rows/export/mapping/dedup) passent toujours contre le nouveau
+store.
+
+**Limite réelle, documentée dans le code (`pipeline_memory.py`)** : ce
+dict vit dans la mémoire du process uvicorn — perdu à chaque
+déploiement/crash/restart, exactement comme `st.session_state` avant
+(pas une régression). Conséquence : cette API ne peut PAS tourner en
+plusieurs instances derrière un load-balancer sans un store partagé
+(Redis, etc.) — sans objet sur l'hébergement actuel (une seule instance
+Render), mais à revoir explicitement si l'app doit un jour scaler
+horizontalement.
+
+**Pas fait dans ce lot, à décider par un humain** :
+- Suppression (ou non) des tables `pipeline_sessions`/`pipeline_rows`
+  et des migrations 0010/0011/0012 qui les créent, et des fonctions
+  `trieur/db.py` correspondantes — tout ça est désormais du code/schéma
+  mort côté pipeline, gardé intact volontairement.
+
+**Commité** sur `fix/pipeline-full-parity` — **pas pushé** (l'agent
+suivant vérifie et pousse, voir consigne de la tâche).

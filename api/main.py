@@ -30,12 +30,9 @@ from trieur.db import (
     add_chantier_message,
     add_chantier_todo,
     add_org_master_columns,
-    append_pipeline_rows_bulk,
     count_records,
     create_chantier,
-    create_pipeline_session,
     create_section,
-    delete_expired_pipeline_sessions_for_org,
     delete_pipeline_export_preset,
     delete_record,
     delete_saved_view,
@@ -44,7 +41,6 @@ from trieur.db import (
     get_my_memberships,
     get_my_profile,
     get_org_master_columns,
-    get_pipeline_session,
     get_record,
     get_remembered_mapping_for_shape,
     import_dataframe,
@@ -54,7 +50,6 @@ from trieur.db import (
     list_chantiers,
     list_dedup_alerts,
     list_pipeline_export_presets,
-    list_pipeline_rows,
     list_records,
     list_saved_views,
     list_sections,
@@ -68,11 +63,9 @@ from trieur.db import (
     set_active_column_set,
     set_chantier_todo_done,
     update_chantier_status,
-    update_pipeline_row_data,
-    update_pipeline_session_dedup,
-    update_pipeline_session_status,
     update_record,
 )
+from trieur import pipeline_memory
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
 from trieur.filters import dedupe_dataframe, duplicate_groups
 from trieur.io_excel import is_google_sheet_url, read_csv_file, read_excel_all_sheets_from_file, read_google_sheets_all_sheets
@@ -622,9 +615,17 @@ async def import_records(
 
 # ---------------------------------------------------------------
 # Pipeline "Trieur de Data" -- étape 1-2 : import multi-fichiers/Google
-# Sheets + mapping des colonnes (équivalent onglets 1-2 Streamlit -- voir
-# supabase/migrations/0010_pipeline_staging.sql,
-# 0012_pipeline_parity.sql et trieur/db.py pour la couche de données).
+# Sheets + mapping des colonnes (équivalent onglets 1-2 Streamlit). Les
+# données de travail (lignes + métadonnées de session) vivent EN MÉMOIRE
+# process (trieur/pipeline_memory.py), pas en Postgres -- voir la
+# docstring de ce module pour le pourquoi (parité avec `st.session_state`
+# de l'app Streamlit d'origine, jamais d'écriture réseau avant la
+# validation finale du pipeline) et les conséquences réelles (sécurité,
+# perte au restart, mono-instance). trieur_data.pipeline_sessions /
+# pipeline_rows (migrations 0010/0011/0012) restent en base mais ne sont
+# plus lues/écrites par cette route -- code mort côté API, décision de
+# suppression laissée à un humain (voir PROJECT_LOG.md).
+#
 # Les colonnes MAÎTRES restent celles de l'environnement
 # (trieur_data.organizations.master_columns) : mêmes GET/POST que le CRM
 # ci-dessous (get_master_columns/set_master_columns), volontairement PAS
@@ -644,12 +645,6 @@ async def import_records(
 # ---------------------------------------------------------------
 
 PIPELINE_PREVIEW_SIZE = 10
-# Taille de lot pour le staging (append_pipeline_rows_bulk) : évite
-# d'envoyer un unique INSERT de plusieurs centaines de milliers de lignes
-# à PostgREST en un seul appel HTTP -- mais SANS le SELECT+UPDATE
-# intermédiaire par lot qui causait le vrai ralentissement (voir
-# trieur/db.py:append_pipeline_rows_bulk pour la mesure).
-PIPELINE_APPEND_BATCH = 2000
 
 
 def _parse_pipeline_file(filename: str, content: bytes) -> dict[str, pd.DataFrame]:
@@ -741,9 +736,14 @@ def _without_sheet_key(data: dict) -> dict:
 
 def _get_pipeline_session_or_404(ctx: AuthCtx, org_id: str, session_id: str) -> dict:
     """Une session appartenant à un AUTRE environnement, ou expirée/déjà
-    nettoyée par cleanup_expired_pipeline_sessions(), est traitée comme
-    introuvable -- jamais une erreur serveur (voir trieur/db.py:get_pipeline_session)."""
-    session = get_pipeline_session(ctx.client, session_id)
+    purgée par le TTL (voir trieur/pipeline_memory.py), est traitée comme
+    introuvable -- jamais une erreur serveur. `ctx` n'est plus utilisé
+    pour lire cette session (elle ne passe plus par Supabase/RLS) mais
+    reste au même endroit dans la signature pour ne pas changer tous les
+    appelants -- la vérification `org_id` ci-dessous est DÉSORMAIS LA
+    SEULE protection contre l'accès cross-org, voir la docstring de
+    trieur/pipeline_memory.py, point 1."""
+    session = pipeline_memory.get_session(session_id)
     if not session or session["org_id"] != org_id:
         raise HTTPException(status_code=404, detail="Session de pipeline introuvable ou expirée.")
     return session
@@ -769,10 +769,9 @@ async def create_pipeline_session_endpoint(
     Excel/CSV et/ou un Google Sheets public (tous ses onglets), DANS LE
     MÊME BATCH -- même import multi-fichiers que
     views/tab2_import_mapping.py (`st.file_uploader(accept_multiple_files=True)`
-    + champ URL) -- met les lignes en staging (trieur_data.pipeline_rows,
-    TTL 24h) via un INSERT en gros lots (voir
-    trieur/db.py:append_pipeline_rows_bulk -- correctif de performance,
-    plus de SELECT+UPDATE par lot de 500 lignes), et renvoie un aperçu +
+    + champ URL) -- garde les lignes EN MÉMOIRE process (TTL 24h, voir
+    trieur/pipeline_memory.py -- plus aucune écriture réseau ici,
+    contrairement à l'ancien staging Postgres), et renvoie un aperçu +
     les colonnes détectées pour l'étape de mapping suivante. N'écrit
     jamais dans trieur_data.records (donnée permanente) -- ça reste la
     validation finale du pipeline, pas encore portée ici."""
@@ -793,19 +792,20 @@ async def create_pipeline_session_endpoint(
         raise HTTPException(status_code=400, detail="Fichier(s) vide(s) ou sans ligne exploitable.")
 
     # Nettoyage opportuniste des sessions expirées de CET org avant d'en
-    # ouvrir une nouvelle (revue PR #24, point #8 -- voir docstring de
-    # delete_expired_pipeline_sessions_for_org) -- best-effort : un échec
-    # ici ne doit jamais empêcher l'import en cours, juste laisser un peu
-    # plus de sessions périmées trainer jusqu'au prochain appel.
+    # ouvrir une nouvelle (revue PR #24, point #8 -- même principe que
+    # l'ancien trieur.db.delete_expired_pipeline_sessions_for_org, mais en
+    # mémoire, voir trieur/pipeline_memory.py) -- ne peut plus échouer
+    # pour une raison réseau, mais on garde le même filet de sécurité :
+    # un souci ici ne doit jamais empêcher l'import en cours.
     try:
-        delete_expired_pipeline_sessions_for_org(ctx.client, org_id)
+        pipeline_memory.delete_expired_sessions_for_org(org_id)
     except Exception:
         pass
 
     display_names = [name for name, _ in files_data] + ([url] if url else [])
     source_filename = display_names[0] if len(display_names) == 1 else f"{len(display_names)} fichiers"
-    session = create_pipeline_session(ctx.client, org_id, ctx.user.id, source_filename=source_filename)
-    append_pipeline_rows_bulk(ctx.client, session["id"], rows, batch_size=PIPELINE_APPEND_BATCH)
+    session = pipeline_memory.create_session(org_id, ctx.user.id, source_filename=source_filename)
+    pipeline_memory.append_rows(session["id"], rows)
 
     master_cols = get_org_master_columns(ctx.client, org_id)
     return {
@@ -821,7 +821,7 @@ async def create_pipeline_session_endpoint(
 @app.get("/orgs/{org_id}/pipeline/sessions/{session_id}")
 def get_pipeline_session_endpoint(org_id: str, session_id: str, ctx: AuthCtx = Depends(require_org_access)):
     session = _get_pipeline_session_or_404(ctx, org_id, session_id)
-    preview = list_pipeline_rows(ctx.client, session_id, limit=PIPELINE_PREVIEW_SIZE)
+    preview = pipeline_memory.list_rows(session_id, limit=PIPELINE_PREVIEW_SIZE)
     return {
         "session_id": session_id,
         "status": session["status"],
@@ -845,19 +845,15 @@ class PipelineMapping(BaseModel):
 
 def _all_pipeline_rows(client, session_id: str) -> list[dict]:
     """Toutes les lignes d'une session de pipeline (pas juste l'aperçu),
-    paginées avec LIST_PAGE_SIZE -- même boucle que apply_pipeline_mapping
-    ci-dessous, pour filtrer/exporter sur l'INTÉGRALITÉ de la session, pas
-    seulement le lot déjà affiché à l'écran (même principe que
-    list_all_records côté CRM)."""
-    all_rows: list[dict] = []
-    offset = 0
-    while True:
-        page = list_pipeline_rows(client, session_id, limit=LIST_PAGE_SIZE, offset=offset)
-        if not page:
-            break
-        all_rows.extend(page)
-        offset += len(page)
-    return all_rows
+    pour filtrer/exporter sur l'INTÉGRALITÉ de la session, pas seulement
+    le lot déjà affiché à l'écran (même principe que list_all_records
+    côté CRM). `client` n'est plus utilisé (les lignes ne passent plus
+    par Supabase, voir trieur/pipeline_memory.py) -- gardé dans la
+    signature pour ne pas changer tous les appelants ; la pagination par
+    lots (LIST_PAGE_SIZE) n'a plus de raison d'être ici non plus : plus
+    de coût réseau à amortir en chargeant tout d'un coup depuis la
+    mémoire du process."""
+    return pipeline_memory.list_rows(session_id)
 
 
 def _apply_active_dedup(rows: list[dict], session: dict) -> list[dict]:
@@ -892,11 +888,11 @@ def list_pipeline_session_rows(
     col_filters: str = Query("{}", description="JSON : {colonne: {op, value}}"),
     ctx: AuthCtx = Depends(require_org_access),
 ):
-    """Lignes en staging (trieur_data.pipeline_rows) de cette session,
-    filtrées avec les MÊMES fonctions que /orgs/{org_id}/records
-    (_filter_by_search/_filter_by_columns, views/tab_database.py) -- pas
-    une deuxième logique de filtre. Porte sur trieur_data.pipeline_rows
-    (staging TTL 24h), jamais trieur_data.records (donnée permanente).
+    """Lignes de cette session (mémoire process, voir
+    trieur/pipeline_memory.py, TTL 24h), filtrées avec les MÊMES
+    fonctions que /orgs/{org_id}/records (_filter_by_search/
+    _filter_by_columns, views/tab_database.py) -- pas une deuxième
+    logique de filtre. Jamais trieur_data.records (donnée permanente).
 
     Paginée (`page`/`page_size`, même contrat que GET /orgs/{org_id}/records)
     depuis la revue PR #24 (point #7) : avant, cette route renvoyait
@@ -904,8 +900,8 @@ def list_pipeline_session_rows(
     milliers de lignes) alors que l'écran n'en affiche que 50 à la fois.
     Contrairement à /records, la recherche/les filtres portent ici sur
     TOUTE la session (pas seulement la page renvoyée) : `_all_pipeline_rows`
-    charge et filtre l'intégralité du staging côté serveur (comme avant),
-    seule la DÉCOUPE en page change -- `count` reste le total filtré réel,
+    charge et filtre l'intégralité de la session côté serveur (comme
+    avant), seule la DÉCOUPE en page change -- `count` reste le total filtré réel,
     pas juste la taille de la page renvoyée. Le dédoublonnage ACTIF de la
     session (voir .../dedup ci-dessous) est réappliqué ici aussi, après
     le filtre par colonnes -- même ordre que l'onglet 3 Streamlit
@@ -1031,7 +1027,7 @@ def apply_pipeline_mapping(
     _get_pipeline_session_or_404(ctx, org_id, session_id)
     master_cols = get_org_master_columns(ctx.client, org_id)
 
-    sample = list_pipeline_rows(ctx.client, session_id, limit=PIPELINE_PREVIEW_SIZE)
+    sample = pipeline_memory.list_rows(session_id, limit=PIPELINE_PREVIEW_SIZE)
     real_columns = _detected_columns([r["data"] for r in sample])
     sample_df = pd.DataFrame([_without_sheet_key(r["data"]) for r in sample]) if sample else None
     fingerprint = column_fingerprint(real_columns)
@@ -1054,21 +1050,19 @@ def apply_pipeline_mapping(
     if not any(m and m != "(non assigne)" for m in mapping.values()):
         raise HTTPException(status_code=400, detail="Aucune colonne assignée dans ce mapping.")
 
-    n_updated = 0
-    offset = 0
-    while True:
-        page = list_pipeline_rows(ctx.client, session_id, limit=LIST_PAGE_SIZE, offset=offset)
-        if not page:
-            break
-        for row in page:
-            new_data = {
-                master: row["data"][src]
-                for src, master in mapping.items()
-                if master and master != "(non assigne)" and src in row["data"]
-            }
-            update_pipeline_row_data(ctx.client, row["id"], new_data)
-            n_updated += 1
-        offset += len(page)
+    def _apply_mapping(data: dict) -> dict:
+        return {
+            master: data[src]
+            for src, master in mapping.items()
+            if master and master != "(non assigne)" and src in data
+        }
+
+    # Un seul passage O(n) sur toutes les lignes déjà en mémoire (voir
+    # trieur/pipeline_memory.py:map_rows) -- remplace l'ancienne boucle
+    # paginée qui faisait un UPDATE réseau PAR LIGNE (le coût qui rendait
+    # cette étape lente sur un gros fichier) ; le résultat (chaque ligne
+    # réécrite avec les clés colonnes maîtres) est identique.
+    n_updated = pipeline_memory.map_rows(session_id, _apply_mapping)
 
     # Mémorise le mapping CONFIRMÉ pour cette forme de fichier (pas la
     # suggestion en dry_run) -- rejoué automatiquement au prochain import
@@ -1077,7 +1071,8 @@ def apply_pipeline_mapping(
         ctx.client, org_id, fingerprint, mapping_to_remembered(mapping),
     )
 
-    update_pipeline_session_status(ctx.client, session_id, "mapped")
+    pipeline_memory.set_session_mapping(session_id, mapping)
+    pipeline_memory.update_session_status(session_id, "mapped")
     return {"session_id": session_id, "status": "mapped", "mapping": mapping, "n_rows_updated": n_updated}
 
 
@@ -1142,7 +1137,7 @@ def apply_pipeline_dedup(
         }
 
     dedup_config = {"column": body.column, "keep": body.keep}
-    update_pipeline_session_dedup(ctx.client, session_id, dedup_config)
+    pipeline_memory.update_session_dedup(session_id, dedup_config)
     remaining = _apply_active_dedup(rows, {"dedup_config": dedup_config})
     return {
         "session_id": session_id,
@@ -1159,7 +1154,7 @@ def clear_pipeline_dedup(org_id: str, session_id: str, ctx: AuthCtx = Depends(re
     .../export renvoient de nouveau toutes les lignes filtrées, sans
     suppression de doublons."""
     _get_pipeline_session_or_404(ctx, org_id, session_id)
-    update_pipeline_session_dedup(ctx.client, session_id, None)
+    pipeline_memory.update_session_dedup(session_id, None)
     return {"session_id": session_id, "dedup_config": None}
 
 

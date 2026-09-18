@@ -88,6 +88,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "https://trieur-data.onrender.com",
+        "https://trieur-data-app.onrender.com",
     ],
     allow_credentials=True,
     allow_methods=["*"],

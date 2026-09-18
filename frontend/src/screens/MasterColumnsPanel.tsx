@@ -1,16 +1,33 @@
 import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import { ApiError, getMasterColumns, setMasterColumns } from '@/lib/api'
 import { PersonalColumnSets } from './PersonalColumnSets'
 
-// Réglages des colonnes maîtres de l'environnement -- mirroir de
-// views/tab_database.py:_render_settings. `save_org_master_columns`
-// (trieur/db.py) remplace TOUJOURS la liste complète et ordonnée : pas
-// besoin d'endpoints séparés pour renommer/réordonner/supprimer, on
-// renvoie chaque fois la liste entière modifiée via le même
-// POST /orgs/{org_id}/master-columns (déjà réservé aux administrateurs
-// côté API).
+// Copie conforme de views/tab1_colonnes_maitres.py : UN textarea (une
+// colonne par ligne) + UN bouton "Enregistrer" qui remplace toute la
+// liste (dédoublonnage insensible à la casse, ordre préservé -- même
+// logique que le `deduped` cote Python), + UN bouton "Réinitialiser".
+// Pas d'ajout/renommage/suppression un par un : éditer le texte et
+// ré-enregistrer couvre tous les cas, exactement comme l'original.
+const DEFAULT_MASTER_COLUMNS = [
+  'NOM', 'PRENOM', 'GENRE/CIVILITE', 'VILLE', 'CP', 'ADRESSE',
+  'TELEPHONE MOBILE', 'TELEPHONE FIXE', 'EMAIL', 'DATE DE NAISSANCE', 'Source Data',
+]
+
+function dedupePreservingOrder(lines: string[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of lines) {
+    const c = raw.trim()
+    if (!c) continue
+    const key = c.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(c)
+  }
+  return out
+}
+
 export function MasterColumnsPanel({
   orgId,
   isAdmin,
@@ -25,12 +42,12 @@ export function MasterColumnsPanel({
   // besoin, il relit déjà getMasterColumns séparément pour BulkActions.
   onSaved?: () => void
 }) {
-  const [columns, setColumns] = useState<string[] | null>(null)
+  const [text, setText] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
-  const [newCol, setNewCol] = useState('')
+  const [saveSuccess, setSaveSuccess] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -39,7 +56,7 @@ export function MasterColumnsPanel({
     getMasterColumns(orgId)
       .then((data) => {
         if (cancelled) return
-        setColumns(data.columns)
+        setText(data.columns.join('\n'))
       })
       .catch((err: unknown) => {
         if (cancelled) return
@@ -53,12 +70,14 @@ export function MasterColumnsPanel({
     }
   }, [orgId])
 
-  async function persist(next: string[]) {
+  async function persist(next: string[], successMessage: string) {
     setSaving(true)
     setSaveError(null)
+    setSaveSuccess(null)
     try {
       await setMasterColumns(orgId, next)
-      setColumns(next)
+      setText(next.join('\n'))
+      setSaveSuccess(successMessage)
       onSaved?.()
     } catch (err) {
       setSaveError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
@@ -67,61 +86,27 @@ export function MasterColumnsPanel({
     }
   }
 
-  function moveUp(i: number) {
-    if (!columns || i === 0) return
-    const next = [...columns]
-    ;[next[i - 1], next[i]] = [next[i], next[i - 1]]
-    void persist(next)
-  }
-
-  function moveDown(i: number) {
-    if (!columns || i === columns.length - 1) return
-    const next = [...columns]
-    ;[next[i + 1], next[i]] = [next[i], next[i + 1]]
-    void persist(next)
-  }
-
-  function rename(i: number, name: string) {
-    if (!columns) return
-    const next = [...columns]
-    next[i] = name
-    setColumns(next) // reflète la frappe sans attendre la sauvegarde
-  }
-
-  function commitRename(i: number) {
-    if (!columns) return
-    const name = columns[i].trim()
-    if (!name) return
-    void persist(columns.map((c, idx) => (idx === i ? name : c)))
-  }
-
-  function removeAt(i: number) {
-    if (!columns) return
-    const name = columns[i]
-    if (!window.confirm(`Supprimer la colonne « ${name} » des réglages de cet environnement ?\n\nLes clients déjà importés ne sont pas modifiés -- seuls l'affichage et le prochain import s'adaptent.`)) {
+  function handleSave() {
+    const deduped = dedupePreservingOrder(text.split('\n'))
+    if (deduped.length === 0) {
+      setSaveError('Veuillez entrer au moins une colonne maître.')
+      setSaveSuccess(null)
       return
     }
-    void persist(columns.filter((_, idx) => idx !== i))
+    void persist(deduped, `${deduped.length} colonnes maîtres enregistrées et conservées.`)
   }
 
-  function addColumn() {
-    if (!columns) return
-    const name = newCol.trim()
-    if (!name) return
-    if (columns.some((c) => c.toLowerCase() === name.toLowerCase())) {
-      setSaveError('Cette colonne existe déjà.')
-      return
-    }
-    void persist([...columns, name]).then(() => setNewCol(''))
+  function handleReset() {
+    void persist(DEFAULT_MASTER_COLUMNS.slice(), 'Liste réinitialisée aux colonnes par défaut.')
   }
 
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h2 className="text-base font-semibold">Colonnes maîtres de l'environnement</h2>
+        <h2 className="text-base font-semibold">Gérer vos colonnes maîtres</h2>
         <p className="text-sm text-[var(--muted)]">
           {isAdmin
-            ? "Crée, renomme, réordonne ou supprime les colonnes de cet environnement. Les clients déjà importés ne sont pas modifiés -- seuls l'affichage et le prochain import s'adaptent."
+            ? 'Ajoutez, supprimez ou modifiez vos colonnes maîtres ci-dessous, une par ligne. La liste est conservée après rechargement de la page.'
             : 'Colonnes de cet environnement, modifiables par un administrateur uniquement.'}
         </p>
       </div>
@@ -129,65 +114,36 @@ export function MasterColumnsPanel({
       {loading && <p className="text-sm text-[var(--muted)]">Chargement…</p>}
       {error && !loading && <p className="text-sm text-[var(--danger)]">Erreur : {error}</p>}
 
-      {!loading && !error && columns && columns.length === 0 && (
-        <p className="text-sm text-[var(--muted)]">Aucune colonne définie pour l'instant.</p>
-      )}
-
-      {!loading && !error && columns && columns.length > 0 && (
-        <ul className="flex flex-col gap-2">
-          {columns.map((col, i) => (
-            <li key={i} className="flex items-center gap-2">
-              {isAdmin ? (
-                <Input
-                  value={col}
-                  onChange={(e) => rename(i, e.target.value)}
-                  onBlur={() => commitRename(i)}
-                  className="max-w-xs"
-                />
-              ) : (
-                <span className="text-sm">{col}</span>
-              )}
-              {isAdmin && (
-                <>
-                  <Button variant="secondary" onClick={() => moveUp(i)} disabled={i === 0 || saving}>
-                    ⬆️
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    onClick={() => moveDown(i)}
-                    disabled={i === columns.length - 1 || saving}
-                  >
-                    ⬇️
-                  </Button>
-                  <Button variant="danger" onClick={() => removeAt(i)} disabled={saving}>
-                    🗑️
-                  </Button>
-                </>
-              )}
-            </li>
-          ))}
-        </ul>
+      {!loading && !error && (
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          readOnly={!isAdmin}
+          rows={12}
+          className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)]"
+        />
       )}
 
       {isAdmin && !loading && !error && (
         <div className="flex items-center gap-2">
-          <Input
-            placeholder="Nouvelle colonne"
-            value={newCol}
-            onChange={(e) => setNewCol(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') addColumn()
-            }}
-            className="max-w-xs"
-          />
-          <Button onClick={addColumn} disabled={saving || !newCol.trim()}>
-            ➕ Ajouter
+          <Button onClick={handleSave} disabled={saving}>
+            💾 Enregistrer la liste des colonnes maîtres
+          </Button>
+          <Button variant="secondary" onClick={handleReset} disabled={saving}>
+            ↩️ Réinitialiser (liste par défaut)
           </Button>
         </div>
       )}
 
       {saveError && <p className="text-sm text-[var(--danger)]">Erreur : {saveError}</p>}
+      {saveSuccess && !saveError && <p className="text-sm text-[var(--success,#16a34a)]">{saveSuccess}</p>}
       {saving && <p className="text-sm text-[var(--muted)]">Enregistrement…</p>}
+
+      <p className="text-sm text-[var(--muted)]">
+        ℹ️ Astuce : les colonnes <strong>TELEPHONE MOBILE</strong> et <strong>TELEPHONE FIXE</strong> sont
+        détectées automatiquement d'après le contenu (préfixes 06/07 = mobile, 01-05/08/09 = fixe), même si
+        l'en-tête est absente ou trompeuse.
+      </p>
 
       <PersonalColumnSets />
     </div>

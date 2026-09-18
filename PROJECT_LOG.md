@@ -1716,3 +1716,47 @@ pas portés, Streamlit reste la seule interface pour "Trieur de Data" en
 production — le Cockpit et la Base de données React ne remplacent
 qu'une partie de l'app, pas encore le cœur du pipeline de tri de
 données.
+
+**État (2026-09-18, staging Postgres implémenté — couche données
+seulement)** :
+- Migration `supabase/migrations/0010_pipeline_staging.sql` — deux
+  tables, appliquée pour de vrai (`mcp__Supabase__apply_migration`,
+  confirmé ensuite par une lecture réelle d'`information_schema` :
+  tables, colonnes et policies présentes) :
+  - `trieur_data.pipeline_sessions` (id, org_id, created_by, created_at,
+    expires_at TTL 24h par défaut, status
+    importing/mapped/filtered/exported/expired, source_filename,
+    row_count).
+  - `trieur_data.pipeline_rows` (id, session_id, row_index, data jsonb)
+    — table séparée plutôt qu'un unique jsonb sur `pipeline_sessions` :
+    l'étape 3 (filtre/dedup) doit pouvoir filtrer/mettre à jour des
+    lignes individuellement, une ligne Postgres par ligne importée le
+    permet nativement (même patron que `trieur_data.records` côté CRM).
+    `unique(session_id, row_index)`.
+  - RLS : `pipeline_sessions_rw`/`pipeline_rows_rw`, même patron
+    `is_org_member(org_id)` que le reste du schéma (`pipeline_rows`
+    passe par une sous-requête sur `pipeline_sessions`, comme
+    `chantier_messages_rw` le fait déjà pour `chantiers`).
+  - Nettoyage : fonction `trieur_data.cleanup_expired_pipeline_sessions()`
+    (supprime les sessions dont `expires_at < now()`, cascade sur les
+    lignes) — **aucun pg_cron créé**, juste la fonction prête à être
+    appelée (par un futur `cron.schedule`, ou par l'app elle-même) ;
+    commentée dans la migration avec les deux façons de l'appeler.
+- `trieur/db.py` : `create_pipeline_session`, `get_pipeline_session`,
+  `update_pipeline_session_status`, `append_pipeline_rows` (par lots,
+  `start_index` fourni par l'appelant, met à jour `row_count`),
+  `list_pipeline_rows` (paginé, `LIST_PAGE_SIZE`), `delete_pipeline_session`.
+  Aucune route API ne les appelle encore — uniquement la couche
+  données, pour que la prochaine session porte les onglets 2-4 dessus
+  sans redécider l'architecture.
+- `tests/test_db_pipeline.py` (9 tests, faux client Supabase, même
+  pattern que `test_db_import.py`/`test_db_saved_views.py`) : session
+  créée/lue/introuvable, ajout de lignes par lots avec `row_index`
+  continu, pagination, changement de statut, suppression.
+- Vérifié : `python3 -m pytest -q` → **213 passed**, 1 échec — le flake
+  déjà documenté et pré-existant `test_master_columns_localstorage_fallback`
+  (sans lien avec ce travail, voir plus haut dans ce journal).
+- **Reste à faire** (pas dans cet incrément, portage API des onglets
+  2-4) : endpoints FastAPI qui lisent/écrivent cette table de staging
+  pour les étapes mapping/filtre/export, et le point transverse n°2
+  (progression des tâches longues), toujours en attente.

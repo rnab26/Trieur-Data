@@ -214,6 +214,117 @@ export function deleteSavedView(orgId: string, viewId: string) {
   })
 }
 
+// Suppression groupée -- voir api/main.py:bulk_delete_records (boucle
+// serveur sur delete_record(), aucune logique dupliquée ici).
+export function bulkDeleteRecords(orgId: string, ids: string[]) {
+  return request<{ n_deleted: number }>(`/orgs/${orgId}/records`, {
+    method: 'DELETE',
+    body: JSON.stringify({ ids }),
+  })
+}
+
+// Modification en masse d'UN SEUL champ pour toute la sélection -- voir
+// api/main.py:bulk_update_records. `value` reste `unknown` (pas
+// `string`) : une valeur "fausse" (0, false) est une vraie valeur, pas
+// une case vide, même piège que le reste du projet -- l'appelant ne doit
+// jamais la convertir en chaîne vide avant d'appeler cette fonction.
+export function bulkUpdateRecords(orgId: string, ids: string[], field: string, value: unknown) {
+  return request<{ n_updated: number; n_requested: number }>(`/orgs/${orgId}/records/bulk`, {
+    method: 'PATCH',
+    body: JSON.stringify({ ids, field, value }),
+  })
+}
+
+export type DiffRow = {
+  Champ: string
+  'Nouvelle ligne': unknown
+  'Déjà en base': unknown
+  Différent: string
+}
+
+export type DedupAlert = {
+  id: string
+  note: string
+  created_at: string | null
+  diff: DiffRow[]
+}
+
+export function listDedupAlerts(orgId: string) {
+  return request<DedupAlert[]>(`/orgs/${orgId}/dedup-alerts`)
+}
+
+export type DedupAlertStatus = 'confirmed_duplicate' | 'confirmed_different'
+
+export function resolveDedupAlert(orgId: string, alertId: string, status: DedupAlertStatus) {
+  return request<{ id: string; status: DedupAlertStatus }>(
+    `/orgs/${orgId}/dedup-alerts/${alertId}/resolve`,
+    { method: 'POST', body: JSON.stringify({ status }) },
+  )
+}
+
+// Export CSV/Excel -- déclenche un téléchargement navigateur, pas de
+// JSON en retour (voir api/main.py:export_org_records). `knownCols` :
+// les colonnes actuellement CONNUES à l'écran (lot chargé), référence
+// pour détecter un masquage explicite -- une colonne hors de ce lot
+// (jamais vue) reste incluse même si elle n'est pas dans `visibleCols`.
+export async function exportRecords(
+  orgId: string,
+  opts: {
+    format: 'csv' | 'xlsx'
+    search?: string
+    colFilters?: ColFilters
+    visibleCols?: string[]
+    knownCols?: string[]
+  },
+): Promise<void> {
+  const headers = await authHeader()
+  const params = new URLSearchParams()
+  params.set('format', opts.format)
+  if (opts.search) params.set('search', opts.search)
+  if (opts.colFilters && Object.keys(opts.colFilters).length > 0) {
+    params.set('col_filters', JSON.stringify(toApiColFiltersExport(opts.colFilters)))
+  }
+  if (opts.visibleCols) params.set('visible_cols', opts.visibleCols.join(','))
+  if (opts.knownCols) params.set('known_cols', opts.knownCols.join(','))
+
+  const res = await fetch(`${API_URL}/orgs/${orgId}/records/export?${params.toString()}`, { headers })
+  if (!res.ok) {
+    let detail = res.statusText
+    try {
+      const body = await res.json()
+      detail = body.detail ?? detail
+    } catch {
+      // pas de corps JSON -- on garde le statusText
+    }
+    throw new ApiError(res.status, detail)
+  }
+  const blob = await res.blob()
+  const disposition = res.headers.get('content-disposition') ?? ''
+  const match = /filename="?([^"]+)"?/.exec(disposition)
+  const filename = match ? match[1] : `export.${opts.format}`
+
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+// Même normalisation (valeur en minuscules) que toApiColFilters côté
+// DatabaseScreen.tsx -- dupliquée ici en interne (fonction non exportée
+// par ce module) pour que exportRecords reste autonome sans dépendre
+// d'un helper défini dans un écran.
+function toApiColFiltersExport(filters: ColFilters): ColFilters {
+  const out: ColFilters = {}
+  for (const [col, f] of Object.entries(filters)) {
+    out[col] = { op: f.op, value: f.value.toLowerCase() }
+  }
+  return out
+}
+
 export function previewImport(orgId: string, file: File) {
   return importRequest<ImportPreview>(orgId, file, { dryRun: true })
 }

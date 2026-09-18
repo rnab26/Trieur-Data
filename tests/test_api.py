@@ -620,3 +620,276 @@ def test_dashboard(client_factory):
     assert body["total_records"] == 1
     assert body["alerts_pending"] == 0
     assert body["last_import"]["source_filename"] == "a.csv"
+
+
+# ---------------------------------------------------------------
+# Suppression groupée
+# ---------------------------------------------------------------
+
+def test_bulk_delete_records(client_factory):
+    records = [_record(1), _record(2), _record(3)]
+    fake = _make_client(records=records)
+    tc = client_factory(fake)
+
+    res = tc.request(
+        "DELETE",
+        "/orgs/org-1/records",
+        json={"ids": ["rec-1", "rec-2"]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.json()["n_deleted"] == 2
+    remaining_ids = {r["id"] for r in fake.postgrest.tables["records"]}
+    assert remaining_ids == {"rec-3"}
+
+
+def test_bulk_delete_unknown_id_is_a_noop_not_an_error(client_factory):
+    """Boucle sur delete_record() (trieur/db.py), qui ne renvoie rien à
+    vérifier -- un id déjà supprimé entre-temps (autre onglet, autre
+    utilisateur) ne fait donc jamais échouer le reste de la sélection."""
+    records = [_record(1)]
+    fake = _make_client(records=records)
+    tc = client_factory(fake)
+
+    res = tc.request(
+        "DELETE",
+        "/orgs/org-1/records",
+        json={"ids": ["rec-1", "does-not-exist"]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.json()["n_deleted"] == 2
+    assert fake.postgrest.tables["records"] == []
+
+
+# ---------------------------------------------------------------
+# Modification en masse d'un seul champ
+# ---------------------------------------------------------------
+
+def test_bulk_update_applies_field_to_selection(client_factory):
+    records = [_record(1), _record(2), _record(3)]
+    fake = _make_client(records=records)
+    tc = client_factory(fake)
+
+    res = tc.patch(
+        "/orgs/org-1/records/bulk",
+        json={"ids": ["rec-1", "rec-2"], "field": "VILLE", "value": "Paris"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["n_updated"] == 2
+    assert body["n_requested"] == 2
+
+    by_id = {r["id"]: r for r in fake.postgrest.tables["records"]}
+    assert by_id["rec-1"]["data"]["VILLE"] == "Paris"
+    assert by_id["rec-2"]["data"]["VILLE"] == "Paris"
+    assert "VILLE" not in by_id["rec-3"]["data"]
+
+
+def test_bulk_update_falsy_value_is_not_treated_as_empty(client_factory):
+    """Piège récurrent du projet : 0/False ne doit jamais être confondu
+    avec un champ vide, y compris en modification en masse."""
+    records = [_record(1)]
+    fake = _make_client(records=records)
+    tc = client_factory(fake)
+
+    res = tc.patch(
+        "/orgs/org-1/records/bulk",
+        json={"ids": ["rec-1"], "field": "ENFANTS", "value": 0},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    stored = next(r for r in fake.postgrest.tables["records"] if r["id"] == "rec-1")
+    assert stored["data"]["ENFANTS"] == 0
+
+
+def test_bulk_update_empty_string_clears_field(client_factory):
+    records = [{**_record(1), "data": {"NOM": "Dupont", "VILLE": "Lyon"}}]
+    fake = _make_client(records=records)
+    tc = client_factory(fake)
+
+    res = tc.patch(
+        "/orgs/org-1/records/bulk",
+        json={"ids": ["rec-1"], "field": "VILLE", "value": ""},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    stored = next(r for r in fake.postgrest.tables["records"] if r["id"] == "rec-1")
+    assert stored["data"]["VILLE"] is None
+
+
+def test_bulk_update_skips_missing_record(client_factory):
+    records = [_record(1)]
+    fake = _make_client(records=records)
+    tc = client_factory(fake)
+
+    res = tc.patch(
+        "/orgs/org-1/records/bulk",
+        json={"ids": ["rec-1", "does-not-exist"], "field": "VILLE", "value": "Paris"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["n_requested"] == 2
+    assert body["n_updated"] == 1
+
+
+# ---------------------------------------------------------------
+# Alertes de doublon IBAN : liste avec diff, résolution
+# ---------------------------------------------------------------
+
+def _dedup_alert(alert_id="alert-1", org_id="org-1", status="pending"):
+    return {
+        "id": alert_id,
+        "org_id": org_id,
+        "status": status,
+        "note": "IBAN déjà vu dans a.csv (2026-01-01)",
+        "created_at": "2026-01-02T00:00:00Z",
+        # FakeTable ne fait pas de vrai jointure SQL -- ces clés imitent
+        # directement ce que list_dedup_alerts() (trieur/db.py) attend en
+        # sortie du select imbriqué réel côté Supabase.
+        "record": {"data": {"NOM": "Dupont", "IBAN": "FR76..."}},
+        "matched": {"data": {"NOM": "Dupont Jean", "IBAN": "FR76..."}},
+    }
+
+
+def test_dedup_alerts_lists_pending_with_diff(client_factory):
+    fake = _make_client(dedup_alerts=[_dedup_alert()])
+    tc = client_factory(fake)
+
+    res = tc.get("/orgs/org-1/dedup-alerts", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 200
+    alerts = res.json()
+    assert len(alerts) == 1
+    diff_by_field = {row["Champ"]: row for row in alerts[0]["diff"]}
+    assert diff_by_field["NOM"]["Différent"] == "⚠️"
+    assert diff_by_field["IBAN"]["Différent"] == ""
+
+
+def test_dedup_alerts_excludes_already_resolved(client_factory):
+    fake = _make_client(dedup_alerts=[_dedup_alert(status="confirmed_duplicate")])
+    tc = client_factory(fake)
+
+    res = tc.get("/orgs/org-1/dedup-alerts", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.json() == []
+
+
+def test_resolve_dedup_alert_as_duplicate(client_factory):
+    fake = _make_client(dedup_alerts=[_dedup_alert()])
+    tc = client_factory(fake)
+
+    res = tc.post(
+        "/orgs/org-1/dedup-alerts/alert-1/resolve",
+        json={"status": "confirmed_duplicate"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    stored = fake.postgrest.tables["dedup_alerts"][0]
+    assert stored["status"] == "confirmed_duplicate"
+    assert stored["resolved_by"] == "user-1"
+
+
+def test_resolve_dedup_alert_invalid_status_is_400(client_factory):
+    fake = _make_client(dedup_alerts=[_dedup_alert()])
+    tc = client_factory(fake)
+
+    res = tc.post(
+        "/orgs/org-1/dedup-alerts/alert-1/resolve",
+        json={"status": "n_importe_quoi"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_resolve_dedup_alert_wrong_org_is_404(client_factory):
+    fake = _make_client(dedup_alerts=[_dedup_alert(org_id="org-2")])
+    tc = client_factory(fake)
+
+    res = tc.post(
+        "/orgs/org-1/dedup-alerts/alert-1/resolve",
+        json={"status": "confirmed_duplicate"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 404
+
+
+# ---------------------------------------------------------------
+# Export CSV/Excel
+# ---------------------------------------------------------------
+
+def test_export_csv_streams_all_records(client_factory):
+    records = [
+        {**_record(1), "data": {"NOM": "Dupont", "IBAN": "FR76..."}},
+        {**_record(2), "data": {"NOM": "Martin", "IBAN": "FR77..."}},
+    ]
+    fake = _make_client(records=records)
+    tc = client_factory(fake)
+
+    res = tc.get(
+        "/orgs/org-1/records/export",
+        params={"format": "csv"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/csv")
+    assert "Leads.csv" in res.headers["content-disposition"]
+    body = res.content.decode("utf-8-sig")
+    assert "Dupont" in body
+    assert "Martin" in body
+
+
+def test_export_respects_search(client_factory):
+    records = [
+        {**_record(1), "data": {"NOM": "Dupont", "IBAN": "FR76..."}},
+        {**_record(2), "data": {"NOM": "Martin", "IBAN": "FR77..."}},
+    ]
+    fake = _make_client(records=records)
+    tc = client_factory(fake)
+
+    res = tc.get(
+        "/orgs/org-1/records/export",
+        params={"format": "csv", "search": "dupont"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    body = res.content.decode("utf-8-sig")
+    assert "Dupont" in body
+    assert "Martin" not in body
+
+
+def test_export_hides_explicitly_unchecked_column_but_keeps_unknown_ones(client_factory):
+    """Une colonne CONNUE côté écran (`known_cols`) mais retirée de
+    `visible_cols` reste hors export ; une colonne HORS de `known_cols`
+    (jamais vue à l'écran, ex. lot pas encore chargé) est incluse quand
+    même -- même règle que views/tab_database.py:_render_export."""
+    records = [{**_record(1), "data": {"NOM": "Dupont", "IBAN": "FR76...", "VILLE": "Paris"}}]
+    fake = _make_client(records=records)
+    tc = client_factory(fake)
+
+    res = tc.get(
+        "/orgs/org-1/records/export",
+        params={"format": "csv", "known_cols": "NOM,IBAN", "visible_cols": "NOM"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    body = res.content.decode("utf-8-sig")
+    header = body.splitlines()[0]
+    assert "NOM" in header
+    assert "IBAN" not in header  # connue, décochée -> masquée
+    assert "VILLE" in header  # jamais vue à l'écran -> incluse quand même
+
+
+def test_export_xlsx_returns_spreadsheet_content_type(client_factory):
+    records = [{**_record(1), "data": {"NOM": "Dupont"}}]
+    fake = _make_client(records=records)
+    tc = client_factory(fake)
+
+    res = tc.get(
+        "/orgs/org-1/records/export",
+        params={"format": "xlsx"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.headers["content-type"] == (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert len(res.content) > 0

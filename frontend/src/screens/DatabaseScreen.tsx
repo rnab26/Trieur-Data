@@ -4,6 +4,8 @@ import { Input } from '@/components/ui/input'
 import { useAuth } from '@/lib/AuthContext'
 import {
   ApiError,
+  exportRecords,
+  getMasterColumns,
   getMe,
   listOrgs,
   listRecords,
@@ -17,6 +19,8 @@ import { MasterColumnsPanel } from './MasterColumnsPanel'
 import { ColumnFilters } from './ColumnFilters'
 import { SavedViews } from './SavedViews'
 import { DashboardPanel } from './DashboardPanel'
+import { DedupAlertsPanel } from './DedupAlertsPanel'
+import { BulkActions } from './BulkActions'
 
 const PAGE_SIZE = 50
 
@@ -68,6 +72,16 @@ export function DatabaseScreen() {
 
   const [editingId, setEditingId] = useState<string | null>(null)
 
+  // Sélection multiple (bulk delete/bulk edit) -- réinitialisée à chaque
+  // changement de lot chargé (nouvel environnement, nouvelle recherche,
+  // nouveaux filtres, page suivante) : une position sélectionnée avant
+  // n'a plus le même sens dans un lot différent.
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
+
+  const [masterColumns, setMasterColumnsState] = useState<string[]>([])
+  const [exporting, setExporting] = useState<'csv' | 'xlsx' | null>(null)
+  const [exportError, setExportError] = useState<string | null>(null)
+
   // Organisations accessibles (GET /orgs) -- une fois connecté.
   useEffect(() => {
     let cancelled = false
@@ -102,6 +116,25 @@ export function DatabaseScreen() {
       cancelled = true
     }
   }, [])
+
+  // Colonnes maîtres de l'environnement -- utilisées pour restreindre le
+  // champ proposé en modification en masse (BulkActions) aux vraies clés
+  // déclarées, même limite que views/tab_database.py:_render_bulk_edit_form.
+  useEffect(() => {
+    if (!orgId) return
+    let cancelled = false
+    getMasterColumns(orgId)
+      .then((data) => {
+        if (!cancelled) setMasterColumnsState(data.columns)
+      })
+      .catch(() => {
+        // Pas bloquant : sans colonnes maîtres connues, "Modifier un
+        // champ" reste simplement masqué (voir BulkActions).
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [orgId])
 
   const columns = useMemo(() => {
     const cols: string[] = []
@@ -151,6 +184,11 @@ export function DatabaseScreen() {
         setRows((prev) => (append ? [...prev, ...data.rows] : data.rows))
         setTotal(data.total)
         setPage(data.page)
+        // Le lot chargé change (nouvelle page, nouvelle recherche...) :
+        // une sélection sur d'anciennes positions n'a plus de sens --
+        // même règle que côté Streamlit (clear_stale_widgets après une
+        // mutation du lot affiché).
+        if (!append) setSelectedIds([])
       } catch (err) {
         setError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
       } finally {
@@ -193,6 +231,39 @@ export function DatabaseScreen() {
     setSearch(view.search)
     setColFilters(view.colFilters)
     setVisibleCols(view.visibleCols.length > 0 ? view.visibleCols : null)
+  }
+
+  function handleBulkActionDone() {
+    if (!orgId) return
+    void fetchPage(orgId, 1, search, colFilters, false)
+    setDashboardKey((k) => k + 1)
+  }
+
+  async function handleExport(format: 'csv' | 'xlsx') {
+    if (!orgId) return
+    setExporting(format)
+    setExportError(null)
+    try {
+      await exportRecords(orgId, {
+        format,
+        search,
+        colFilters,
+        visibleCols: effectiveVisibleCols,
+        knownCols: columns,
+      })
+    } catch (err) {
+      setExportError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+    } finally {
+      setExporting(null)
+    }
+  }
+
+  function toggleRowSelection(id: string) {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+  }
+
+  function toggleSelectAll() {
+    setSelectedIds((prev) => (prev.length === rows.length ? [] : rows.map((r) => String(r._id))))
   }
 
   const hasMore = rows.length < total
@@ -294,6 +365,12 @@ export function DatabaseScreen() {
         <>
           <DashboardPanel orgId={orgId} refreshKey={dashboardKey} />
 
+          <DedupAlertsPanel
+            orgId={orgId}
+            refreshKey={dashboardKey}
+            onResolved={() => setDashboardKey((k) => k + 1)}
+          />
+
           <ColumnFilters columns={columns} filters={colFilters} onChange={setColFilters} />
 
           <SavedViews
@@ -330,6 +407,32 @@ export function DatabaseScreen() {
             </div>
           )}
 
+          {total > 0 && (
+            <div className="mb-4 flex flex-wrap items-center gap-2">
+              <span className="text-sm font-medium">💾 Exporter ces résultats</span>
+              <Button
+                variant="secondary"
+                disabled={exporting !== null}
+                onClick={() => void handleExport('csv')}
+              >
+                {exporting === 'csv' ? 'Préparation…' : 'Exporter CSV'}
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={exporting !== null}
+                onClick={() => void handleExport('xlsx')}
+              >
+                {exporting === 'xlsx' ? 'Préparation…' : 'Exporter Excel'}
+              </Button>
+              <span className="text-xs text-[var(--muted)]">
+                Exporte tout l'environnement ({total}), avec la recherche/les filtres actuels.
+              </span>
+            </div>
+          )}
+          {exportError && (
+            <p className="mb-4 text-sm text-[var(--danger)]">Erreur d'export : {exportError}</p>
+          )}
+
           {loading && <p className="text-sm text-[var(--muted)]">Chargement…</p>}
 
           {error && !loading && (
@@ -345,10 +448,28 @@ export function DatabaseScreen() {
           )}
 
           {!loading && !error && rows.length > 0 && (
+            <BulkActions
+              orgId={orgId}
+              selectedIds={selectedIds}
+              masterColumns={masterColumns}
+              onDone={handleBulkActionDone}
+              onClearSelection={() => setSelectedIds([])}
+            />
+          )}
+
+          {!loading && !error && rows.length > 0 && (
             <div className="overflow-x-auto rounded-lg border border-[var(--border)]">
               <table className="w-full min-w-max text-sm">
                 <thead>
                   <tr className="bg-[var(--muted-bg)] text-left">
+                    <th className="px-3 py-2">
+                      <input
+                        type="checkbox"
+                        aria-label="Tout sélectionner"
+                        checked={selectedIds.length === rows.length}
+                        onChange={toggleSelectAll}
+                      />
+                    </th>
                     {effectiveVisibleCols.map((col) => (
                       <th key={col} className="whitespace-nowrap px-3 py-2 font-medium">
                         {col}
@@ -360,6 +481,14 @@ export function DatabaseScreen() {
                 <tbody>
                   {rows.map((row) => (
                     <tr key={String(row._id)} className="border-t border-[var(--border)]">
+                      <td className="px-3 py-2">
+                        <input
+                          type="checkbox"
+                          aria-label={`Sélectionner la ligne ${String(row._id)}`}
+                          checked={selectedIds.includes(String(row._id))}
+                          onChange={() => toggleRowSelection(String(row._id))}
+                        />
+                      </td>
                       {effectiveVisibleCols.map((col) => (
                         <td key={col} className="whitespace-nowrap px-3 py-2">
                           {row[col] == null ? '' : String(row[col])}

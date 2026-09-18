@@ -22,10 +22,13 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Header, Query, 
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from fastapi.responses import StreamingResponse
+
 from trieur.db import (
     LIST_PAGE_SIZE,
     add_org_master_columns,
     count_records,
+    delete_record,
     delete_saved_view,
     get_last_import_batch,
     get_my_memberships,
@@ -33,13 +36,16 @@ from trieur.db import (
     get_org_master_columns,
     get_record,
     import_dataframe,
+    list_all_records,
     list_dedup_alerts,
     list_records,
     list_saved_views,
+    resolve_dedup_alert,
     save_org_master_columns,
     save_saved_view,
     update_record,
 )
+from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
 from views._auth import accessible_organizations
 from views._ui import unknown_columns
 from views.tab_database import (
@@ -47,6 +53,7 @@ from views.tab_database import (
     _filter_by_columns,
     _filter_by_search,
     _resolve_modifier_names,
+    diff_rows,
 )
 
 app = FastAPI(title="Trieur de Data API", description="API REST sur trieur/db.py")
@@ -233,6 +240,174 @@ def list_org_records(
         "fetched": len(records),
         "rows": rows,
     }
+
+
+class BulkDelete(BaseModel):
+    ids: list[str]
+
+
+@app.delete("/orgs/{org_id}/records")
+def bulk_delete_records(org_id: str, body: BulkDelete, ctx: AuthCtx = Depends(require_org_access)):
+    """Suppression groupée -- même logique que la sélection multiple de
+    views/tab_database.py:_render_client_list (boucle sur delete_record,
+    pas de nouvelle requête SQL en masse : une seule fonction de
+    suppression, réutilisée, jamais deux chemins qui pourraient diverger)."""
+    n_deleted = 0
+    for record_id in body.ids:
+        delete_record(ctx.client, record_id)
+        n_deleted += 1
+    return {"n_deleted": n_deleted}
+
+
+class BulkUpdate(BaseModel):
+    ids: list[str]
+    field: str
+    # Valeur "fausse" (0, False, "") : une vraie valeur, pas une case
+    # vide -- seule une chaîne vide explicite efface le champ, comme
+    # views/tab_database.py:_render_bulk_edit_form (`new_value.strip() or
+    # None`). `Any` (pas `Optional[str]`) pour ne jamais convertir 0/False
+    # en None avant même d'atteindre cette règle.
+    value: Any = None
+
+
+@app.patch("/orgs/{org_id}/records/bulk")
+def bulk_update_records(org_id: str, body: BulkUpdate, ctx: AuthCtx = Depends(require_org_access)):
+    """Modification en masse d'UN SEUL champ pour toute la sélection --
+    même limite que côté Streamlit (pas d'édition multi-champs en masse :
+    des valeurs différentes par ligne n'ont pas de "nouvelle valeur"
+    commune qui aurait un sens). Boucle sur get_record/update_record
+    (trieur/db.py), comme views/tab_database.py:_render_bulk_edit_form --
+    aucune logique de modification dupliquée ici."""
+    value = body.value.strip() if isinstance(body.value, str) else body.value
+    new_value = value if value not in ("", None) else None
+    n_updated = 0
+    for record_id in body.ids:
+        raw = get_record(ctx.client, record_id)
+        if raw is None:
+            continue
+        data = dict(raw.get("data") or {})
+        data[body.field] = new_value
+        if update_record(ctx.client, record_id, data, ctx.user.id):
+            n_updated += 1
+    return {"n_updated": n_updated, "n_requested": len(body.ids)}
+
+
+# ---------------------------------------------------------------
+# Alertes de doublon IBAN
+# ---------------------------------------------------------------
+
+@app.get("/orgs/{org_id}/dedup-alerts")
+def get_dedup_alerts(org_id: str, ctx: AuthCtx = Depends(require_org_access)):
+    """Alertes en attente, avec le diff champ par champ déjà calculé
+    côté serveur (diff_rows(), views/tab_database.py) -- pour ne jamais
+    réimplémenter cette comparaison en TypeScript, même règle que
+    _build_rows/_filter_by_columns réutilisés ailleurs dans cette API."""
+    alerts = list_dedup_alerts(ctx.client, org_id, status="pending")
+    return [
+        {
+            "id": a["id"],
+            "note": a.get("note") or "",
+            "created_at": a.get("created_at"),
+            "diff": diff_rows(a["record"]["data"], a["matched"]["data"]),
+        }
+        for a in alerts
+    ]
+
+
+class DedupAlertResolve(BaseModel):
+    status: str  # "confirmed_duplicate" ou "confirmed_different"
+
+
+@app.post("/orgs/{org_id}/dedup-alerts/{alert_id}/resolve")
+def resolve_dedup_alert_endpoint(
+    org_id: str, alert_id: str, body: DedupAlertResolve, ctx: AuthCtx = Depends(require_org_access),
+):
+    if body.status not in ("confirmed_duplicate", "confirmed_different"):
+        raise HTTPException(status_code=400, detail="Statut invalide.")
+    # Vérifie que l'alerte appartient bien à cet environnement avant de la
+    # résoudre -- même garde que delete_saved_view_endpoint (un id deviné
+    # ne suffit pas à agir sur l'alerte d'un autre environnement).
+    pending = list_dedup_alerts(ctx.client, org_id, status="pending")
+    if not any(a["id"] == alert_id for a in pending):
+        raise HTTPException(status_code=404, detail="Alerte introuvable ou déjà résolue.")
+    resolve_dedup_alert(ctx.client, alert_id, body.status, ctx.user.id)
+    return {"id": alert_id, "status": body.status}
+
+
+# ---------------------------------------------------------------
+# Export CSV/Excel
+# ---------------------------------------------------------------
+
+@app.get("/orgs/{org_id}/records/export")
+def export_org_records(
+    org_id: str,
+    format: str = Query("csv", pattern="^(csv|xlsx)$"),
+    search: str = Query(""),
+    col_filters: str = Query("{}", description="JSON : {colonne: {op, value}}"),
+    visible_cols: str = Query("", description="Colonnes affichées à l'écran, séparées par des virgules"),
+    known_cols: str = Query(
+        "", description="Colonnes connues du lot déjà chargé côté écran (référence pour détecter un masquage explicite)",
+    ),
+    ctx: AuthCtx = Depends(require_org_access),
+):
+    """Exporte TOUT l'environnement (pas seulement la page déjà chargée à
+    l'écran), avec la même recherche/les mêmes filtres par colonne que la
+    liste -- mirroir de views/tab_database.py:_render_export. Une colonne
+    connue du lot affiché (`known_cols`) mais absente de `visible_cols` a
+    été explicitement masquée par l'utilisateur et reste hors export ;
+    toute colonne HORS de `known_cols` (jamais vue à l'écran, ex. une
+    colonne d'un import plus ancien pas encore chargé) est incluse quand
+    même, pour ne jamais perdre de donnée en silence -- même règle que
+    côté Streamlit. Si `known_cols` n'est pas fourni, rien n'est considéré
+    comme masqué (comportement par défaut : tout exporter)."""
+    parsed_filters = _parse_col_filters(col_filters)
+    requested_visible = {c for c in visible_cols.split(",") if c}
+    reference_known = {c for c in known_cols.split(",") if c} or requested_visible
+
+    master_cols = get_org_master_columns(ctx.client, org_id)
+    all_records = list_all_records(ctx.client, org_id)
+    rows = _resolve_modifier_names(ctx.client, _build_rows(all_records, master_cols))
+    rows = _filter_by_search(rows, search)
+    rows = _filter_by_columns(rows, parsed_filters)
+
+    full_cols: list[str] = []
+    for row in rows:
+        for c in row.keys():
+            if c != "_id" and c not in full_cols:
+                full_cols.append(c)
+    explicitly_hidden = reference_known - requested_visible
+    export_cols = [c for c in full_cols if c not in explicitly_hidden] or full_cols
+
+    df = pd.DataFrame(rows) if rows else pd.DataFrame()
+    for c in export_cols:
+        if c not in df.columns:
+            df[c] = None
+    df = df[export_cols] if export_cols else df
+
+    orgs = accessible_organizations(
+        {"client": ctx.client, "profile": ctx.profile, "memberships": ctx.memberships}
+    )
+    org_name = next((o["name"] for o in orgs if o["id"] == org_id), org_id)
+    file_base = sanitize_filename(org_name, default="export_base")
+
+    if format == "csv":
+        content = export_csv_safe(df)
+        if content is None:
+            raise HTTPException(status_code=500, detail="Échec de la génération du CSV.")
+        return StreamingResponse(
+            io.BytesIO(content),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{file_base}.csv"'},
+        )
+
+    buf = export_excel_safe(df)
+    if buf is None:
+        raise HTTPException(status_code=500, detail="Échec de la génération de l'Excel.")
+    return StreamingResponse(
+        io.BytesIO(buf.getvalue()),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{file_base}.xlsx"'},
+    )
 
 
 @app.get("/orgs/{org_id}/records/{record_id}")

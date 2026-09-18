@@ -1867,9 +1867,10 @@ implémenté (étape 1 : import + mapping) :
     garde-fou), mais non testé jusqu'ici sur cette route précise.
   - Suite après ajout du test : `python3 -m pytest -q` →
     **227 passed**, même flake pré-existant, sans lien.
-  - Poussé : commit `d9f6a25` sur `origin/feature/react-migration`
-    (le test ajouté ci-dessus, dans le même push que les 3 commits de
-    l'incrément, déjà locaux).
+  - Poussé : commit `20a433a` (test ajouté ci-dessus + cette mise à
+    jour du journal) sur `origin/feature/react-migration`, dans le même
+    push que les 3 commits de l'incrément (`165c185`, `f191285`,
+    `51167ee`), déjà locaux et non poussés avant cette vérification.
 - **Statut honnête de l'ensemble de la migration React** : Base de
   données + Cockpit restent complets. Pipeline "Trieur de Data" :
   étape 1 (import + mapping) livrée et vérifiée de bout en bout

@@ -2398,3 +2398,67 @@ toujours sur ce projet, celle de l'utilisateur seul.
 
 Poussé sur `origin/feature/react-migration` — **pas de merge sur
 `main`, pas de PR.**
+
+---
+
+## Revue Copilot PR #24 — 9 points corrigés, vérification indépendante (2026-09-18)
+
+**Contexte** : un agent avait traité les 9 points remontés par la revue
+Copilot sur PR #24 (dont un point CRITIQUE sécurité — RPC cross-tenant),
+6 commits sur `feature/react-migration`, non poussés, en attendant une
+vérification indépendante avant push.
+
+**Vérification faite (pas juste relu le rapport — reproduit)** :
+- **Sécurité (#1, RPC `cleanup_expired_pipeline_sessions`)** :
+  `information_schema.role_routine_grants` interrogé en direct sur
+  `bexiyvmdbxcwxasgslxp` → `EXECUTE` accordé seulement à `service_role`
+  et `postgres`, `authenticated` bien retiré. **Confirmé réel.**
+  Vérifié aussi que le nettoyage opportuniste ajouté (#8,
+  `delete_expired_pipeline_sessions_for_org`) n'appelle PAS ce RPC —
+  passe par le client normal de l'appelant, scopé RLS à son org : lu le
+  code (`trieur/db.py`, `api/main.py`), cohérent avec le rapport.
+- **#2 RecordEditDialog** : lu `frontend/src/screens/RecordEditDialog.tsx`
+  — garde bien `originalData`/`editedKeys`, seul un champ édité part en
+  chaîne. Conforme au rapport.
+- **#3 useIsAdmin** : lu `frontend/src/lib/useAccount.ts` + `App.tsx` +
+  `DatabaseScreen.tsx` — `useIsAdmin(ready)` dépend bien d'un signal de
+  session prête. Conforme.
+- **#4 mapping colonnes dupliquées** : lu `PipelineScreen.tsx` —
+  détection des doublons + bouton "Construire" désactivé (`canBuild`).
+  Conforme.
+- **#5/#6 races DatabaseScreen/CockpitScreen** : `requestIdRef` présent
+  dans les deux écrans. Conforme.
+- **#7 pagination pipeline rows** : lu `api/main.py` — `page`/`page_size`
+  ajoutés, recherche/filtres bien appliqués sur toute la session avant
+  découpe (comportement documenté, différent de `/records`). Conforme.
+- **#9 README** : diff `frontend/README.md` vérifié, écrans à jour.
+  Conforme (le texte de `PipelineScreen.tsx` sur le dédoublonnage non
+  câblé, laissé tel quel, est bien exact).
+- **Tests** : `python3 -m pytest -q` → **1 échec** au premier run
+  (`test_master_columns_localstorage_fallback`, suite complète), alors
+  que le rapport annonçait "253 passed, 1 deselected" — formulation
+  inexacte (rien n'est déselectionné, pas de marker). Creusé avant
+  d'accepter l'explication "flake" : testé en isolation (passe),
+  bisecté commit par commit sur les 6 nouveaux (chacun passe seul en
+  répétant le test), testé sur `main` et sur la base de la branche
+  avant ces 6 commits (`fd15e29`, suite complète : 250 passed, propre),
+  puis suite complète rejouée deux fois de plus sur `feature/react-migration`
+  au même commit : 1 échec puis 0 échec (254 passed). **Confirmé
+  flaky/dépendant de l'ordre d'exécution en suite complète, pas une
+  régression des 6 commits** — ce test ne touche à aucun fichier modifié
+  par ce lot, et le comportement identique avait déjà été documenté
+  comme préexistant dans une entrée précédente de ce journal (voir
+  ci-dessus, "Go/no-go merge"). `tests/test_api.py` +
+  `tests/test_db_pipeline.py` seuls : 104 passed.
+- `cd frontend && npm run build` → exit 0 (`tsc -b && vite build`).
+- `git diff --stat main...feature/react-migration -- views/ app.py` :
+  toujours seulement les 3 fichiers déjà connus (`app.py`,
+  `tab2_import_mapping.py`, `tab_database.py`), issus de commits
+  antérieurs à ces 6 — pas de dérive du code Streamlit.
+
+**Poussé** sur `origin/feature/react-migration`, commit `b3d80fc`
+(6 commits, `fd15e29..b3d80fc`). Aucune correction supplémentaire
+nécessaire — les 9 points sont réels et corrects tels que rapportés.
+Commentaire posté sur PR #24 récapitulant les 9 points.
+
+**Pas de merge sur `main` — pas demandé, décision utilisateur.**

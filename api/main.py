@@ -29,8 +29,10 @@ from trieur.db import (
     add_chantier_message,
     add_chantier_todo,
     add_org_master_columns,
+    append_pipeline_rows,
     count_records,
     create_chantier,
+    create_pipeline_session,
     create_section,
     delete_record,
     delete_saved_view,
@@ -38,6 +40,7 @@ from trieur.db import (
     get_my_memberships,
     get_my_profile,
     get_org_master_columns,
+    get_pipeline_session,
     get_record,
     import_dataframe,
     list_all_records,
@@ -45,6 +48,7 @@ from trieur.db import (
     list_chantier_todos,
     list_chantiers,
     list_dedup_alerts,
+    list_pipeline_rows,
     list_records,
     list_saved_views,
     list_sections,
@@ -53,9 +57,13 @@ from trieur.db import (
     save_saved_view,
     set_chantier_todo_done,
     update_chantier_status,
+    update_pipeline_row_data,
+    update_pipeline_session_status,
     update_record,
 )
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
+from trieur.io_excel import read_csv_file, read_excel_all_sheets_from_file
+from trieur.matching import apply_header_inference_excel, auto_assign_columns_fast
 from views._auth import accessible_organizations
 from views._ui import unknown_columns
 from views.tab_database import (
@@ -513,7 +521,214 @@ async def import_records(
 
 
 # ---------------------------------------------------------------
-# Colonnes maîtres
+# Pipeline "Trieur de Data" -- étape 1 : import + mapping des colonnes
+# (équivalent onglets 1-2 Streamlit, sans porter chaque nuance d'UI --
+# voir supabase/migrations/0010_pipeline_staging.sql et trieur/db.py pour
+# la couche de données). Les colonnes MAÎTRES restent celles de
+# l'environnement (trieur_data.organizations.master_columns) : mêmes
+# GET/POST que le CRM ci-dessous (get_master_columns/set_master_columns),
+# volontairement PAS une deuxième liste -- voir la note au-dessus de
+# get_master_columns.
+#
+# Limite connue, volontaire pour ce premier incrément : un fichier PDF
+# (relevés SEPA, trieur/io_pdf.py) n'est pas encore couvert par cette
+# route -- seuls Excel/CSV (trieur/io_excel.py) le sont ici. Un fichier
+# multi-onglets est fusionné en une seule session (onglet d'origine gardé
+# sous la clé "_sheet" de chaque ligne, jamais proposée au mapping) : le
+# mapping par onglet séparé de views/tab2_import_mapping.py n'est pas
+# reproduit, ce n'est pas nécessaire pour le flux de données.
+# ---------------------------------------------------------------
+
+PIPELINE_PREVIEW_SIZE = 10
+# Taille de lot pour le staging (append_pipeline_rows) : évite d'envoyer
+# un unique insert de plusieurs centaines de milliers de lignes à
+# PostgREST en un seul appel HTTP.
+PIPELINE_APPEND_BATCH = 500
+
+
+def _parse_pipeline_file(filename: str, content: bytes) -> dict[str, pd.DataFrame]:
+    """Lit un fichier Excel/CSV avec les lecteurs déjà écrits pour
+    l'onglet 2 (trieur/io_excel.py, trieur/matching.py:apply_header_inference_excel)
+    -- jamais une deuxième façon de lire un fichier qui pourrait diverger
+    (moteurs, repli, déduction d'en-tête absente...)."""
+    bio = io.BytesIO(content)
+    if filename.lower().endswith(".csv"):
+        sheets, _inferred = read_csv_file(bio, filename)
+    else:
+        sheets = read_excel_all_sheets_from_file(bio, filename)
+        sheets, _inferred = apply_header_inference_excel(sheets, bio)
+    if not sheets:
+        raise HTTPException(status_code=400, detail=f"Impossible de lire le fichier : {filename}")
+    return sheets
+
+
+def _merge_pipeline_sheets(sheets: dict[str, pd.DataFrame]) -> tuple[list[dict], list[str]]:
+    """Fusionne tous les onglets lus en une seule liste de lignes à mettre
+    en staging, et renvoie (lignes, colonnes détectées -- union dans
+    l'ordre de première apparition). Chaque ligne garde son onglet
+    d'origine sous "_sheet" (préfixe "_" : ne peut jamais entrer en
+    collision avec un vrai nom de colonne source, donc jamais proposée au
+    mapping ni comptée dans les colonnes détectées)."""
+    rows: list[dict] = []
+    columns: list[str] = []
+    for sheet_name, df in sheets.items():
+        for col in df.columns:
+            if col not in columns:
+                columns.append(str(col))
+        for row in df.to_dict(orient="records"):
+            # Même conversion NaN -> None que import_dataframe (trieur/db.py) :
+            # une cellule vide devient NaN cote pandas, non serialisable en jsonb.
+            clean = {str(k): (None if isinstance(v, float) and v != v else v) for k, v in row.items()}
+            clean["_sheet"] = sheet_name
+            rows.append(clean)
+    return rows, columns
+
+
+def _without_sheet_key(data: dict) -> dict:
+    return {k: v for k, v in data.items() if k != "_sheet"}
+
+
+def _get_pipeline_session_or_404(ctx: AuthCtx, org_id: str, session_id: str) -> dict:
+    """Une session appartenant à un AUTRE environnement, ou expirée/déjà
+    nettoyée par cleanup_expired_pipeline_sessions(), est traitée comme
+    introuvable -- jamais une erreur serveur (voir trieur/db.py:get_pipeline_session)."""
+    session = get_pipeline_session(ctx.client, session_id)
+    if not session or session["org_id"] != org_id:
+        raise HTTPException(status_code=404, detail="Session de pipeline introuvable ou expirée.")
+    return session
+
+
+def _detected_columns(rows: list[dict]) -> list[str]:
+    columns: list[str] = []
+    for r in rows:
+        for k in r.keys():
+            if k != "_sheet" and k not in columns:
+                columns.append(k)
+    return columns
+
+
+@app.post("/orgs/{org_id}/pipeline/sessions")
+async def create_pipeline_session_endpoint(
+    org_id: str,
+    file: UploadFile = File(...),
+    ctx: AuthCtx = Depends(require_org_access),
+):
+    """Ouvre une session de pipeline : lit le fichier, met les lignes en
+    staging (trieur_data.pipeline_rows, TTL 24h), et renvoie un aperçu +
+    les colonnes détectées pour l'étape de mapping suivante. N'écrit
+    jamais dans trieur_data.records (donnée permanente) -- ça reste la
+    validation finale du pipeline, pas encore portée ici."""
+    content = await file.read()
+    filename = file.filename or "import"
+    sheets = _parse_pipeline_file(filename, content)
+    rows, columns = _merge_pipeline_sheets(sheets)
+    if not rows:
+        raise HTTPException(status_code=400, detail="Fichier vide ou sans ligne exploitable.")
+
+    session = create_pipeline_session(ctx.client, org_id, ctx.user.id, source_filename=filename)
+    for start in range(0, len(rows), PIPELINE_APPEND_BATCH):
+        append_pipeline_rows(
+            ctx.client, session["id"], rows[start:start + PIPELINE_APPEND_BATCH], start_index=start,
+        )
+
+    master_cols = get_org_master_columns(ctx.client, org_id)
+    return {
+        "session_id": session["id"],
+        "status": session.get("status", "importing"),
+        "row_count": len(rows),
+        "columns": columns,
+        "unknown_columns": unknown_columns(columns, master_cols),
+        "preview_rows": [_without_sheet_key(r) for r in rows[:PIPELINE_PREVIEW_SIZE]],
+    }
+
+
+@app.get("/orgs/{org_id}/pipeline/sessions/{session_id}")
+def get_pipeline_session_endpoint(org_id: str, session_id: str, ctx: AuthCtx = Depends(require_org_access)):
+    session = _get_pipeline_session_or_404(ctx, org_id, session_id)
+    preview = list_pipeline_rows(ctx.client, session_id, limit=PIPELINE_PREVIEW_SIZE)
+    return {
+        "session_id": session_id,
+        "status": session["status"],
+        "source_filename": session.get("source_filename"),
+        "row_count": session["row_count"],
+        "columns": _detected_columns([r["data"] for r in preview]),
+        "preview_rows": [_without_sheet_key(r["data"]) for r in preview],
+    }
+
+
+class PipelineMapping(BaseModel):
+    # `None` : pas de mapping fourni -> la suggestion d'auto-assignation
+    # est appliquée telle quelle. Fournir un dict explicite, même partiel,
+    # remplace entièrement la suggestion (l'appelant doit envoyer le
+    # mapping COMPLET qu'il veut appliquer, pas un patch).
+    mapping: Optional[dict[str, str]] = None
+    # true : renvoie la suggestion sans rien écrire (aperçu avant
+    # confirmation côté frontend, même principe que dry_run sur /import).
+    dry_run: bool = False
+
+
+@app.post("/orgs/{org_id}/pipeline/sessions/{session_id}/mapping")
+def apply_pipeline_mapping(
+    org_id: str, session_id: str, body: PipelineMapping, ctx: AuthCtx = Depends(require_org_access),
+):
+    """Propose (dry_run) ou applique le mapping colonnes source -> colonnes
+    maîtres. La suggestion réutilise trieur/matching.py:auto_assign_columns_fast
+    -- même logique que le bouton "Auto" de views/tab2_import_mapping.py,
+    jamais réimplémentée ici (échantillon = le même aperçu que le GET
+    ci-dessus, pas tout le fichier : suffisant pour la détection par
+    contenu -- téléphone/IBAN -- sans charger des millions de lignes).
+
+    En dehors d'un dry_run, applique le mapping (fourni, ou la suggestion
+    si omis) : chaque ligne de la session est réécrite avec les clés
+    COLONNES MAÎTRES (une colonne source sur "(non assigne)" disparaît de
+    la ligne), puis la session passe au statut 'mapped'. Limite connue,
+    simplification volontaire par rapport à l'onglet 2 : si deux colonnes
+    source sont mappées sur la MÊME colonne maître, la dernière écrase la
+    précédente (l'onglet 2 garde la première valeur non vide) -- à revoir
+    si un vrai cas d'usage l'exige."""
+    _get_pipeline_session_or_404(ctx, org_id, session_id)
+    master_cols = get_org_master_columns(ctx.client, org_id)
+
+    sample = list_pipeline_rows(ctx.client, session_id, limit=PIPELINE_PREVIEW_SIZE)
+    real_columns = _detected_columns([r["data"] for r in sample])
+    sample_df = pd.DataFrame([_without_sheet_key(r["data"]) for r in sample]) if sample else None
+    suggestion = auto_assign_columns_fast(real_columns, master_cols, sheet_df=sample_df)
+
+    if body.dry_run:
+        return {"session_id": session_id, "suggested_mapping": suggestion, "columns": real_columns}
+
+    mapping = body.mapping if body.mapping is not None else suggestion
+    if not any(m and m != "(non assigne)" for m in mapping.values()):
+        raise HTTPException(status_code=400, detail="Aucune colonne assignée dans ce mapping.")
+
+    n_updated = 0
+    offset = 0
+    while True:
+        page = list_pipeline_rows(ctx.client, session_id, limit=LIST_PAGE_SIZE, offset=offset)
+        if not page:
+            break
+        for row in page:
+            new_data = {
+                master: row["data"][src]
+                for src, master in mapping.items()
+                if master and master != "(non assigne)" and src in row["data"]
+            }
+            update_pipeline_row_data(ctx.client, row["id"], new_data)
+            n_updated += 1
+        offset += len(page)
+
+    update_pipeline_session_status(ctx.client, session_id, "mapped")
+    return {"session_id": session_id, "status": "mapped", "mapping": mapping, "n_rows_updated": n_updated}
+
+
+# ---------------------------------------------------------------
+# Colonnes maîtres. UNE seule notion de "colonnes maîtres" pour tout
+# l'environnement (trieur_data.organizations.master_columns) : le
+# pipeline (import + mapping ci-dessus) réutilise CES DEUX routes comme
+# cible de mapping, ce n'est PAS une deuxième liste. `trieur/persistence.py`
+# (load_master_columns/save_master_columns, fichier JSON local) est un
+# reliquat pré-multi-tenant de l'app Streamlit -- global au process, pas
+# par organisation -- donc un concept différent, jamais utilisé ici.
 # ---------------------------------------------------------------
 
 @app.get("/orgs/{org_id}/master-columns")

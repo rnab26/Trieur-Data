@@ -689,6 +689,16 @@ def list_pipeline_rows(client: Client, session_id: str, limit: int = LIST_PAGE_S
     return res.data or []
 
 
+def update_pipeline_row_data(client: Client, row_id: str, data: dict) -> None:
+    """Remplace entièrement le jsonb d'une ligne de pipeline déjà en
+    staging -- utilisé par l'étape de mapping (onglet 2, voir api/main.py)
+    pour réécrire chaque ligne avec les clés COLONNES MAÎTRES une fois le
+    mapping appliqué. `data` remplace tout le contenu existant (même
+    convention que `update_record`) : l'appelant construit le dict final,
+    pas un patch partiel."""
+    _td(client, "pipeline_rows").update({"data": data}).eq("id", row_id).execute()
+
+
 def delete_pipeline_session(client: Client, session_id: str) -> None:
     """Supprime une session de pipeline et toutes ses lignes (cascade,
     voir migration 0010) -- abandon explicite du pipeline en cours par

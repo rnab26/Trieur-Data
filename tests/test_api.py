@@ -21,8 +21,17 @@ from api.main import app, get_supabase_client
 # ---------------------------------------------------------------
 
 class _FakeTable:
-    def __init__(self, store):
+    # Valeurs par défaut posées côté SQL (colonnes qu'un insert ne fournit
+    # pas explicitement) -- sans ça, un insert sur ce faux client renverrait
+    # une ligne incomplète par rapport à ce que Postgres renvoie réellement
+    # (voir tests/test_db_pipeline.py, même besoin pour ces deux tables).
+    _DEFAULTS = {
+        "pipeline_sessions": {"status": "importing", "row_count": 0},
+    }
+
+    def __init__(self, store, name=None):
         self.store = store
+        self.name = name
         self._filters = []
         self._select_count = None
         self._order = None
@@ -87,10 +96,14 @@ class _FakeTable:
 
     def execute(self):
         if self._op == "insert":
-            row = dict(self._payload)
-            row.setdefault("id", f"row-{len(self.store)}")
-            self.store.append(row)
-            return SimpleNamespace(data=[row], count=None)
+            payload = self._payload if isinstance(self._payload, list) else [self._payload]
+            inserted = []
+            for item in payload:
+                row = {**self._DEFAULTS.get(self.name, {}), **item}
+                row.setdefault("id", f"row-{len(self.store)}")
+                self.store.append(row)
+                inserted.append(row)
+            return SimpleNamespace(data=inserted, count=None)
         if self._op == "update":
             matched = [r for r in self.store if self._matches(r)]
             for r in matched:
@@ -137,7 +150,7 @@ class _FakePostgrest:
         return self
 
     def table(self, name):
-        return _FakeTable(self.tables.setdefault(name, []))
+        return _FakeTable(self.tables.setdefault(name, []), name=name)
 
     def auth(self, _token):
         return self
@@ -175,6 +188,8 @@ def _make_client(**tables):
         "import_batches": [],
         "dedup_alerts": [],
         "db_saved_views": [],
+        "pipeline_sessions": [],
+        "pipeline_rows": [],
     }
     default_tables.update(tables)
     return _FakeClient(default_tables, users_by_token={TOKEN: USER})
@@ -1102,3 +1117,195 @@ def test_chantier_todo_unknown_id_is_404(client_factory):
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 404
+
+
+# ---------------------------------------------------------------
+# Pipeline "Trieur de Data" : import + mapping (étape 1)
+# ---------------------------------------------------------------
+
+def _upload_csv(tc, org_id, content: bytes, filename="clients.csv"):
+    return tc.post(
+        f"/orgs/{org_id}/pipeline/sessions",
+        files={"file": (filename, content, "text/csv")},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+
+
+def test_pipeline_session_create_stages_rows_and_detects_columns(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    content = b"NOM,EMAIL\nDupont,d@x.com\nMartin,m@x.com\n"
+
+    res = _upload_csv(tc, "org-1", content)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["row_count"] == 2
+    assert body["columns"] == ["NOM", "EMAIL"]
+    assert body["status"] == "importing"
+    assert [r["NOM"] for r in body["preview_rows"]] == ["Dupont", "Martin"]
+    # "IBAN" est colonne maître (_make_client) mais absent du fichier -> pas
+    # "inconnue" pour autant : unknown_columns ne signale que l'inverse
+    # (colonne du fichier absente des colonnes maîtres).
+    assert body["unknown_columns"] == ["EMAIL"]
+
+    # Les lignes sont bien en staging (pipeline_rows), pas juste renvoyées.
+    session_id = body["session_id"]
+    rows = fake.postgrest.tables["pipeline_rows"]
+    assert len(rows) == 2
+    assert all(r["session_id"] == session_id for r in rows)
+
+
+def test_pipeline_session_requires_org_access(client_factory):
+    fake = _make_client(memberships=[])
+    tc = client_factory(fake)
+    res = _upload_csv(tc, "org-1", b"NOM\nDupont\n")
+    assert res.status_code == 403
+
+
+def test_pipeline_session_empty_file_is_400(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = _upload_csv(tc, "org-1", b"")
+    assert res.status_code == 400
+
+
+def test_pipeline_session_unreadable_file_is_400(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/pipeline/sessions",
+        files={"file": ("clients.xlsx", b"pas un vrai xlsx", "application/octet-stream")},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_pipeline_session_get_returns_status_and_preview(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_csv(tc, "org-1", b"NOM,EMAIL\nDupont,d@x.com\n").json()["session_id"]
+
+    res = tc.get(f"/orgs/org-1/pipeline/sessions/{session_id}", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["row_count"] == 1
+    assert body["status"] == "importing"
+    assert body["columns"] == ["NOM", "EMAIL"]
+    assert body["preview_rows"] == [{"NOM": "Dupont", "EMAIL": "d@x.com"}]
+
+
+def test_pipeline_session_get_unknown_id_is_404(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.get("/orgs/org-1/pipeline/sessions/does-not-exist", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 404
+
+
+def test_pipeline_session_get_wrong_org_is_404(client_factory):
+    """Une session appartenant à un AUTRE org qu'un utilisateur ayant
+    accès à `org-1` ne doit pas être lisible via `/orgs/org-1/...`, même
+    si un id a été deviné/copié -- l'API refait cette vérification elle-même
+    (comme _get_chantier_or_404), pas seulement la RLS Supabase."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_csv(tc, "org-1", b"NOM\nDupont\n").json()["session_id"]
+
+    # Simule une session qui appartient réellement à un autre org (RLS
+    # empêcherait normalement de la voir depuis /orgs/org-1/... -- ici on
+    # vérifie que l'API elle-même, pas seulement Supabase, applique cette
+    # règle).
+    fake.postgrest.tables["pipeline_sessions"][0]["org_id"] = "org-2"
+
+    res = tc.get(f"/orgs/org-1/pipeline/sessions/{session_id}", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 404
+
+
+def test_pipeline_mapping_dry_run_suggests_without_writing(client_factory):
+    fake = _make_client()  # master_columns = ["NOM", "IBAN"]
+    tc = client_factory(fake)
+    session_id = _upload_csv(tc, "org-1", b"NOM,IBAN\nDupont,FR7630006000011234567890189\n").json()["session_id"]
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"dry_run": True},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["suggested_mapping"] == {"NOM": "NOM", "IBAN": "IBAN"}
+
+    # dry_run : rien n'est modifié en base.
+    session = tc.get(f"/orgs/org-1/pipeline/sessions/{session_id}", headers={"Authorization": f"Bearer {TOKEN}"}).json()
+    assert session["status"] == "importing"
+
+
+def test_pipeline_mapping_apply_rekeys_rows_and_marks_mapped(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_csv(tc, "org-1", b"nom_client,iban_ref\nDupont,FR7630006000011234567890189\n").json()["session_id"]
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {"nom_client": "NOM", "iban_ref": "IBAN"}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "mapped"
+    assert body["n_rows_updated"] == 1
+
+    rows = fake.postgrest.tables["pipeline_rows"]
+    assert rows[0]["data"] == {"NOM": "Dupont", "IBAN": "FR7630006000011234567890189"}
+
+    session = get_pipeline_session_via_api(tc, session_id)
+    assert session["status"] == "mapped"
+
+
+def get_pipeline_session_via_api(tc, session_id):
+    return tc.get(f"/orgs/org-1/pipeline/sessions/{session_id}", headers={"Authorization": f"Bearer {TOKEN}"}).json()
+
+
+def test_pipeline_mapping_applies_suggestion_when_no_mapping_given(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_csv(tc, "org-1", b"NOM,IBAN\nDupont,FR7630006000011234567890189\n").json()["session_id"]
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.json()["mapping"] == {"NOM": "NOM", "IBAN": "IBAN"}
+    rows = fake.postgrest.tables["pipeline_rows"]
+    assert rows[0]["data"] == {"NOM": "Dupont", "IBAN": "FR7630006000011234567890189"}
+
+
+def test_pipeline_mapping_all_unassigned_is_400(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_csv(tc, "org-1", b"colonneinconnue\nx\n").json()["session_id"]
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {"colonneinconnue": "(non assigne)"}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_pipeline_mapping_unknown_session_is_404(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/pipeline/sessions/does-not-exist/mapping",
+        json={},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 404
+
+
+def test_pipeline_requires_auth(client_factory):
+    tc = client_factory(_make_client())
+    res = tc.post("/orgs/org-1/pipeline/sessions", files={"file": ("a.csv", b"NOM\nX\n", "text/csv")})
+    assert res.status_code == 401

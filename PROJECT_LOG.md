@@ -1760,3 +1760,56 @@ seulement)** :
   2-4) : endpoints FastAPI qui lisent/écrivent cette table de staging
   pour les étapes mapping/filtre/export, et le point transverse n°2
   (progression des tâches longues), toujours en attente.
+
+**État (2026-09-18, API pipeline — étape 1 import + mapping)** :
+- `api/main.py` : 3 nouvelles routes, couche fine sur `trieur/db.py`
+  (déjà en place ci-dessus) et sur la logique déjà écrite pour
+  l'onglet 2 (`trieur/io_excel.py`, `trieur/matching.py`), rien
+  réimplémenté :
+  - `POST /orgs/{org_id}/pipeline/sessions` (upload Excel/CSV) : lit le
+    fichier avec les lecteurs existants (moteurs calamine/openpyxl,
+    déduction d'en-tête absente), fusionne tous les onglets en une
+    seule session de staging (onglet d'origine gardé sous `_sheet` par
+    ligne, jamais proposé au mapping), renvoie `session_id` + colonnes
+    détectées + `unknown_columns` (vs colonnes maîtres de l'org) +
+    aperçu (10 lignes). PDF (relevés SEPA) hors périmètre de cette
+    route pour l'instant.
+  - `GET /orgs/{org_id}/pipeline/sessions/{id}` : statut + aperçu,
+    reconstruit les colonnes depuis les lignes en staging (pas de
+    colonne dédiée côté SQL) ; 404 si session d'un autre org ou
+    expirée/nettoyée (vérifié en plus de la RLS, même patron que
+    `_get_chantier_or_404`).
+  - `POST .../sessions/{id}/mapping` : `dry_run=true` renvoie la
+    suggestion d'auto-assignation (`trieur/matching.py:auto_assign_columns_fast`,
+    échantillonnée sur l'aperçu déjà chargé, pas tout le fichier) sans
+    rien écrire ; sans `dry_run`, applique le mapping (fourni, ou la
+    suggestion si omis) en réécrivant chaque ligne avec les clés
+    colonnes MAÎTRES, puis passe la session à `mapped`. Simplification
+    connue vs l'onglet 2 : deux colonnes source mappées sur la même
+    colonne maître -> la dernière écrase (pas de fusion "1ère valeur
+    non vide").
+  - `trieur/db.py` : ajout de `update_pipeline_row_data` (réécriture du
+    jsonb d'une ligne de staging) — seule fonction manquante pour que
+    l'endpoint mapping reste fin, pas d'appel direct à PostgREST depuis
+    `api/main.py`.
+- **Colonnes maîtres : PAS de nouvelle liste.** Vérifié que
+  `trieur/persistence.py` (`load_master_columns`, fichier JSON local)
+  est un reliquat pré-multi-tenant de l'app Streamlit — global au
+  process, pas par organisation — donc un concept différent de
+  `trieur_data.organizations.master_columns` (par org, déjà utilisé
+  par le CRM). Le pipeline étant lui aussi par org, il réutilise
+  directement `GET/POST /orgs/{org_id}/master-columns` (déjà en place) :
+  aucune route ajoutée pour ça.
+- `tests/test_api.py` : 13 nouveaux tests (upload, détection colonnes,
+  aperçu, 404 cross-org, dry_run vs application du mapping, mapping
+  auto par défaut, 400 si tout `(non assigne)`, 401/403). Fausse table
+  Supabase du fichier étendue pour accepter un insert en LISTE (lot de
+  lignes, comme `append_pipeline_rows`) et poser les mêmes valeurs par
+  défaut SQL (`status`, `row_count`) qu'un insert Postgres réel.
+- Vérifié : `python3 -m pytest -q` → **226 passed**, 1 échec — même
+  flake pré-existant `test_master_columns_localstorage_fallback`, sans
+  lien (13 tests en plus des 213 précédents, tous verts).
+- **Reste à faire** : porter les onglets 3-4 (filtre/dedup, export) sur
+  cette même table de staging ; PDF (relevés SEPA) pas encore branché
+  sur `POST .../pipeline/sessions` ; le point transverse n°2
+  (progression des tâches longues) reste ouvert.

@@ -1357,17 +1357,25 @@ maîtres) livré :
   2026-09-17 (voir suite ci-dessous).
 - [x] Tableau de bord par environnement + badge d'alertes de doublon —
   livré 2026-09-17.
-- [ ] Modification multiple (sélection multi-lignes) et diff au
-  réimport — pas d'équivalent côté API pour l'instant.
+- [x] Modification/suppression multiple (sélection multi-lignes) —
+  livré 2026-09-18 (voir 4e incrément ci-dessous).
 - [x] Recherche avancée façon Google Sheets (filtres par colonne
   combinés) — livré 2026-09-17 (`ColumnFilters.tsx`), branché sur
   `col_filters` déjà exposé par l'API.
-- [ ] Export direct depuis la base.
-- [ ] Historique court par ligne modifiée.
+- [x] Alertes de doublon IBAN avec diff (résolution) — livré
+  2026-09-18 (voir 4e incrément ci-dessous).
+- [x] Export direct depuis la base (CSV/Excel) — livré 2026-09-18
+  (voir 4e incrément ci-dessous).
+- [x] Historique court par ligne modifiée — déjà exposé par l'API
+  existante (`_build_rows`/`_resolve_modifier_names`), affiché comme
+  colonne dans le tableau React ; vérifié 2026-09-18, rien à ajouter.
+- [ ] Diff au réimport (ré-import d'un fichier déjà présent) — distinct
+  des alertes de doublon IBAN ci-dessus, pas encore audité côté React.
 - [ ] Les onglets "Trieur de Data" eux-mêmes (au-delà de la Base de
   données) : tout ce qui vit dans les autres tabs de `app.py`/`views/`
-  et n'a pas encore d'équivalent React ni d'endpoint API dédié — à
-  auditer un par un avant de porter. **Pas commencé.**
+  (import/mapping/aperçu/filtrage/export propres à Trieur de Data) et
+  n'a pas encore d'équivalent React ni d'endpoint API dédié — à
+  auditer un par un avant de porter. **Pas commencé, pas mesuré.**
 
 **État (2026-09-17, suite — filtres par colonne + vues enregistrées +
 tableau de bord)** :
@@ -1415,15 +1423,71 @@ tableau de bord)** :
 - Poussé sur `origin/feature/react-migration` (commit `<voir git log`
   au moment du push). Toujours pas mergé sur `main`, pas de PR.
 
-**Avancement global estimé** : ~40-45% de la migration complète.
-Fait : auth, écran Base de données avec liste/recherche/filtres par
+**État (2026-09-18, 4e incrément — sélection multiple, alertes de
+doublon avec diff, export, historique par ligne)** :
+- `api/main.py` : `DELETE /orgs/{org_id}/records` (suppression
+  groupée) et `PATCH /orgs/{org_id}/records/bulk` (modification d'UN
+  SEUL champ pour toute la sélection), tous deux en boucle sur
+  `delete_record`/`get_record`/`update_record` (`trieur/db.py`) — même
+  logique que `views/tab_database.py`, aucune requête SQL en masse ni
+  logique dupliquée. `GET /orgs/{org_id}/dedup-alerts` (diff champ par
+  champ calculé côté serveur via `diff_rows()`, jamais réimplémenté en
+  TS) et `POST .../dedup-alerts/{id}/resolve` (garde d'appartenance à
+  l'org avant résolution). `GET /orgs/{org_id}/records/export?format=
+  csv|xlsx` (`StreamingResponse`, respecte recherche/filtres par
+  colonne/colonnes affichées — même règle de masquage que Streamlit :
+  colonne connue à l'écran mais décochée → masquée, colonne jamais vue
+  → incluse quand même).
+- `frontend/` : `BulkActions.tsx` (case par ligne + "tout sélectionner",
+  suppression à deux étapes avertissement/confirmer/annuler, édition
+  d'un champ pour la sélection) et `DedupAlertsPanel.tsx` (diff par
+  alerte, se cache s'il n'y a rien à traiter), intégrés à
+  `DatabaseScreen.tsx` ; boutons Export CSV/Excel. Historique par ligne
+  ("Modifié le"/"Modifié par") déjà affiché comme colonne, rien à
+  ajouter.
+- **Vérifié indépendamment ce soir** (session de vérification séparée,
+  relecture ligne à ligne + tests réels, pas seulement lu le rapport de
+  l'agent précédent) :
+  - `python3 -m pytest -q` (suite complète) → **191 passed**, aucun
+    échec, aucun flake observé cette fois (le flake connu
+    `test_master_columns_localstorage_fallback` ne s'est pas manifesté
+    sur ce run).
+  - `cd frontend && npm run build` → succès (`tsc -b && vite build`,
+    exit code 0, aucune erreur TypeScript).
+  - `git diff --stat main...feature/react-migration -- views/ app.py`
+    → vide, confirmé : app Streamlit toujours non touchée.
+  - `api/main.py` comparé à `frontend/src/lib/api.ts` endpoint par
+    endpoint (méthode, chemin, noms de champs) pour les 5 nouvelles
+    routes : aucune divergence trouvée.
+  - Flux suppression groupée (`BulkActions.tsx`) et résolution
+    d'alerte (`DedupAlertsPanel.tsx`) relus spécifiquement pour un bug
+    d'id/off-by-one : sélection et résolution sont indexées par
+    `record._id`/`alert.id` réels (jamais par position dans un
+    tableau) côté React comme côté API — **aucun bug trouvé**.
+  - Export (`export_org_records`, `api/main.py`) relu : appelle
+    `list_all_records` (tout l'historique, pas seulement la page
+    affichée) puis applique `_filter_by_search`/`_filter_by_columns`
+    avec les mêmes `search`/`col_filters` que la liste — **confirmé
+    que l'export respecte bien les filtres actifs**, pas un export
+    brut de toute la base.
+  - Aucun bug trouvé nécessitant un correctif — le travail de l'agent
+    précédent est passé la vérification sans modification.
+- Poussé sur `origin/feature/react-migration`, commit `b9faad9`.
+  Toujours pas mergé sur `main`, pas de PR.
+
+**Avancement global estimé** : ~55-60% de la migration complète. Fait :
+auth, écran Base de données avec liste/recherche/filtres par
 colonne/édition/import/colonnes maîtres/vues enregistrées/tableau de
-bord. Pour arriver à 100% il reste : sélection multiple + diff au
-réimport, export, historique par ligne, et surtout l'audit + portage
-de **tous les autres onglets de `app.py`/`views/`** (non commencé,
-probablement le plus gros morceau restant — pas encore mesuré en
-détail) avant de pouvoir envisager un remplacement de l'app Streamlit
-en production.
+bord/sélection multiple (suppression + modification groupées)/alertes
+de doublon avec diff/export CSV-Excel/historique par ligne. Pour
+arriver à 100% il reste, **honnêtement** : le diff au réimport d'un
+fichier déjà présent (distinct des alertes de doublon IBAN), et surtout
+l'audit + portage de **tous les autres onglets propres à "Trieur de
+Data"** (import/mapping/aperçu/filtrage/export au-delà de la Base de
+données) — ce chantier n'a pas du tout commencé et n'a pas encore été
+mesuré en détail ; c'est probablement le plus gros morceau restant
+avant de pouvoir envisager un remplacement de l'app Streamlit en
+production.
 
 **Ne pas casser** : l'app Streamlit (`app.py`, `views/`) reste la seule
 en production tant que ce chantier n'est pas fini — ne jamais merger

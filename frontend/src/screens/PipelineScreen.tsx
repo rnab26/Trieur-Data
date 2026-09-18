@@ -30,6 +30,7 @@ import { ColumnFilters } from './ColumnFilters'
 type Step = 'upload' | 'mapping' | 'done'
 
 const PREVIEW_COLS_MAX = 8
+const ROWS_PAGE_SIZE = 50
 
 export function PipelineScreen() {
   const { session: authSession, signOut } = useAuth()
@@ -60,8 +61,10 @@ export function PipelineScreen() {
   const [searchInput, setSearchInput] = useState('')
   const [colFilters, setColFilters] = useState<ColFilters>({})
   const [rowsLoading, setRowsLoading] = useState(false)
+  const [rowsLoadingMore, setRowsLoadingMore] = useState(false)
   const [rowsError, setRowsError] = useState<string | null>(null)
   const [rows, setRows] = useState<Record<string, unknown>[]>([])
+  const [rowsPage, setRowsPage] = useState(1)
   const [rowCount, setRowCount] = useState(0)
   const [filteredCount, setFilteredCount] = useState(0)
   const [exporting, setExporting] = useState<'csv' | 'xlsx' | null>(null)
@@ -132,22 +135,41 @@ export function PipelineScreen() {
     })
   }
 
+  // Paginé comme DatabaseScreen ("Charger plus") depuis la revue PR #24
+  // (point #7) : avant, cette page recevait TOUTE la session en une
+  // réponse et tronquait juste l'affichage à 50 lignes côté client --
+  // un gros fichier (centaines de milliers de lignes) transférait tout
+  // pour n'en montrer qu'une fraction. La recherche/les filtres restent
+  // appliqués sur toute la session côté serveur (voir api/main.py) --
+  // seule la page RENVOYÉE change.
   const fetchRows = useCallback(
-    async (orgIdVal: string, sessionId: string, targetSearch: string, targetColFilters: ColFilters) => {
-      setRowsLoading(true)
+    async (
+      orgIdVal: string,
+      sessionId: string,
+      targetSearch: string,
+      targetColFilters: ColFilters,
+      targetPage: number,
+      append: boolean,
+    ) => {
+      if (append) setRowsLoadingMore(true)
+      else setRowsLoading(true)
       setRowsError(null)
       try {
         const data = await listPipelineSessionRows(orgIdVal, sessionId, {
+          page: targetPage,
+          pageSize: ROWS_PAGE_SIZE,
           search: targetSearch,
           colFilters: targetColFilters,
         })
-        setRows(data.rows)
+        setRows((prev) => (append ? [...prev, ...data.rows] : data.rows))
+        setRowsPage(data.page)
         setRowCount(data.row_count)
         setFilteredCount(data.count)
       } catch (err) {
         setRowsError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
       } finally {
         setRowsLoading(false)
+        setRowsLoadingMore(false)
       }
     },
     [],
@@ -155,12 +177,17 @@ export function PipelineScreen() {
 
   useEffect(() => {
     if (step !== 'done' || !orgId || !pipelineSession) return
-    void fetchRows(orgId, pipelineSession.session_id, search, colFilters)
+    void fetchRows(orgId, pipelineSession.session_id, search, colFilters, 1, false)
     // colFiltersKey sert de dépendance stable (colFilters change de
     // référence à chaque frappe côté ColumnFilters) -- colFilters lui-même
     // reste utilisé dans le corps de l'effet.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, orgId, pipelineSession, search, colFiltersKey, fetchRows])
+
+  function handleLoadMoreRows() {
+    if (!orgId || !pipelineSession) return
+    void fetchRows(orgId, pipelineSession.session_id, search, colFilters, rowsPage + 1, true)
+  }
 
   function handleSearchSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -217,6 +244,7 @@ export function PipelineScreen() {
     setSearchInput('')
     setColFilters({})
     setRows([])
+    setRowsPage(1)
     setRowCount(0)
     setFilteredCount(0)
     setRowsError(null)
@@ -285,7 +313,23 @@ export function PipelineScreen() {
   }
 
   const assignedCount = Object.values(mapping).filter((m) => m && m !== PIPELINE_UNASSIGNED).length
-  const canBuild = assignedCount > 0 && !building
+
+  // Le backend garde la DERNIÈRE valeur quand deux colonnes source sont
+  // mappées sur la MÊME colonne maître (limite documentée de
+  // apply_pipeline_mapping, voir api/main.py) -- ça perd silencieusement
+  // les données de la première colonne source. Plutôt que de laisser ça
+  // se produire sans prévenir, on bloque "Construire" tant qu'un même
+  // choix est utilisé deux fois (revue PR #24, point #4).
+  const duplicateMasterCols = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const m of Object.values(mapping)) {
+      if (!m || m === PIPELINE_UNASSIGNED) continue
+      counts.set(m, (counts.get(m) ?? 0) + 1)
+    }
+    return [...counts.entries()].filter(([, n]) => n > 1).map(([col]) => col)
+  }, [mapping])
+
+  const canBuild = assignedCount > 0 && duplicateMasterCols.length === 0 && !building
 
   return (
     <div className="mx-auto max-w-3xl p-4">
@@ -462,7 +506,12 @@ export function PipelineScreen() {
                           onChange={(e) =>
                             setMapping((prev) => ({ ...prev, [col]: e.target.value }))
                           }
-                          className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm sm:w-56"
+                          className={
+                            'w-full rounded-md border bg-[var(--card)] px-3 py-2 text-sm sm:w-56 ' +
+                            (duplicateMasterCols.includes(mapping[col] ?? '')
+                              ? 'border-[var(--danger)]'
+                              : 'border-[var(--border)]')
+                          }
                         >
                           <option value={PIPELINE_UNASSIGNED}>(non assigné)</option>
                           {(masterColumns ?? []).map((mc) => (
@@ -476,6 +525,15 @@ export function PipelineScreen() {
                   </div>
                 )}
               </div>
+
+              {duplicateMasterCols.length > 0 && (
+                <p className="text-sm text-[var(--danger)]">
+                  {duplicateMasterCols.length === 1 ? 'Colonne maître choisie' : 'Colonnes maîtres choisies'}{' '}
+                  plusieurs fois : {duplicateMasterCols.join(', ')} -- seule la dernière colonne source
+                  assignée serait gardée, les autres seraient perdues. Choisis une colonne maître différente
+                  pour chacune avant de construire.
+                </p>
+              )}
 
               {buildError && <p className="text-sm text-[var(--danger)]">Erreur : {buildError}</p>}
 
@@ -614,7 +672,7 @@ export function PipelineScreen() {
                       </tr>
                     </thead>
                     <tbody>
-                      {rows.slice(0, 50).map((row, i) => (
+                      {rows.map((row, i) => (
                         <tr key={i} className="border-t border-[var(--border)]">
                           {rowsColumns.slice(0, PREVIEW_COLS_MAX).map((c) => (
                             <td key={c} className="whitespace-nowrap px-3 py-2">
@@ -628,12 +686,14 @@ export function PipelineScreen() {
                       ))}
                     </tbody>
                   </table>
-                  {rows.length > 50 && (
-                    <p className="px-3 py-2 text-xs text-[var(--muted)]">
-                      Aperçu limité aux 50 premières lignes ({filteredCount} au total) -- exporte
-                      pour tout récupérer.
-                    </p>
-                  )}
+                </div>
+              )}
+
+              {!rowsLoading && !rowsError && rows.length > 0 && rows.length < filteredCount && (
+                <div className="flex justify-center">
+                  <Button variant="secondary" onClick={handleLoadMoreRows} disabled={rowsLoadingMore}>
+                    {rowsLoadingMore ? 'Chargement…' : `Charger plus (${rows.length}/${filteredCount})`}
+                  </Button>
                 </div>
               )}
 

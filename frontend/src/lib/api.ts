@@ -578,6 +578,8 @@ export function applyPipelineMapping(orgId: string, sessionId: string, mapping: 
 
 export type PipelineRowsPage = {
   session_id: string
+  page: number
+  page_size: number
   row_count: number
   count: number
   rows: Record<string, unknown>[]
@@ -598,9 +600,11 @@ function toApiColFiltersPipeline(filters: ColFilters): ColFilters {
 export function listPipelineSessionRows(
   orgId: string,
   sessionId: string,
-  opts: { search?: string; colFilters?: ColFilters } = {},
+  opts: { page?: number; pageSize?: number; search?: string; colFilters?: ColFilters } = {},
 ) {
   const params = new URLSearchParams()
+  params.set('page', String(opts.page ?? 1))
+  params.set('page_size', String(opts.pageSize ?? 50))
   if (opts.search) params.set('search', opts.search)
   if (opts.colFilters && Object.keys(opts.colFilters).length > 0) {
     params.set('col_filters', JSON.stringify(toApiColFiltersPipeline(opts.colFilters)))

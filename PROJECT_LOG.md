@@ -1882,3 +1882,107 @@ implémenté (étape 1 : import + mapping) :
   et la première moitié du pipeline sont solides ; le reste du
   pipeline, le plus gros morceau restant, n'est pas commencé au-delà
   de cette étape 1).
+
+**État (2026-09-18, 7e incrément — barre de progression par chantier +
+vérification indépendante d'un rapport d'agent contredit par un autre)** :
+- Réponse à la demande explicite de l'utilisateur ("une barre de
+  progression constante sur chaque chantier") : déjà livrée dans cette
+  même branche, commit `6dfb45c` (avant cette vérification) —
+  `frontend/src/screens/ChantierCard.tsx` affiche sous chaque carte une
+  barre (fait/total, calcul client à partir des `chantier_todos` déjà
+  chargés par carte, aucun appel API ni changement backend) + le texte
+  "X/Y points traités". Diff de 14 lignes, un seul fichier, revu à
+  l'instant : correct, pas de division par zéro (condition
+  `todos.length > 0` avant le calcul).
+- **Rapport contradictoire entre deux agents de ce run** : un agent
+  "API" affirmait avoir livré les étapes 2-3 du pipeline (filtre/dedup +
+  export sur les sessions pipeline) ; un agent "frontend" contestait
+  cette affirmation. **Vérifié indépendamment, l'agent frontend avait
+  raison** :
+  - `grep` sur les routes de `api/main.py` : seulement 3 routes
+    `/orgs/{id}/pipeline/sessions...` (import, aperçu, mapping) —
+    aucune route `filter` ni `export` sous ce chemin.
+  - `git fetch origin` + `git log origin/feature/react-migration` :
+    dernier commit distant = `6dfb45c` (la barre de progression),
+    identique au HEAD local. Aucun commit de filtre/export pipeline,
+    ni local ni distant.
+  - `frontend/src/lib/api.ts` : aucun appel `pipeline`+`filter`/`export`
+    non plus — le frontend n'appelle que les 3 routes qui existent
+    réellement (`createPipelineSession`, `suggestPipelineMapping`,
+    `applyPipelineMapping`). Pas de divergence de contrat, parce que
+    rien de nouveau n'a été construit des deux côtés.
+  - Conclusion : l'affirmation "un agent API vient d'ajouter
+    filtre/export pour les sessions pipeline" était **fausse** —
+    probablement une hallucination de rapport dans le run précédent.
+    Les étapes 2-3 du pipeline restent non commencées au-delà de
+    l'étape 1 (import + mapping).
+- **Vérification complète refaite ce soir** :
+  - `python3 -m pytest -q` → **228 passed** au 2e run (1er run : 227
+    passed + 1 échec sur `test_master_columns_localstorage_fallback`,
+    même flake déjà documenté plus haut dans ce journal, reproduit en
+    échec puis en succès sans aucun changement de code entre les deux
+    runs — confirmé non lié à cet incrément).
+  - `cd frontend && npm run build` → succès, exit 0.
+  - `git diff --stat main...feature/react-migration -- views/ app.py` →
+    3 fichiers (`app.py`, `tab2_import_mapping.py`, `tab_database.py`),
+    tous depuis le commit `8b39500` (filet de diagnostic upload,
+    antérieur à cet incrément) — rien ajouté par cet incrément à
+    `views/`/`app.py`. `main` (`635fcde`) n'a reçu aucun commit de cette
+    migration, comme prévu — le site Streamlit en production reste
+    inchangé.
+  - Relecture de `_filter_by_columns`/`_matches_filter`
+    (`views/tab_database.py`, réutilisés par `api/main.py` pour
+    `/records` et `/records/export`) : le bug de classe "valeur fausse
+    traitée comme vide" (0/''/false) n'est **pas présent** — l'opérateur
+    "vide" teste `value is None or value == ""` explicitement, jamais
+    `not value`, et c'est couvert par
+    `test_filter_by_columns_vide_does_not_treat_zero_as_empty`.
+  - Scoping `org_id` sur les 3 routes pipeline existantes :
+    `require_org_access` en dépendance FastAPI sur les 3, +
+    `_get_pipeline_session_or_404` qui traite une session d'un autre org
+    comme introuvable (404). Déjà testé (`test_pipeline_session_get_wrong_org_is_404`,
+    `test_pipeline_mapping_wrong_org_is_404`) — rien à ajouter, les
+    étapes 2-3 n'existant pas encore, il n'y a pas de nouvelle route à
+    scoper.
+  - **Repéré, hors périmètre de cet incrément** : 3 branches locales
+    (`main-tmp`, `main-tmp2`, `main-tmp4`) non poussées sur `origin`,
+    contenant des correctifs de production (upload CORS, version
+    Python, keep-alive) apparemment issus d'un autre chantier de
+    fiabilisation du site Streamlit en direct. Pas touché — ne fait pas
+    partie de cette demande, signalé pour que l'utilisateur sache que
+    ces branches existent et décide s'il faut les fusionner ou les
+    supprimer.
+- Rien à committer côté code pour cet incrément (la barre de
+  progression était déjà poussée) — ce journal est la seule mise à
+  jour, poussée directement sur `origin/feature/react-migration`.
+- **Statut honnête de l'ensemble de la migration React (toujours
+  ~70 %, pas d'écran supplémentaire porté ce soir)** :
+  - **Fait et vérifié** : Base de données (complet) ; Cockpit (complet,
+    y compris la barre de progression par chantier demandée
+    aujourd'hui) ; Pipeline "Trieur de Data" étape 1 (import +
+    mapping/onglet 2) livrée et testée de bout en bout.
+  - **Reste pour 100 %** :
+    - Pipeline étapes 2-3 (onglets 3-4 Streamlit : filtre/dédoublonnage
+      avec les alertes de doublons, export final depuis une session
+      pipeline) — pas commencées, c'est le plus gros morceau restant.
+    - Détails d'UI propres à l'onglet 1 (gestion fine des colonnes
+      maîtres côté Streamlit — renommage, réordonnancement, mémoire
+      liée au compte) pas encore vérifiés un par un côté React au-delà
+      de la réutilisation basique `get/setMasterColumns`.
+    - Options avancées des onglets 3-4 si certaines ont été simplifiées
+      lors du portage (aucune n'existe encore, donc à valider au moment
+      du portage, pas avant).
+    - L'équivalent du glisser-déposer `streamlit-sortables` (réordonner
+      des éléments à la souris/au doigt, utilisé quelque part dans
+      l'app Streamlit actuelle) — pas encore vérifié si un composant
+      React équivalent a été posé ; à confirmer écran par écran pendant
+      le portage des onglets 3-4.
+    - Le point transverse n°2 toujours ouvert : barre de progression
+      pour les opérations *longues* (upload/traitement d'un gros
+      fichier) — différente de celle par chantier livrée aujourd'hui,
+      demande une vraie architecture de suivi de tâche côté API
+      (polling ou SSE), pas commencée.
+  - **`main` non touché** : confirmé ce soir par `git diff`/`git log` —
+    le site Streamlit en production (branche `main`, dernier commit
+    `635fcde`) n'a reçu aucun commit de cette migration depuis son
+    démarrage. Aucun merge n'a eu lieu, aucune PR n'est ouverte.

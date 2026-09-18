@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -101,18 +101,39 @@ export function CockpitScreen() {
   const [creatingSection, setCreatingSection] = useState(false)
   const [sectionCreateError, setSectionCreateError] = useState<string | null>(null)
 
+  // Même garde-fou que DatabaseScreen.fetchPage (revue PR #24, point #6) :
+  // sans identifiant de requête, changer rapidement d'org peut faire
+  // résoudre un ancien fetchAll APRÈS le courant et mélanger les
+  // chantiers/sections d'un mauvais environnement à l'écran affiché.
+  const requestIdRef = useRef(0)
+
   const fetchAll = useCallback((org: string) => {
+    const requestId = ++requestIdRef.current
     setChantiersLoading(true)
     setChantiersError(null)
     listChantiers(org)
-      .then(setChantiers)
-      .catch((err: unknown) => setChantiersError(err instanceof ApiError ? err.message : 'Erreur inconnue.'))
-      .finally(() => setChantiersLoading(false))
+      .then((data) => {
+        if (requestId !== requestIdRef.current) return
+        setChantiers(data)
+      })
+      .catch((err: unknown) => {
+        if (requestId !== requestIdRef.current) return
+        setChantiersError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+      })
+      .finally(() => {
+        if (requestId === requestIdRef.current) setChantiersLoading(false)
+      })
 
     setSectionsError(null)
     listSections(org)
-      .then(setSections)
-      .catch((err: unknown) => setSectionsError(err instanceof ApiError ? err.message : 'Erreur inconnue.'))
+      .then((data) => {
+        if (requestId !== requestIdRef.current) return
+        setSections(data)
+      })
+      .catch((err: unknown) => {
+        if (requestId !== requestIdRef.current) return
+        setSectionsError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+      })
   }, [])
 
   useEffect(() => {

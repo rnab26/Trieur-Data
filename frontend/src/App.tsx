@@ -29,7 +29,7 @@ type Ecran = 'database' | 'pipeline' | 'cockpit'
 
 function AppContent() {
   const { session, loading } = useAuth()
-  const { isAdmin } = useIsAdmin()
+  const { isAdmin } = useIsAdmin(!loading && Boolean(session))
   const [ecran, setEcran] = useState<Ecran>('database')
 
   if (loading) {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { useAuth } from '@/lib/AuthContext'
@@ -42,7 +42,10 @@ export function DatabaseScreen() {
   const { session, signOut } = useAuth()
 
   const { orgs, orgsError, orgId, setOrgId } = useOrgs()
-  const { isAdmin } = useIsAdmin()
+  // DatabaseScreen ne monte qu'une fois App.tsx a confirmé la session
+  // (voir App.tsx) -- toujours prêt ici, contrairement au montage plus
+  // précoce d'App.tsx lui-même (voir useAccount.ts:useIsAdmin).
+  const { isAdmin } = useIsAdmin(true)
 
   const [tab, setTab] = useState<Tab>('clients')
 
@@ -123,6 +126,15 @@ export function DatabaseScreen() {
 
   const colFiltersKey = useMemo(() => JSON.stringify(colFilters), [colFilters])
 
+  // Compteur de requête -- incrémenté à chaque appel de fetchPage, peu
+  // importe la source (effet org/recherche/filtres, "Charger plus",
+  // import/modif/suppression). Une réponse dont l'id ne correspond plus
+  // au dernier appel en cours est ignorée : sans ça, changer d'org ou de
+  // recherche rapidement peut faire résoudre un ancien fetch APRÈS le
+  // courant et écraser l'écran avec des données périmées (revue PR #24,
+  // point #5).
+  const requestIdRef = useRef(0)
+
   const fetchPage = useCallback(
     async (
       targetOrgId: string,
@@ -131,6 +143,7 @@ export function DatabaseScreen() {
       targetColFilters: ColFilters,
       append: boolean,
     ) => {
+      const requestId = ++requestIdRef.current
       if (append) setLoadingMore(true)
       else setLoading(true)
       setError(null)
@@ -141,6 +154,7 @@ export function DatabaseScreen() {
           search: targetSearch,
           colFilters: toApiColFilters(targetColFilters),
         })
+        if (requestId !== requestIdRef.current) return
         setRows((prev) => (append ? [...prev, ...data.rows] : data.rows))
         setTotal(data.total)
         setPage(data.page)
@@ -150,10 +164,13 @@ export function DatabaseScreen() {
         // mutation du lot affiché).
         if (!append) setSelectedIds([])
       } catch (err) {
+        if (requestId !== requestIdRef.current) return
         setError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
       } finally {
-        setLoading(false)
-        setLoadingMore(false)
+        if (requestId === requestIdRef.current) {
+          setLoading(false)
+          setLoadingMore(false)
+        }
       }
     },
     [],

@@ -32,11 +32,21 @@ export function useOrgs() {
   return { orgs, orgsError, orgId, setOrgId }
 }
 
-export function useIsAdmin() {
+// `ready` doit valoir false tant que la session Supabase n'est pas
+// restaurée/obtenue (voir AuthContext.loading) -- sinon getMe() part
+// AVANT que le jeton existe (App.tsx monte ce hook sans attendre la fin
+// du chargement de la session), échoue silencieusement (catch
+// ci-dessous), et comme l'effet ne dépendait que de [] il ne se
+// relançait JAMAIS après coup : isAdmin restait faux pour toujours après
+// un login normal, l'onglet Cockpit n'apparaissait jamais pour un admin
+// (revue PR #24, point #3). En dépendant de `ready`, l'effet se relance
+// dès que la session devient disponible.
+export function useIsAdmin(ready: boolean) {
   const [isAdmin, setIsAdmin] = useState(false)
   const [loaded, setLoaded] = useState(false)
 
   useEffect(() => {
+    if (!ready) return
     let cancelled = false
     getMe()
       .then((data) => {
@@ -45,6 +55,7 @@ export function useIsAdmin() {
       .catch(() => {
         // Pas bloquant : en cas d'échec, on reste en lecture seule /
         // sans accès Cockpit.
+        if (!cancelled) setIsAdmin(false)
       })
       .finally(() => {
         if (!cancelled) setLoaded(true)
@@ -52,7 +63,7 @@ export function useIsAdmin() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [ready])
 
   return { isAdmin, loaded }
 }

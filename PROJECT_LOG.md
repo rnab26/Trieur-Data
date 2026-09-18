@@ -1383,8 +1383,12 @@ maîtres) livré :
 - [ ] Les onglets "Trieur de Data" eux-mêmes (au-delà de la Base de
   données) : tout ce qui vit dans les autres tabs de `app.py`/`views/`
   (import/mapping/aperçu/filtrage/export propres à Trieur de Data) et
-  n'a pas encore d'équivalent React ni d'endpoint API dédié — à
-  auditer un par un avant de porter. **Pas commencé, pas mesuré.**
+  n'a pas encore d'équivalent React ni d'endpoint API dédié. **Scoping
+  fait 2026-09-18 (recherche/planning, aucun code)** — voir section
+  "Scoping des 4 onglets Streamlit restants" ci-dessous pour le détail
+  onglet par onglet et les deux points transverses (session serveur,
+  progression des tâches longues) à trancher avant de commencer le
+  portage.
 
 **État (2026-09-17, suite — filtres par colonne + vues enregistrées +
 tableau de bord)** :
@@ -1484,19 +1488,107 @@ doublon avec diff, export, historique par ligne)** :
 - Poussé sur `origin/feature/react-migration`, commit `b9faad9`.
   Toujours pas mergé sur `main`, pas de PR.
 
+**Vérification indépendante (2026-09-18, 5e incrément — audit
+diff-réimport confirmé + scoping des 4 onglets restants)** :
+- Contrôle indépendant du travail de l'agent précédent (commit
+  `2be5115`, "Audite : diff au réimport = alertes de doublon IBAN, pas
+  une feature à part") — relecture du code, pas seulement du rapport :
+  - `python3 -m pytest -q` (suite complète) → **191 passed**, aucun
+    échec, flake connu `test_master_columns_localstorage_fallback` non
+    observé sur ce run.
+  - `cd frontend && npm run build` → succès (`tsc -b && vite build`,
+    exit code 0).
+  - `git diff --stat main...feature/react-migration -- views/ app.py`
+    n'était **pas vide** au premier essai (31/2/2 lignes sur
+    `app.py`/`tab2_import_mapping.py`/`tab_database.py`) — creusé avant
+    de conclure à une régression : la branche locale `main` de ce repo
+    était **en retard de 4 commits sur `origin/main`** (dont
+    précisément le fix CORS de l'upload et l'overlay de debug déjà
+    mentionnés par l'agent précédent). En comparant contre
+    `origin/main` (la vraie référence de prod) :
+    `git diff --stat origin/main feature/react-migration -- views/
+    app.py` → **vide, confirmé**. Pas une régression, un `main` local
+    obsolète. Rien à corriger.
+  - Conclusion : le travail du build agent précédent est validé sans
+    modification. Rien n'a cassé.
+- Commit `2be5115` poussé sur `origin/feature/react-migration` (ainsi
+  que les 6 commits précédents déjà en attente). Toujours pas mergé
+  sur `main`, pas de PR — migration en cours.
+
+**Scoping des 4 onglets Streamlit restants (2026-09-18, recherche
+seule, aucun code)** — Colonnes maîtres, Import & Mapping, Filtrage &
+Dedup, Export :
+- **Point transverse n°1 (le plus important, pas spécifique à un
+  onglet)** : Streamlit garde `all_sheets`, `final_df` et `filtered_df`
+  vivants dans le `session_state` d'un seul process Python, à travers
+  tout le pipeline import → mapping → filtre → export, sans jamais
+  renvoyer les données complètes au navigateur. Un backend FastAPI
+  stateless n'a pas cet équivalent par défaut : **il faut décider UNE
+  FOIS d'un mécanisme de session serveur** (cache par `session_id`,
+  fichiers temporaires, ou Redis) qui porte le DataFrame intermédiaire
+  entre les 3 étapes, **avant** de commencer à porter le moindre
+  onglet — sinon chaque onglet sera bricolé différemment. **Décision en
+  attente.**
+- **Point transverse n°2** : plusieurs opérations sont longues
+  (parsing Excel/CSV/PDF multi-millions de lignes, génération Excel,
+  sauvegarde CRM en masse) et Streamlit affiche une barre de
+  progression "gratuitement" à chaque rerun. En HTTP requête/réponse
+  classique, il faut un mécanisme explicite (job async + polling, ou
+  SSE/WebSocket) — sinon la barre de progression disparaît ou le
+  navigateur time-out. **Décision en attente.**
+- **Composant le plus dur à porter** : `streamlit-sortables` (onglet
+  Export) — un vrai double glisser-déposer (colonnes incluses/exclues)
+  avec son propre bug de mesure déjà contourné en JS dans le code
+  actuel. Pas du wrapping de logique Python : un composant frontend
+  neuf à construire (`dnd-kit` ou équivalent), avec un vrai enjeu
+  tactile/mobile (usage fréquent depuis le téléphone).
+- **Onglet 1 — Colonnes maîtres** (détail des fonctionnalités à
+  reproduire, pas encore construites) :
+  - Textarea listant les colonnes maîtres une par ligne, valeur
+    initiale = liste persistée.
+  - Bouton "Enregistrer" : dédoublonnage insensible à la casse en
+    gardant l'ordre, sauvegarde disque JSON (`user_master_columns.json`),
+    message de succès avec le compte, ou avertissement si la sauvegarde
+    disque échoue (hébergement sans disque persistant).
+  - Bouton "Réinitialiser" : revient à `DEFAULT_MASTER_COLUMNS` et
+    sauvegarde.
+  - Message d'erreur si la liste soumise est vide.
+  - Info-bulle fixe expliquant la détection automatique
+    TELEPHONE MOBILE/FIXE par contenu.
+  - Section additive visible seulement si connecté : jeux de colonnes
+    nommés liés au **compte** utilisateur (distincts des colonnes par
+    organisation de l'onglet Base de données) — select des jeux
+    existants, bouton Appliquer (applique + marque "jeu actif" pour la
+    prochaine connexion), bouton Supprimer avec confirmation, champ nom
+    + bouton Enregistrer le jeu courant sous un nouveau nom.
+  - Auto-chargement une fois par session du dernier jeu actif
+    enregistré sur le compte, dès la connexion.
+- **Onglets 2 (Import & Mapping), 3 (Filtrage & Dedup), 4 (Export)** :
+  scoping détaillé **pas encore reçu** dans cet incrément — seul
+  l'onglet 1 a été détaillé jusqu'ici côté fonctionnalités précises.
+  À compléter dans un prochain incrément avant de commencer le portage
+  (ne pas supposer que ces 3 onglets sont plus simples que le 1er sans
+  les avoir audités).
+- **Estimation globale du chantier complet** (4 onglets + fondation
+  session/progression) : **large** — probablement le plus gros morceau
+  du portage React après "Base de données".
+
 **Avancement global estimé** : ~55-60% de la migration complète. Fait :
 auth, écran Base de données avec liste/recherche/filtres par
 colonne/édition/import/colonnes maîtres/vues enregistrées/tableau de
 bord/sélection multiple (suppression + modification groupées)/alertes
-de doublon avec diff/export CSV-Excel/historique par ligne. Pour
-arriver à 100% il reste, **honnêtement** : le diff au réimport d'un
-fichier déjà présent (distinct des alertes de doublon IBAN), et surtout
-l'audit + portage de **tous les autres onglets propres à "Trieur de
-Data"** (import/mapping/aperçu/filtrage/export au-delà de la Base de
-données) — ce chantier n'a pas du tout commencé et n'a pas encore été
-mesuré en détail ; c'est probablement le plus gros morceau restant
-avant de pouvoir envisager un remplacement de l'app Streamlit en
-production.
+de doublon avec diff/export CSV-Excel/historique par ligne. Le "diff au
+réimport" n'était **pas** une fonctionnalité distincte — audité et
+clos 2026-09-18 (voir plus haut). Pour arriver à 100% il reste,
+**honnêtement** : l'audit détaillé (fait pour l'onglet 1, pas encore
+pour 2-4, voir scoping ci-dessus) puis le portage de **tous les autres
+onglets propres à "Trieur de Data"** (import/mapping/aperçu/filtrage/
+export au-delà de la Base de données), plus deux décisions
+d'architecture transverses à trancher avant de commencer (session
+serveur pour porter le pipeline import→mapping→filtre→export, et
+progression pour les opérations longues) — c'est probablement le plus
+gros morceau restant avant de pouvoir envisager un remplacement de
+l'app Streamlit en production.
 
 **Ne pas casser** : l'app Streamlit (`app.py`, `views/`) reste la seule
 en production tant que ce chantier n'est pas fini — ne jamais merger

@@ -8,14 +8,27 @@ Stack : Vite + React + TypeScript + Tailwind CSS + composants shadcn/ui
 (faits main dans `src/components/ui/`, pas encore générés via la CLI
 `shadcn`).
 
-## Écran livré
+## Écrans livrés
 
 - **Connexion** (`src/screens/LoginScreen.tsx`) : email + mot de passe,
   via Supabase Auth (même schéma que `views/_auth.py`).
 - **Base de données** (`src/screens/DatabaseScreen.tsx`) : sélecteur
-  d'environnement (organisation), recherche, tableau paginé des clients
-  ("Charger plus"), modification d'un client (`RecordEditDialog.tsx`).
-  Écran prioritaire de cette itération : fonctionnel, pas encore poli.
+  d'environnement (organisation), tableau de bord (compteurs, dernier
+  import), alertes de doublon, recherche, filtres par colonne façon
+  Google Sheets, tableau paginé des clients ("Charger plus"), colonnes
+  affichées personnalisables, vues enregistrées, import CSV/Excel,
+  colonnes maîtres, modification d'un client (`RecordEditDialog.tsx`),
+  modification/suppression en masse (`BulkActions.tsx`), export CSV/Excel.
+- **Trieur de Data** (`src/screens/PipelineScreen.tsx`) : import
+  CSV/Excel en staging temporaire (24h), suggestion + mapping des
+  colonnes vers les colonnes maîtres, puis recherche/filtres/export sur
+  les lignes mappées -- mirroir simplifié des onglets 1-4 Streamlit.
+  Le dédoublonnage/import définitif (écriture dans la base permanente)
+  n'est pas encore porté ici.
+- **Cockpit** (`src/screens/CockpitScreen.tsx`, réservé aux
+  administrateurs) : suivi des chantiers du logiciel lui-même (créer,
+  organiser par section, changer de statut, rechercher/filtrer,
+  messages et sous-tâches par chantier).
 
 ## Lancer en local
 
@@ -49,10 +62,9 @@ Lance `tsc -b` (vérification TypeScript stricte) puis `vite build`.
 
 ## Ce qui n'est pas encore fait
 
-- Pas de dashboard (compteurs, alertes de doublon), pas d'import
-  CSV/Excel, pas de filtres par colonne façon Google Sheets, pas de vues
-  enregistrées, pas d'édition/suppression en masse, pas d'export — tout
-  ça existe côté Streamlit (`views/tab_database.py`) et reste à porter.
+- Trieur de Data (pipeline) : pas de dédoublonnage ni d'écriture finale
+  dans la base permanente (`trieur_data.records`) -- reste en staging
+  temporaire, jamais confirmé/importé définitivement depuis cet écran.
 - Pas de test end-to-end navigateur (Chromium headless ne valide pas le
   certificat TLS émis par le proxy de cet environnement pour un hôte
   externe — limite de l'environnement, pas du code). Vérifié à la place :

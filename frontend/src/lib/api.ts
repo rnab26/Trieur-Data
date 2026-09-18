@@ -513,14 +513,21 @@ export type PipelineSessionCreated = {
   preview_rows: Record<string, unknown>[]
 }
 
-// Requête multipart dédiée (fichier seul, pas d'autres champs) -- même
-// raison que importRequest ci-dessus : rester autonome plutôt que de
-// partager un helper générique qui devrait gérer deux formes de champs
-// différentes.
-async function uploadPipelineFile<T>(orgId: string, file: File): Promise<T> {
+// Requête multipart dédiée -- import multi-fichiers + Google Sheets DANS
+// LE MÊME BATCH (voir api/main.py:create_pipeline_session_endpoint,
+// même flux que views/tab2_import_mapping.py
+// `st.file_uploader(accept_multiple_files=True)` + champ URL). `files`
+// répété autant de fois que nécessaire (FastAPI `list[UploadFile]`) --
+// un seul champ "file" ne suffirait pas pour plusieurs fichiers.
+async function uploadPipelineFiles<T>(
+  orgId: string,
+  files: File[],
+  googleSheetUrl?: string,
+): Promise<T> {
   const headers = await authHeader()
   const form = new FormData()
-  form.set('file', file)
+  for (const f of files) form.append('files', f)
+  if (googleSheetUrl) form.set('google_sheet_url', googleSheetUrl)
   const res = await fetch(`${API_URL}/orgs/${orgId}/pipeline/sessions`, {
     method: 'POST',
     headers,
@@ -532,18 +539,25 @@ async function uploadPipelineFile<T>(orgId: string, file: File): Promise<T> {
   return res.json() as Promise<T>
 }
 
-export function createPipelineSession(orgId: string, file: File) {
-  return uploadPipelineFile<PipelineSessionCreated>(orgId, file)
+export function createPipelineSession(orgId: string, files: File[], googleSheetUrl?: string) {
+  return uploadPipelineFiles<PipelineSessionCreated>(orgId, files, googleSheetUrl)
 }
 
 export type PipelineMappingSuggestion = {
   session_id: string
   suggested_mapping: Record<string, string>
   columns: string[]
+  unknown_columns: string[]
+  // true : une mémoire de mapping existe déjà pour cette FORME de fichier
+  // (même empreinte de colonnes qu'un import déjà confirmé dans cet
+  // environnement) -- la suggestion l'a déjà appliquée en priorité, voir
+  // trieur/matching.py:auto_assign_with_memory.
+  remembered_for_shape: boolean
 }
 
-// dry_run=true : suggestion d'auto-assignation, rien n'est écrit --
-// voir api/main.py:apply_pipeline_mapping.
+// dry_run=true : suggestion d'auto-assignation (mémoire de mapping par
+// forme de fichier PUIS détection générique), rien n'est écrit -- voir
+// api/main.py:apply_pipeline_mapping.
 export function suggestPipelineMapping(orgId: string, sessionId: string) {
   return request<PipelineMappingSuggestion>(
     `/orgs/${orgId}/pipeline/sessions/${sessionId}/mapping`,
@@ -560,11 +574,110 @@ export type PipelineMappingResult = {
 
 // Applique le mapping fourni (l'appelant doit envoyer le mapping
 // COMPLET voulu, pas un patch -- même contrat que côté serveur) et fait
-// passer la session au statut "mapped".
+// passer la session au statut "mapped". Le mapping CONFIRMÉ est mémorisé
+// côté serveur pour cette forme de fichier (voir suggestPipelineMapping).
 export function applyPipelineMapping(orgId: string, sessionId: string, mapping: Record<string, string>) {
   return request<PipelineMappingResult>(
     `/orgs/${orgId}/pipeline/sessions/${sessionId}/mapping`,
     { method: 'POST', body: JSON.stringify({ mapping, dry_run: false }) },
+  )
+}
+
+// ---------------------------------------------------------------
+// Dédoublonnage de session pipeline (étape 3, distinct des filtres par
+// colonne) -- voir api/main.py:apply_pipeline_dedup/clear_pipeline_dedup,
+// mirroir de views/tab3_filtrage_dedup.py.
+// ---------------------------------------------------------------
+
+export type PipelineDedupPreview = {
+  session_id: string
+  column: string
+  n_duplicate_groups: number
+  n_duplicate_rows: number
+  groups: { value: unknown; n_rows: number }[]
+}
+
+export function previewPipelineDedup(
+  orgId: string,
+  sessionId: string,
+  opts: { column: string; keep?: 'first' | 'complete'; search?: string; colFilters?: ColFilters },
+) {
+  return request<PipelineDedupPreview>(`/orgs/${orgId}/pipeline/sessions/${sessionId}/dedup`, {
+    method: 'POST',
+    body: JSON.stringify({
+      column: opts.column,
+      keep: opts.keep ?? 'first',
+      search: opts.search ?? '',
+      col_filters: opts.colFilters ?? {},
+      dry_run: true,
+    }),
+  })
+}
+
+export type PipelineDedupResult = {
+  session_id: string
+  dedup_config: { column: string; keep: string } | null
+  n_before: number
+  n_after: number
+  n_removed: number
+}
+
+export function activatePipelineDedup(
+  orgId: string,
+  sessionId: string,
+  opts: { column: string; keep?: 'first' | 'complete'; search?: string; colFilters?: ColFilters },
+) {
+  return request<PipelineDedupResult>(`/orgs/${orgId}/pipeline/sessions/${sessionId}/dedup`, {
+    method: 'POST',
+    body: JSON.stringify({
+      column: opts.column,
+      keep: opts.keep ?? 'first',
+      search: opts.search ?? '',
+      col_filters: opts.colFilters ?? {},
+      dry_run: false,
+    }),
+  })
+}
+
+export function clearPipelineDedup(orgId: string, sessionId: string) {
+  return request<{ session_id: string; dedup_config: null }>(
+    `/orgs/${orgId}/pipeline/sessions/${sessionId}/dedup`,
+    { method: 'DELETE' },
+  )
+}
+
+// ---------------------------------------------------------------
+// Presets d'export nommés (ordre + sélection des colonnes, étape 4) --
+// voir api/main.py section "Presets d'export", mirroir de
+// views/tab4_export.py.
+// ---------------------------------------------------------------
+
+export type PipelineExportPreset = {
+  id: string
+  name: string
+  included: string[]
+  excluded: string[]
+  [key: string]: unknown
+}
+
+export function listPipelineExportPresets(orgId: string) {
+  return request<PipelineExportPreset[]>(`/orgs/${orgId}/pipeline/export-presets`)
+}
+
+export function savePipelineExportPreset(
+  orgId: string,
+  body: { name: string; included: string[]; excluded: string[] },
+) {
+  return request<PipelineExportPreset>(`/orgs/${orgId}/pipeline/export-presets`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function deletePipelineExportPreset(orgId: string, presetId: string) {
+  return request<{ id: string; deleted: boolean }>(
+    `/orgs/${orgId}/pipeline/export-presets/${presetId}`,
+    { method: 'DELETE' },
   )
 }
 
@@ -589,6 +702,17 @@ export type PipelineRowsPage = {
 // champ mais pas `needle` -- même normalisation côté appelant que
 // toApiColFilters/toApiColFiltersExport ci-dessus, dupliquée ici pour que
 // les deux fonctions pipeline restent autonomes.
+// Même règle que trieur/export.py:sanitize_filename côté serveur --
+// dupliquée ici car ce renommage reste purement client (voir
+// exportPipelineSessionRows) : retire les caractères interdits sur
+// disque et une extension .csv/.xlsx tapée par erreur (déjà ajoutée par
+// l'appelant).
+function sanitizeFilenameClient(name: string): string {
+  const withoutExt = name.trim().replace(/\.(csv|xlsx)$/i, '')
+  const cleaned = withoutExt.replace(/[\\/:*?"<>|]/g, '_').trim()
+  return cleaned || 'export_pipeline'
+}
+
 function toApiColFiltersPipeline(filters: ColFilters): ColFilters {
   const out: ColFilters = {}
   for (const [col, f] of Object.entries(filters)) {
@@ -619,7 +743,18 @@ export function listPipelineSessionRows(
 export async function exportPipelineSessionRows(
   orgId: string,
   sessionId: string,
-  opts: { format: 'csv' | 'xlsx'; search?: string; colFilters?: ColFilters; columns?: string[] },
+  opts: {
+    format: 'csv' | 'xlsx'
+    search?: string
+    colFilters?: ColFilters
+    columns?: string[]
+    // Nom de fichier voulu par l'utilisateur (voir views/tab4_export.py:
+    // champ texte pré-rempli, sanitize_filename) -- le backend ne connaît
+    // que le nom de la session (source_filename), donc ce renommage reste
+    // uniquement côté client (l'attribut `download` de l'ancre), sans
+    // toucher au Content-Disposition renvoyé par l'API.
+    filename?: string
+  },
 ): Promise<void> {
   const headers = await authHeader()
   const params = new URLSearchParams()
@@ -643,7 +778,12 @@ export async function exportPipelineSessionRows(
   const blob = await res.blob()
   const disposition = res.headers.get('content-disposition') ?? ''
   const match = /filename="?([^"]+)"?/.exec(disposition)
-  const filename = match ? match[1] : `export_pipeline.${opts.format}`
+  const serverFilename = match ? match[1] : `export_pipeline.${opts.format}`
+  // Un nom choisi côté écran remplace le nom serveur, mais garde
+  // l'extension réelle renvoyée -- jamais un double ".csv.xlsx".
+  const filename = opts.filename
+    ? `${sanitizeFilenameClient(opts.filename)}.${opts.format}`
+    : serverFilename
 
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')

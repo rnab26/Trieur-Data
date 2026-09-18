@@ -11,7 +11,20 @@ import { PersonalColumnSets } from './PersonalColumnSets'
 // renvoie chaque fois la liste entière modifiée via le même
 // POST /orgs/{org_id}/master-columns (déjà réservé aux administrateurs
 // côté API).
-export function MasterColumnsPanel({ orgId, isAdmin }: { orgId: string; isAdmin: boolean }) {
+export function MasterColumnsPanel({
+  orgId,
+  isAdmin,
+  onSaved,
+}: {
+  orgId: string
+  isAdmin: boolean
+  // Appelé après toute modification persistée -- permet à l'écran
+  // parent (ex. PipelineScreen, qui garde sa propre copie des colonnes
+  // maîtres pour le mapping/les filtres) de la recharger sans dupliquer
+  // ici la logique de fetch. Optionnel : DatabaseScreen n'en a pas
+  // besoin, il relit déjà getMasterColumns séparément pour BulkActions.
+  onSaved?: () => void
+}) {
   const [columns, setColumns] = useState<string[] | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -46,6 +59,7 @@ export function MasterColumnsPanel({ orgId, isAdmin }: { orgId: string; isAdmin:
     try {
       await setMasterColumns(orgId, next)
       setColumns(next)
+      onSaved?.()
     } catch (err) {
       setSaveError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
     } finally {

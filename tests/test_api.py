@@ -1331,3 +1331,184 @@ def test_pipeline_requires_auth(client_factory):
     tc = client_factory(_make_client())
     res = tc.post("/orgs/org-1/pipeline/sessions", files={"file": ("a.csv", b"NOM\nX\n", "text/csv")})
     assert res.status_code == 401
+
+
+# ---------------------------------------------------------------
+# Pipeline : lignes filtrées + export (trieur_data.pipeline_rows, staging)
+# ---------------------------------------------------------------
+
+def _upload_pipeline_rows(tc, org_id, content: bytes):
+    return _upload_csv(tc, org_id, content).json()["session_id"]
+
+
+def test_pipeline_rows_filter_contient(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,VILLE\nDupont,Paris\nMartin,Lyon\n",
+    )
+
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"col_filters": json.dumps({"VILLE": {"op": "contient", "value": "par"}})},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["row_count"] == 2
+    assert body["count"] == 1
+    assert [r["NOM"] for r in body["rows"]] == ["Dupont"]
+
+
+def test_pipeline_rows_filter_egal_a(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,VILLE\nDupont,Paris\nMartin,Lyon\n",
+    )
+
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"col_filters": json.dumps({"VILLE": {"op": "égal à", "value": "paris"}})},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.json()["count"] == 1
+
+
+def test_pipeline_rows_filter_vide(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,SCORE\nDupont,\nMartin,5\n",
+    )
+
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"col_filters": json.dumps({"SCORE": {"op": "vide", "value": ""}})},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert [r["NOM"] for r in res.json()["rows"]] == ["Dupont"]
+
+
+def test_pipeline_rows_filter_non_vide_traite_zero_comme_une_vraie_valeur(client_factory):
+    """Une valeur "fausse" (0) est une vraie valeur, pas une case vide --
+    même règle que _matches_filter (views/tab_database.py), déjà couverte
+    côté /records ; ce test vérifie qu'elle s'applique aussi au pipeline."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,SCORE\nDupont,0\nMartin,\n",
+    )
+
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"col_filters": json.dumps({"SCORE": {"op": "non vide", "value": ""}})},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    body = res.json()
+    assert body["count"] == 1
+    assert body["rows"][0]["NOM"] == "Dupont"
+    # Lu en dtype=str (trieur/io_excel.py:read_csv_file, garde les zéros
+    # initiaux) : "0" reste la chaîne "0", falsy en Python mais une vraie
+    # valeur pour _matches_filter (pas None/"").
+    assert body["rows"][0]["SCORE"] == "0"
+
+
+def test_pipeline_rows_search(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,VILLE\nDupont,Paris\nMartin,Lyon\n",
+    )
+
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"search": "martin"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert [r["NOM"] for r in res.json()["rows"]] == ["Martin"]
+
+
+def test_pipeline_rows_wrong_org_is_404(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(tc, "org-1", b"NOM\nDupont\n")
+    fake.postgrest.tables["pipeline_sessions"][0]["org_id"] = "org-2"
+
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 404
+
+
+def test_pipeline_export_csv_content_type_and_content(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,VILLE\nDupont,Paris\nMartin,Lyon\n",
+    )
+
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/export",
+        params={"format": "csv"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/csv")
+    body = res.content.decode("utf-8-sig")
+    assert "Dupont" in body
+    assert "Martin" in body
+
+
+def test_pipeline_export_xlsx_content_type(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(tc, "org-1", b"NOM\nDupont\n")
+
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/export",
+        params={"format": "xlsx"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.headers["content-type"] == (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert len(res.content) > 0
+
+
+def test_pipeline_export_respects_filters(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,VILLE\nDupont,Paris\nMartin,Lyon\n",
+    )
+
+    unfiltered = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/export",
+        params={"format": "csv"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    filtered = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/export",
+        params={"format": "csv", "search": "dupont"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    n_unfiltered = len(unfiltered.content.decode("utf-8-sig").splitlines())
+    n_filtered = len(filtered.content.decode("utf-8-sig").splitlines())
+    assert n_filtered < n_unfiltered
+
+
+def test_pipeline_export_wrong_org_is_404(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(tc, "org-1", b"NOM\nDupont\n")
+    fake.postgrest.tables["pipeline_sessions"][0]["org_id"] = "org-2"
+
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/export",
+        params={"format": "csv"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 404

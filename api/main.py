@@ -667,6 +667,108 @@ class PipelineMapping(BaseModel):
     dry_run: bool = False
 
 
+def _all_pipeline_rows(client, session_id: str) -> list[dict]:
+    """Toutes les lignes d'une session de pipeline (pas juste l'aperçu),
+    paginées avec LIST_PAGE_SIZE -- même boucle que apply_pipeline_mapping
+    ci-dessous, pour filtrer/exporter sur l'INTÉGRALITÉ de la session, pas
+    seulement le lot déjà affiché à l'écran (même principe que
+    list_all_records côté CRM)."""
+    all_rows: list[dict] = []
+    offset = 0
+    while True:
+        page = list_pipeline_rows(client, session_id, limit=LIST_PAGE_SIZE, offset=offset)
+        if not page:
+            break
+        all_rows.extend(page)
+        offset += len(page)
+    return all_rows
+
+
+@app.get("/orgs/{org_id}/pipeline/sessions/{session_id}/rows")
+def list_pipeline_session_rows(
+    org_id: str,
+    session_id: str,
+    search: str = Query(""),
+    col_filters: str = Query("{}", description="JSON : {colonne: {op, value}}"),
+    ctx: AuthCtx = Depends(require_org_access),
+):
+    """Lignes en staging (trieur_data.pipeline_rows) de cette session,
+    filtrées avec les MÊMES fonctions que /orgs/{org_id}/records
+    (_filter_by_search/_filter_by_columns, views/tab_database.py) -- pas
+    une deuxième logique de filtre. Porte sur trieur_data.pipeline_rows
+    (staging TTL 24h), jamais trieur_data.records (donnée permanente)."""
+    _get_pipeline_session_or_404(ctx, org_id, session_id)
+    parsed_filters = _parse_col_filters(col_filters)
+
+    all_rows = _all_pipeline_rows(ctx.client, session_id)
+    rows = [_without_sheet_key(r["data"]) for r in all_rows]
+    rows = _filter_by_search(rows, search)
+    rows = _filter_by_columns(rows, parsed_filters)
+
+    return {
+        "session_id": session_id,
+        "row_count": len(all_rows),
+        "count": len(rows),
+        "rows": rows,
+    }
+
+
+@app.get("/orgs/{org_id}/pipeline/sessions/{session_id}/export")
+def export_pipeline_session_rows(
+    org_id: str,
+    session_id: str,
+    format: str = Query("csv", pattern="^(csv|xlsx)$"),
+    search: str = Query(""),
+    col_filters: str = Query("{}", description="JSON : {colonne: {op, value}}"),
+    ctx: AuthCtx = Depends(require_org_access),
+):
+    """Exporte les lignes en staging de cette session (mêmes filtres que
+    la route /rows ci-dessus), avec les mêmes fonctions d'export
+    (trieur/export.py:export_csv_safe/export_excel_safe) et le même
+    StreamingResponse que /orgs/{org_id}/records/export -- aucune
+    logique dupliquée."""
+    session = _get_pipeline_session_or_404(ctx, org_id, session_id)
+    parsed_filters = _parse_col_filters(col_filters)
+
+    all_rows = _all_pipeline_rows(ctx.client, session_id)
+    rows = [_without_sheet_key(r["data"]) for r in all_rows]
+    rows = _filter_by_search(rows, search)
+    rows = _filter_by_columns(rows, parsed_filters)
+
+    full_cols: list[str] = []
+    for row in rows:
+        for c in row.keys():
+            if c not in full_cols:
+                full_cols.append(c)
+
+    df = pd.DataFrame(rows) if rows else pd.DataFrame()
+    for c in full_cols:
+        if c not in df.columns:
+            df[c] = None
+    df = df[full_cols] if full_cols else df
+
+    file_base = sanitize_filename(session.get("source_filename") or session_id, default="export_pipeline")
+
+    if format == "csv":
+        content = export_csv_safe(df)
+        if content is None:
+            raise HTTPException(status_code=500, detail="Échec de la génération du CSV.")
+        return StreamingResponse(
+            io.BytesIO(content),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{file_base}.csv"'},
+        )
+
+    buf = export_excel_safe(df)
+    if buf is None:
+        raise HTTPException(status_code=500, detail="Échec de la génération de l'Excel.")
+    return StreamingResponse(
+        io.BytesIO(buf.getvalue()),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{file_base}.xlsx"'},
+    )
+
+
 @app.post("/orgs/{org_id}/pipeline/sessions/{session_id}/mapping")
 def apply_pipeline_mapping(
     org_id: str, session_id: str, body: PipelineMapping, ctx: AuthCtx = Depends(require_org_access),

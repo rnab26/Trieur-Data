@@ -645,6 +645,13 @@ async def import_records(
 # ---------------------------------------------------------------
 
 PIPELINE_PREVIEW_SIZE = 10
+# Échantillon utilisé UNIQUEMENT pour la détection de contenu (téléphone
+# mobile/fixe) au moment de suggérer un mapping -- volontairement plus
+# large que PIPELINE_PREVIEW_SIZE (aperçu écran) pour donner une chance
+# raisonnable de voir du contenu de chaque fichier/onglet importé sur un
+# import multi-fichiers, sans charger des millions de lignes en mémoire
+# pour un simple échantillonnage.
+PIPELINE_MAPPING_SAMPLE_SIZE = 500
 
 
 def _parse_pipeline_file(filename: str, content: bytes) -> dict[str, pd.DataFrame]:
@@ -804,7 +811,9 @@ async def create_pipeline_session_endpoint(
 
     display_names = [name for name, _ in files_data] + ([url] if url else [])
     source_filename = display_names[0] if len(display_names) == 1 else f"{len(display_names)} fichiers"
-    session = pipeline_memory.create_session(org_id, ctx.user.id, source_filename=source_filename)
+    session = pipeline_memory.create_session(
+        org_id, ctx.user.id, source_filename=source_filename, columns=columns,
+    )
     pipeline_memory.append_rows(session["id"], rows)
 
     master_cols = get_org_master_columns(ctx.client, org_id)
@@ -827,7 +836,7 @@ def get_pipeline_session_endpoint(org_id: str, session_id: str, ctx: AuthCtx = D
         "status": session["status"],
         "source_filename": session.get("source_filename"),
         "row_count": session["row_count"],
-        "columns": _detected_columns([r["data"] for r in preview]),
+        "columns": session.get("columns") or _detected_columns([r["data"] for r in preview]),
         "preview_rows": [_without_sheet_key(r["data"]) for r in preview],
     }
 
@@ -1024,11 +1033,24 @@ def apply_pipeline_mapping(
     source sont mappées sur la MÊME colonne maître, la dernière écrase la
     précédente (l'onglet 2 garde la première valeur non vide) -- à revoir
     si un vrai cas d'usage l'exige."""
-    _get_pipeline_session_or_404(ctx, org_id, session_id)
+    session = _get_pipeline_session_or_404(ctx, org_id, session_id)
     master_cols = get_org_master_columns(ctx.client, org_id)
 
-    sample = pipeline_memory.list_rows(session_id, limit=PIPELINE_PREVIEW_SIZE)
-    real_columns = _detected_columns([r["data"] for r in sample])
+    # `real_columns` = TOUTES les colonnes détectées à l'import (voir
+    # trieur/pipeline_memory.py:create_session), jamais recalculées depuis
+    # un simple échantillon de lignes : avec plusieurs fichiers importés
+    # dans le même batch, les colonnes du 2e fichier n'apparaissent jamais
+    # dans les toutes premières lignes (stockées fichier par fichier) --
+    # elles restaient sinon "(non assigné)" après auto-assignation, alors
+    # que l'algorithme de trieur/matching.py fonctionne correctement (bug
+    # réel constaté par l'utilisateur, corrigé ici plutôt que dans
+    # l'algorithme lui-même). L'échantillon de contenu (sample_df, pour la
+    # détection téléphone par contenu) reste volontairement plus large que
+    # l'aperçu écran pour couvrir plusieurs fichiers/onglets.
+    real_columns = session.get("columns") or []
+    sample = pipeline_memory.list_rows(session_id, limit=PIPELINE_MAPPING_SAMPLE_SIZE)
+    if not real_columns:
+        real_columns = _detected_columns([r["data"] for r in sample])
     sample_df = pd.DataFrame([_without_sheet_key(r["data"]) for r in sample]) if sample else None
     fingerprint = column_fingerprint(real_columns)
     remembered = get_remembered_mapping_for_shape(ctx.client, org_id, fingerprint)

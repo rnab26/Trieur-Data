@@ -92,12 +92,26 @@ def _public_view(session: dict) -> dict:
     return {k: v for k, v in session.items() if k != "rows"}
 
 
-def create_session(org_id: str, created_by: str, source_filename: str | None = None) -> dict:
+def create_session(
+    org_id: str, created_by: str, source_filename: str | None = None, columns: list[str] | None = None,
+) -> dict:
     """Ouvre une nouvelle session de pipeline -- statut initial
     'importing', TTL 24h (même durée que la migration 0010 qu'elle
     remplace). `rows` commence vide, rempli ensuite par `append_rows` ;
     aucune écriture réseau ici, contrairement à l'ancien
-    `trieur.db.create_pipeline_session`."""
+    `trieur.db.create_pipeline_session`.
+
+    `columns` = union COMPLÈTE des colonnes détectées sur TOUS les
+    fichiers/onglets importés (calculée une fois à l'import, voir
+    api/main.py:_merge_pipeline_sheets) -- stockée ici pour que la
+    suggestion de mapping (apply_pipeline_mapping) porte sur TOUTES les
+    colonnes, pas seulement celles visibles dans un petit échantillon de
+    lignes. Bug réel corrigé (2026-09-18) : avec plusieurs fichiers
+    importés dans le même batch, les lignes du 2e fichier n'apparaissent
+    jamais dans les 10 premières lignes (stockées les unes après les
+    autres, fichier par fichier) -- ses colonnes restaient donc
+    entièrement "(non assigné)" après auto-assignation, sans que
+    l'algorithme lui-même soit en cause."""
     now = _now()
     session_id = str(uuid.uuid4())
     session = {
@@ -109,6 +123,7 @@ def create_session(org_id: str, created_by: str, source_filename: str | None = N
         "source_filename": source_filename,
         "status": "importing",
         "row_count": 0,
+        "columns": columns or [],
         "dedup_config": None,
         "mapping": None,
         "rows": [],

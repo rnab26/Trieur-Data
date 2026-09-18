@@ -1369,8 +1369,17 @@ maîtres) livré :
 - [x] Historique court par ligne modifiée — déjà exposé par l'API
   existante (`_build_rows`/`_resolve_modifier_names`), affiché comme
   colonne dans le tableau React ; vérifié 2026-09-18, rien à ajouter.
-- [ ] Diff au réimport (ré-import d'un fichier déjà présent) — distinct
-  des alertes de doublon IBAN ci-dessus, pas encore audité côté React.
+- [x] Diff au réimport (ré-import d'un fichier déjà présent) — audité
+  2026-09-18 : **ce n'est pas une fonctionnalité distincte**, c'est le
+  même mécanisme que les alertes de doublon IBAN ci-dessus. Dans
+  Streamlit, `import_dataframe` (`trieur/db.py`) crée une
+  `dedup_alert` dès qu'une ligne réimportée matche un IBAN déjà en
+  base (`find_iban_matches`), et c'est cette même alerte qui affiche
+  le diff champ par champ (`diff_rows`, `views/tab_database.py`) —
+  il n'y a aucun deuxième diff séparé au moment de l'import lui-même.
+  Côté React, `DedupAlertsPanel.tsx` réutilise déjà `diff_rows` via
+  `GET .../dedup-alerts` (`api/main.py`) : rien à porter, la case
+  précédente était trop prudente. Aucun code ajouté pour ce point.
 - [ ] Les onglets "Trieur de Data" eux-mêmes (au-delà de la Base de
   données) : tout ce qui vit dans les autres tabs de `app.py`/`views/`
   (import/mapping/aperçu/filtrage/export propres à Trieur de Data) et

@@ -2038,3 +2038,145 @@ vérification indépendante d'un rapport d'agent contredit par un autre)** :
     testés ; reste : détails fins onglet 1 déjà listés plus haut,
     glisser-déposer `streamlit-sortables` à confirmer côté React, barre
     de progression pour les uploads longs — pas commencée).
+
+**État (2026-09-18, 8e incrément — 3 finitions demandées : jeux de
+colonnes personnels, ordre/sélection colonnes à l'export pipeline,
+mesure réelle du temps d'upload)** :
+- **1. Jeux de colonnes maîtres personnels (compte)** — livré :
+  `views/tab1_colonnes_maitres.py:_render_account_memory` portée en
+  React. `trieur/db.py` (`list_user_column_sets`/`save_user_column_set`/
+  `delete_user_column_set`/`set_active_column_set`) existait déjà
+  (audit précédent confirmé) mais **sans aucune route API ni test** --
+  ajouté `GET/POST /me/column-sets`, `POST /me/column-sets/{id}/apply`,
+  `DELETE /me/column-sets/{id}` (`api/main.py`), tous scopés au compte
+  connecté (`user_id`, jamais un `org_id` -- ces jeux ne sont PAS ceux
+  de l'onglet Base de données). Garde de propriété avant delete/apply
+  (même patron que `delete_saved_view_endpoint`) : un `set_id` d'un
+  autre compte renvoie 404, jamais une suppression/lecture croisée.
+  Enregistrer ou appliquer un jeu marque le profil actif
+  (`set_active_column_set`, invalide déjà le cache `get_my_profile` côté
+  `trieur/db.py`) -- `/me` le renvoie immédiatement.
+  `frontend/src/screens/PersonalColumnSets.tsx` (nouveau) : liste des
+  jeux, application, suppression (confirmation), édition de la liste en
+  cours (ajout/suppression/réordonnancement flèches haut-bas -- même
+  patron que `MasterColumnsPanel.tsx` pour les colonnes d'organisation,
+  pas un deuxième composant réordonnable différent), enregistrement sous
+  un nom. **Auto-chargement une fois au montage** du dernier jeu actif
+  (`profiles.active_master_column_set_id` via `/me`), avec message
+  explicite ("rechargé automatiquement"). Intégré sous
+  `MasterColumnsPanel.tsx` (section additive, visible pour tout compte
+  connecté, pas seulement admin -- distinct de la gestion des colonnes
+  de l'organisation qui reste admin-only juste au-dessus). États
+  chargement/vide/erreur traités.
+- **2. Ordre et sélection des colonnes à l'export du pipeline** — livré :
+  équivalent du glisser-déposer `streamlit-sortables` de
+  `views/tab4_export.py`, mais en **flèches haut/bas + cases à cocher**
+  plutôt qu'un vrai drag-and-drop : décidé après lecture de
+  `tab4_export.py` (son propre contournement JS d'un bug de mesure du
+  composant, déjà signalé comme fragile dans ce journal) et parce que le
+  glisser-déposer HTML5 natif est peu fiable au toucher, alors que
+  l'utilisateur travaille surtout depuis son téléphone -- ce même patron
+  (flèches) est déjà en place pour les colonnes maîtres d'organisation
+  (`MasterColumnsPanel.tsx`), donc cohérent avec le reste de l'app plutôt
+  qu'une deuxième façon de faire la même chose. Aucune dépendance
+  nouvelle ajoutée (ni `dnd-kit` ni équivalent).
+  `api/main.py:export_pipeline_session_rows` : nouveau paramètre
+  `columns` (liste ordonnée, séparée par des virgules) -- une colonne
+  absente de la liste est exclue de l'export, l'ordre demandé est
+  respecté, une colonne demandée mais absente des données réelles est
+  ignorée silencieusement (jamais ajoutée vide) ; `columns` vide =
+  comportement précédent inchangé (toutes les colonnes, ordre
+  d'apparition) -- **rétrocompatible**. `frontend/src/lib/api.ts`
+  (`exportPipelineSessionRows` accepte `columns?: string[]`) et
+  `PipelineScreen.tsx` (nouvel état `colOrder`/`excludedCols`, fusionné
+  automatiquement avec les colonnes détectées à chaque changement de
+  filtre/session, jamais de colonne perdue silencieusement ; export
+  désactivé si tout est exclu, avec message explicite).
+- **3. Temps d'upload/traitement d'un gros fichier** — mesuré, PAS
+  d'architecture async construite (décision justifiée ci-dessous) :
+  - Mesuré réellement (pas supposé) : CSV généré localement, 50 000
+    lignes, 8 colonnes, ≈5,1 Mo
+    (`NOM,PRENOM,EMAIL,TELEPHONE,VILLE,ADRESSE,CP,IBAN`). Appel direct
+    des fonctions réelles de `api/main.py`
+    (`_parse_pipeline_file`/`_merge_pipeline_sheets`, celles utilisées
+    par `POST .../pipeline/sessions`) : **parse 0.107s + merge 0.506s =
+    0.613s total** pour 50 000 lignes -- le parsing/fusion pur est
+    négligeable, pas un problème en soi.
+  - **Ce que je n'ai PAS mesuré, honnêtement** : le temps réel des
+    écritures réseau vers Supabase. `append_pipeline_rows` est appelé en
+    boucle, **100 lots séquentiels** de 500 lignes
+    (`PIPELINE_APPEND_BATCH`) pour ce fichier de 50 000 lignes -- chaque
+    lot est un aller-retour HTTP synchrone vers PostgREST. Je n'ai pas
+    exécuté ce chemin contre le vrai projet Supabase (ça écrirait 50 000
+    lignes de test dans les tables de staging réelles sans demande
+    explicite pour ce test précis) -- **estimation, pas mesure** : même à
+    50-150ms par aller-retour (cas favorable, même région), 100
+    allers-retours séquentiels représentent déjà 5 à 15 secondes, et une
+    latence moins favorable dépasserait facilement la limite de
+    30-60s d'un proxy/reverse-proxy typique. C'est donc plausiblement un
+    **vrai temps d'attente synchrone de plusieurs secondes**, pas
+    juste de la prudence excessive.
+  - **Décision prise dans ce périmètre, avec la limite de temps de cet
+    incrément** : construire une vraie file d'attente asynchrone
+    (job + polling/SSE) sans avoir mesuré le vrai chiffre contre
+    Supabase aurait été de la sur-ingénierie sur une simple estimation.
+    À la place, livré ce qui aide déjà concrètement sans engager
+    d'architecture nouvelle : un **spinner + chrono en secondes**
+    pendant l'upload (`PipelineScreen.tsx`, état `uploadElapsedSec`,
+    `setInterval` 1s, message "un gros fichier peut prendre encore
+    quelques instants" au-delà de 8s) -- contrairement à ce qui était
+    supposé, **aucun spinner à chrono n'existait avant** sur cet écran
+    (juste un texte statique "Lecture du fichier…", vérifié par lecture
+    du code, pas déduit).
+  - **Reste ouvert, à trancher par une prochaine session (pas résolu
+    ici, pour ne pas laisser un doute silencieux)** : mesurer le vrai
+    temps contre Supabase avec un fichier de taille réaliste (le
+    prochain incrément qui touche à l'upload devrait le faire en premier
+    geste) ; si confirmé multi-secondes de façon significative,
+    remplacer la boucle synchrone `POST .../pipeline/sessions` par un
+    job asynchrone (ex. la session est créée immédiatement en statut
+    `importing`, les lots s'ajoutent en tâche de fond, le frontend
+    poll `GET .../pipeline/sessions/{id}` déjà existant jusqu'à
+    `row_count` stable) -- l'endpoint GET existe déjà, donc ce futur
+    travail n'aurait pas à créer de nouvelle route de lecture, juste à
+    rendre l'écriture asynchrone et le statut fiable pendant l'écriture.
+- Tests ajoutés (`tests/test_api.py`) : 9 nouveaux tests
+  `/me/column-sets*` (vide par défaut, save/list, nom/colonnes vides
+  =400, remplacement même nom, apply marque actif + renvoie les
+  colonnes, apply id inconnu=404, delete, delete du jeu d'un autre
+  compte=404, auth requise) + 2 nouveaux tests export pipeline
+  `columns` (ordre+sélection respectés, colonne inconnue ignorée sans
+  erreur).
+- Vérifié : `python3 -m pytest -q` (suite complète) → **250 passed**
+  (240 + 11 nouveaux : 9 column-sets + 2 export columns), sur un run ;
+  un run antérieur dans la même session a montré le flake déjà
+  documenté `test_master_columns_localstorage_fallback` (249 passed, 1
+  échec) -- même flake préexistant, sans lien, non corrigé ici (hors
+  périmètre, chantier de fiabilisation E2E séparé si ça agace).
+  `cd frontend && npm run build` → succès, exit 0 (`tsc -b && vite
+  build`). `npm run lint` → uniquement les warnings déjà présents sur
+  d'autres écrans (`set-state-in-effect`, un de plus sur
+  `PersonalColumnSets.tsx`, même famille que
+  `DashboardPanel.tsx`/`SavedViews.tsx`/etc., aucun nouveau type
+  d'avertissement).
+  `git diff --stat -- views/ app.py` → vide, confirmé : app Streamlit
+  toujours non touchée.
+- **Ce qui a été simplifié/laissé de côté, explicitement** :
+  - Point 2 : glisser-déposer réel (souris/tactile) **volontairement
+    pas construit** -- flèches haut/bas à la place, décision justifiée
+    ci-dessus (cohérence avec `MasterColumnsPanel.tsx`, fiabilité
+    tactile). Si l'utilisateur préfère un vrai drag-and-drop malgré le
+    risque tactile, à revoir explicitement.
+  - Point 3 : voir "reste ouvert" ci-dessus -- le vrai chiffre réseau
+    contre Supabase n'a pas été mesuré, seulement estimé à partir du
+    nombre de lots. Ne pas confondre l'estimation ci-dessus avec une
+    mesure réelle en production.
+  - Pas ajouté : tests `trieur/db.py` dédiés pour
+    `list_user_column_sets`/`save_user_column_set`/etc. -- déjà couverts
+    indirectement par les 9 tests API ci-dessus (mêmes fonctions
+    appelées avec un faux client), pas dupliqué en tests séparés pour
+    rester dans le périmètre minimal demandé ("tests pour les nouveaux
+    endpoints API").
+- Committé sur `feature/react-migration` (message en français, voir
+  `git log`). **Pas pushé** (demande explicite de l'utilisateur pour cet
+  incrément : ne pas pousser).

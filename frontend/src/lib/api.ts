@@ -128,11 +128,45 @@ export type Profile = {
   id: string
   full_name?: string | null
   is_super_admin?: boolean
+  active_master_column_set_id?: string | null
   [key: string]: unknown
 }
 
 export function getMe() {
   return request<{ profile: Profile }>('/me')
+}
+
+// Jeux de colonnes maîtres personnels (liés au COMPTE, pas à un
+// environnement) -- mirroir de views/tab1_colonnes_maitres.py
+// (`_render_account_memory`). `active_master_column_set_id` (sur
+// `Profile`, voir getMe ci-dessus) indique le dernier jeu appliqué, à
+// charger automatiquement une fois par session -- voir api/main.py
+// (/me/column-sets*) pour le contrat serveur.
+export type UserColumnSet = {
+  id: string
+  user_id: string
+  name: string
+  columns: string[]
+  [key: string]: unknown
+}
+
+export function listMyColumnSets() {
+  return request<{ sets: UserColumnSet[] }>('/me/column-sets')
+}
+
+export function saveMyColumnSet(name: string, columns: string[]) {
+  return request<UserColumnSet>('/me/column-sets', {
+    method: 'POST',
+    body: JSON.stringify({ name, columns }),
+  })
+}
+
+export function applyMyColumnSet(setId: string) {
+  return request<UserColumnSet>(`/me/column-sets/${setId}/apply`, { method: 'POST' })
+}
+
+export function deleteMyColumnSet(setId: string) {
+  return request<{ id: string; deleted: boolean }>(`/me/column-sets/${setId}`, { method: 'DELETE' })
 }
 
 export type ImportPreview = {
@@ -577,7 +611,7 @@ export function listPipelineSessionRows(
 export async function exportPipelineSessionRows(
   orgId: string,
   sessionId: string,
-  opts: { format: 'csv' | 'xlsx'; search?: string; colFilters?: ColFilters },
+  opts: { format: 'csv' | 'xlsx'; search?: string; colFilters?: ColFilters; columns?: string[] },
 ): Promise<void> {
   const headers = await authHeader()
   const params = new URLSearchParams()
@@ -586,6 +620,10 @@ export async function exportPipelineSessionRows(
   if (opts.colFilters && Object.keys(opts.colFilters).length > 0) {
     params.set('col_filters', JSON.stringify(toApiColFiltersPipeline(opts.colFilters)))
   }
+  // Ordre + sélection des colonnes (équivalent glisser-déposer de l'onglet
+  // 4 Streamlit) -- voir api/main.py:export_pipeline_session_rows. Absent
+  // = toutes les colonnes, ordre d'apparition (comportement précédent).
+  if (opts.columns) params.set('columns', opts.columns.join(','))
 
   const res = await fetch(
     `${API_URL}/orgs/${orgId}/pipeline/sessions/${sessionId}/export?${params.toString()}`,

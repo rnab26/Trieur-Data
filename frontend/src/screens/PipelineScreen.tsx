@@ -38,6 +38,7 @@ export function PipelineScreen() {
   const [step, setStep] = useState<Step>('upload')
 
   const [uploading, setUploading] = useState(false)
+  const [uploadElapsedSec, setUploadElapsedSec] = useState(0)
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [pipelineSession, setPipelineSession] = useState<PipelineSessionCreated | null>(null)
 
@@ -66,6 +67,16 @@ export function PipelineScreen() {
   const [exporting, setExporting] = useState<'csv' | 'xlsx' | null>(null)
   const [exportError, setExportError] = useState<string | null>(null)
 
+  // Ordre + sélection des colonnes avant export -- équivalent du
+  // glisser-déposer streamlit-sortables de views/tab4_export.py (colonnes
+  // incluses/exclues). Native HTML5 drag-and-drop est peu fiable au
+  // toucher (usage principal : téléphone) -- flèches haut/bas, comme déjà
+  // fait pour l'ordre des colonnes maîtres (MasterColumnsPanel.tsx), même
+  // patron dans toute l'app. `colOrder` porte TOUTES les colonnes connues
+  // (incluses et exclues) ; `excludedCols` marque celles à exclure.
+  const [colOrder, setColOrder] = useState<string[]>([])
+  const [excludedCols, setExcludedCols] = useState<Set<string>>(new Set())
+
   const rowsColumns = useMemo(() => {
     const cols: string[] = []
     for (const row of rows) {
@@ -77,6 +88,49 @@ export function PipelineScreen() {
   }, [rows])
 
   const colFiltersKey = useMemo(() => JSON.stringify(colFilters), [colFilters])
+
+  // Fusionne les colonnes nouvellement vues dans l'ordre existant, en fin
+  // de liste (jamais de colonne perdue silencieusement) -- une colonne
+  // déjà connue garde sa position/son statut inclus/exclu tel que
+  // l'utilisateur l'a réglé.
+  useEffect(() => {
+    setColOrder((prev) => {
+      const known = new Set(prev)
+      const newOnes = rowsColumns.filter((c) => !known.has(c))
+      if (newOnes.length === 0 && prev.length === rowsColumns.filter((c) => known.has(c)).length) {
+        return prev
+      }
+      const stillPresent = prev.filter((c) => rowsColumns.includes(c))
+      return [...stillPresent, ...newOnes]
+    })
+  }, [rowsColumns])
+
+  function moveColUp(i: number) {
+    if (i === 0) return
+    setColOrder((prev) => {
+      const next = [...prev]
+      ;[next[i - 1], next[i]] = [next[i], next[i - 1]]
+      return next
+    })
+  }
+
+  function moveColDown(i: number) {
+    setColOrder((prev) => {
+      if (i >= prev.length - 1) return prev
+      const next = [...prev]
+      ;[next[i + 1], next[i]] = [next[i], next[i + 1]]
+      return next
+    })
+  }
+
+  function toggleColIncluded(col: string) {
+    setExcludedCols((prev) => {
+      const next = new Set(prev)
+      if (next.has(col)) next.delete(col)
+      else next.add(col)
+      return next
+    })
+  }
 
   const fetchRows = useCallback(
     async (orgIdVal: string, sessionId: string, targetSearch: string, targetColFilters: ColFilters) => {
@@ -118,10 +172,12 @@ export function PipelineScreen() {
     setExporting(format)
     setExportError(null)
     try {
+      const selectedColumns = colOrder.filter((c) => !excludedCols.has(c))
       await exportPipelineSessionRows(orgId, pipelineSession.session_id, {
         format,
         search,
         colFilters,
+        columns: selectedColumns.length > 0 ? selectedColumns : undefined,
       })
     } catch (err) {
       setExportError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
@@ -165,13 +221,28 @@ export function PipelineScreen() {
     setFilteredCount(0)
     setRowsError(null)
     setExportError(null)
+    setColOrder([])
+    setExcludedCols(new Set())
   }
 
   async function handleFileChange(orgIdVal: string, file: File | null) {
     if (!file) return
     setUploading(true)
+    setUploadElapsedSec(0)
     setUploadError(null)
     setResult(null)
+    // La création de session lit/écrit le fichier ENTIER de façon
+    // synchrone côté serveur (voir api/main.py:create_pipeline_session_endpoint)
+    // -- pas de vraie progression connue à l'avance (contrairement à la
+    // barre par lot de ChantierCard.tsx). Un chrono texte suffit tant que
+    // l'attente reste de l'ordre de quelques secondes ; mesuré en local
+    // sur un CSV de 50 000 lignes le 2026-09-18 (voir PROJECT_LOG.md) --
+    // le parsing/staging pur reste sous la seconde, le vrai temps observé
+    // en prod dépend surtout des allers-retours réseau vers Supabase.
+    const startedAt = Date.now()
+    const interval = window.setInterval(() => {
+      setUploadElapsedSec(Math.floor((Date.now() - startedAt) / 1000))
+    }, 1000)
     try {
       const data = await createPipelineSession(orgIdVal, file)
       setPipelineSession(data)
@@ -180,6 +251,7 @@ export function PipelineScreen() {
     } catch (err) {
       setUploadError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
     } finally {
+      window.clearInterval(interval)
       setUploading(false)
     }
   }
@@ -292,7 +364,16 @@ export function PipelineScreen() {
                 onChange={(e) => void handleFileChange(orgId, e.target.files?.[0] ?? null)}
                 className="text-sm"
               />
-              {uploading && <p className="text-sm text-[var(--muted)]">Lecture du fichier…</p>}
+              {uploading && (
+                <p className="flex items-center gap-2 text-sm text-[var(--muted)]">
+                  <span
+                    className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent"
+                    aria-hidden="true"
+                  />
+                  Lecture et mise en attente du fichier… ({uploadElapsedSec}s)
+                  {uploadElapsedSec >= 8 && ' -- un gros fichier peut prendre encore quelques instants.'}
+                </p>
+              )}
               {uploadError && <p className="text-sm text-[var(--danger)]">Erreur : {uploadError}</p>}
             </div>
           )}
@@ -438,18 +519,56 @@ export function PipelineScreen() {
 
               <ColumnFilters columns={rowsColumns} filters={colFilters} onChange={setColFilters} />
 
+              {colOrder.length > 0 && (
+                <details className="rounded-md border border-[var(--border)] p-3">
+                  <summary className="cursor-pointer text-sm font-medium">
+                    🔀 Ordre et sélection des colonnes à l'export ({colOrder.length - excludedCols.size}/
+                    {colOrder.length} incluse(s))
+                  </summary>
+                  <p className="mt-2 text-xs text-[var(--muted)]">
+                    Décoche une colonne pour l'exclure de l'export, utilise les flèches pour changer
+                    son ordre dans le fichier généré.
+                  </p>
+                  <ul className="mt-2 flex flex-col gap-1">
+                    {colOrder.map((col, i) => (
+                      <li key={col} className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={!excludedCols.has(col)}
+                          onChange={() => toggleColIncluded(col)}
+                          aria-label={`Inclure la colonne ${col} dans l'export`}
+                        />
+                        <span className={`flex-1 text-sm ${excludedCols.has(col) ? 'text-[var(--muted)] line-through' : ''}`}>
+                          {col}
+                        </span>
+                        <Button variant="secondary" onClick={() => moveColUp(i)} disabled={i === 0}>
+                          ⬆️
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          onClick={() => moveColDown(i)}
+                          disabled={i === colOrder.length - 1}
+                        >
+                          ⬇️
+                        </Button>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-sm font-medium">💾 Exporter ces résultats</span>
                 <Button
                   variant="secondary"
-                  disabled={exporting !== null || filteredCount === 0}
+                  disabled={exporting !== null || filteredCount === 0 || colOrder.length === excludedCols.size}
                   onClick={() => void handleExport('csv')}
                 >
                   {exporting === 'csv' ? 'Préparation…' : 'Exporter CSV'}
                 </Button>
                 <Button
                   variant="secondary"
-                  disabled={exporting !== null || filteredCount === 0}
+                  disabled={exporting !== null || filteredCount === 0 || colOrder.length === excludedCols.size}
                   onClick={() => void handleExport('xlsx')}
                 >
                   {exporting === 'xlsx' ? 'Préparation…' : 'Exporter Excel'}
@@ -458,6 +577,11 @@ export function PipelineScreen() {
                   {filteredCount} / {rowCount} ligne(s), avec la recherche/les filtres actuels.
                 </span>
               </div>
+              {colOrder.length > 0 && colOrder.length === excludedCols.size && (
+                <p className="text-sm text-[var(--danger)]">
+                  Toutes les colonnes sont exclues -- inclus-en au moins une pour exporter.
+                </p>
+              )}
               {exportError && (
                 <p className="text-sm text-[var(--danger)]">Erreur d'export : {exportError}</p>
               )}

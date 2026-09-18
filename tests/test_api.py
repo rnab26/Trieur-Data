@@ -190,6 +190,7 @@ def _make_client(**tables):
         "db_saved_views": [],
         "pipeline_sessions": [],
         "pipeline_rows": [],
+        "user_master_column_sets": [],
     }
     default_tables.update(tables)
     return _FakeClient(default_tables, users_by_token={TOKEN: USER})
@@ -1500,6 +1501,40 @@ def test_pipeline_export_respects_filters(client_factory):
     assert n_filtered < n_unfiltered
 
 
+def test_pipeline_export_columns_reorders_and_filters_selection(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,VILLE,EMAIL\nDupont,Paris,d@x.com\n",
+    )
+
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/export",
+        params={"format": "csv", "columns": "EMAIL,NOM"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.content.decode("utf-8-sig")
+    header = body.splitlines()[0]
+    # Ordre demandé respecté, VILLE (absente de `columns`) exclue.
+    assert header == "EMAIL,NOM"
+
+
+def test_pipeline_export_columns_ignores_unknown_column_silently(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(tc, "org-1", b"NOM\nDupont\n")
+
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/export",
+        params={"format": "csv", "columns": "NOM,COLONNE_INCONNUE"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    header = res.content.decode("utf-8-sig").splitlines()[0]
+    assert header == "NOM"
+
+
 def test_pipeline_export_wrong_org_is_404(client_factory):
     fake = _make_client()
     tc = client_factory(fake)
@@ -1512,3 +1547,155 @@ def test_pipeline_export_wrong_org_is_404(client_factory):
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 404
+
+
+# ---------------------------------------------------------------
+# Jeux de colonnes maîtres personnels (compte, /me/column-sets*)
+# ---------------------------------------------------------------
+
+def test_column_sets_empty_by_default(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.get("/me/column-sets", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 200
+    assert res.json()["sets"] == []
+
+
+def test_column_set_save_then_list(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.post(
+        "/me/column-sets",
+        json={"name": "Prélèvement", "columns": ["NOM", "IBAN"]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    saved = res.json()
+    assert saved["name"] == "Prélèvement"
+    assert saved["columns"] == ["NOM", "IBAN"]
+
+    listed = tc.get("/me/column-sets", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert [s["name"] for s in listed.json()["sets"]] == ["Prélèvement"]
+
+    # Enregistrer marque aussi ce jeu actif -- /me le renvoie tout de suite.
+    me = tc.get("/me", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert me.json()["profile"]["active_master_column_set_id"] == saved["id"]
+
+
+def test_column_set_save_empty_name_is_400(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.post(
+        "/me/column-sets",
+        json={"name": "   ", "columns": ["NOM"]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_column_set_save_empty_columns_is_400(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.post(
+        "/me/column-sets",
+        json={"name": "Vide", "columns": []},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_column_set_save_same_name_replaces(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    tc.post(
+        "/me/column-sets",
+        json={"name": "Vue A", "columns": ["NOM"]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    tc.post(
+        "/me/column-sets",
+        json={"name": "Vue A", "columns": ["NOM", "VILLE"]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    listed = tc.get("/me/column-sets", headers={"Authorization": f"Bearer {TOKEN}"})
+    sets = listed.json()["sets"]
+    assert len(sets) == 1
+    assert sets[0]["columns"] == ["NOM", "VILLE"]
+
+
+def test_column_set_apply_marks_active_and_returns_columns(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    saved = tc.post(
+        "/me/column-sets",
+        json={"name": "Vue A", "columns": ["NOM"]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    ).json()
+    tc.post(
+        "/me/column-sets",
+        json={"name": "Vue B", "columns": ["VILLE"]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+
+    res = tc.post(
+        f"/me/column-sets/{saved['id']}/apply",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.json()["columns"] == ["NOM"]
+
+    me = tc.get("/me", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert me.json()["profile"]["active_master_column_set_id"] == saved["id"]
+
+
+def test_column_set_apply_unknown_id_is_404(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.post(
+        "/me/column-sets/does-not-exist/apply",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 404
+
+
+def test_column_set_delete(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    saved = tc.post(
+        "/me/column-sets",
+        json={"name": "Vue A", "columns": ["NOM"]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    ).json()
+
+    res = tc.delete(
+        f"/me/column-sets/{saved['id']}",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.json() == {"id": saved["id"], "deleted": True}
+
+    listed = tc.get("/me/column-sets", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert listed.json()["sets"] == []
+
+
+def test_column_set_delete_someone_elses_is_404(client_factory):
+    other_user = SimpleNamespace(id="user-2", email="bob@example.com")
+    fake = _make_client(
+        user_master_column_sets=[
+            {"id": "set-1", "user_id": "user-2", "name": "Vue B", "columns": ["VILLE"]},
+        ],
+    )
+    fake.auth.users_by_token["other-token"] = other_user
+    tc = client_factory(fake)
+
+    res = tc.delete(
+        "/me/column-sets/set-1",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 404
+
+
+def test_column_sets_require_auth(client_factory):
+    tc = client_factory(_make_client())
+    res = tc.get("/me/column-sets")
+    assert res.status_code == 401

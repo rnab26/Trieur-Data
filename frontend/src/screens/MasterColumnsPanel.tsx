@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ApiError, getMasterColumns, setMasterColumns } from '@/lib/api'
+import { PersonalColumnSets } from './PersonalColumnSets'
 
 // Réglages des colonnes maîtres de l'environnement -- mirroir de
 // views/tab_database.py:_render_settings. `save_org_master_columns`
@@ -173,6 +174,8 @@ export function MasterColumnsPanel({ orgId, isAdmin }: { orgId: string; isAdmin:
 
       {saveError && <p className="text-sm text-[var(--danger)]">Erreur : {saveError}</p>}
       {saving && <p className="text-sm text-[var(--muted)]">Enregistrement…</p>}
+
+      <PersonalColumnSets />
     </div>
   )
 }

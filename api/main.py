@@ -36,6 +36,7 @@ from trieur.db import (
     create_section,
     delete_record,
     delete_saved_view,
+    delete_user_column_set,
     get_last_import_batch,
     get_my_memberships,
     get_my_profile,
@@ -52,9 +53,12 @@ from trieur.db import (
     list_records,
     list_saved_views,
     list_sections,
+    list_user_column_sets,
     resolve_dedup_alert,
     save_org_master_columns,
     save_saved_view,
+    save_user_column_set,
+    set_active_column_set,
     set_chantier_todo_done,
     update_chantier_status,
     update_pipeline_row_data,
@@ -191,6 +195,74 @@ def get_me(ctx: AuthCtx = Depends(get_current_ctx)):
     admins ci-dessous ; ceci évite de laisser un membre simple ouvrir un
     formulaire qui échouera systématiquement en 403)."""
     return {"profile": ctx.profile}
+
+
+# ---------------------------------------------------------------
+# Jeux de colonnes maîtres personnels (liés au COMPTE, pas à
+# l'organisation) -- mirroir de views/tab1_colonnes_maitres.py
+# (`_render_account_memory`). Distinct des colonnes maîtres par
+# environnement ci-dessous (`/orgs/{org_id}/master-columns`) : ceci
+# n'est jamais scopé à un org_id, `trieur_data.user_master_column_sets`
+# n'a que `user_id` (voir supabase/migrations/0003). L'ensemble
+# actif (`profiles.active_master_column_set_id`) est déjà renvoyé par
+# `/me` ci-dessus (fait partie de `select("*")` sur profiles) -- le
+# frontend n'a besoin que de la liste des jeux pour retrouver son nom
+# et ses colonnes au chargement.
+# ---------------------------------------------------------------
+
+@app.get("/me/column-sets")
+def get_my_column_sets(ctx: AuthCtx = Depends(get_current_ctx)):
+    return {"sets": list_user_column_sets(ctx.client, ctx.user.id)}
+
+
+class UserColumnSetCreate(BaseModel):
+    name: str
+    columns: list[str]
+
+
+@app.post("/me/column-sets")
+def post_my_column_set(body: UserColumnSetCreate, ctx: AuthCtx = Depends(get_current_ctx)):
+    """Enregistre (ou remplace, même nom -- `upsert` sur
+    `user_id,name` côté trieur/db.py) un jeu de colonnes sous ce nom, et
+    le marque actif pour la prochaine connexion -- même comportement que
+    le bouton "Enregistrer" côté Streamlit."""
+    name = body.name.strip()
+    columns = [c.strip() for c in body.columns if c.strip()]
+    if not name:
+        raise HTTPException(status_code=400, detail="Donne un nom à ce jeu de colonnes.")
+    if not columns:
+        raise HTTPException(status_code=400, detail="Aucune colonne à enregistrer.")
+    saved = save_user_column_set(ctx.client, ctx.user.id, name, columns)
+    set_active_column_set(ctx.client, ctx.user.id, saved["id"])
+    return saved
+
+
+def _get_own_column_set_or_404(ctx: AuthCtx, set_id: str) -> dict:
+    own_sets = list_user_column_sets(ctx.client, ctx.user.id)
+    match = next((s for s in own_sets if s["id"] == set_id), None)
+    if match is None:
+        raise HTTPException(status_code=404, detail="Jeu de colonnes introuvable.")
+    return match
+
+
+@app.post("/me/column-sets/{set_id}/apply")
+def apply_my_column_set(set_id: str, ctx: AuthCtx = Depends(get_current_ctx)):
+    """Marque ce jeu comme actif pour la prochaine connexion ET renvoie
+    ses colonnes tout de suite, pour que le frontend les applique sans
+    un deuxième aller-retour."""
+    matched = _get_own_column_set_or_404(ctx, set_id)
+    set_active_column_set(ctx.client, ctx.user.id, set_id)
+    return matched
+
+
+@app.delete("/me/column-sets/{set_id}")
+def delete_my_column_set(set_id: str, ctx: AuthCtx = Depends(get_current_ctx)):
+    # delete_user_column_set() ne filtre que par id (trieur/db.py) -- on
+    # vérifie ici que le jeu appartient bien à ce compte avant de
+    # supprimer, même garde que delete_saved_view_endpoint ci-dessous.
+    _get_own_column_set_or_404(ctx, set_id)
+    delete_user_column_set(ctx.client, set_id)
+    return {"id": set_id, "deleted": True}
 
 
 # ---------------------------------------------------------------
@@ -720,6 +792,12 @@ def export_pipeline_session_rows(
     format: str = Query("csv", pattern="^(csv|xlsx)$"),
     search: str = Query(""),
     col_filters: str = Query("{}", description="JSON : {colonne: {op, value}}"),
+    columns: str = Query(
+        "", description="Ordre + sélection des colonnes à l'export, séparées par des virgules "
+                        "(équivalent du glisser-déposer streamlit-sortables de l'onglet 4 : une "
+                        "colonne absente de cette liste est exclue de l'export). Vide = toutes les "
+                        "colonnes détectées, dans leur ordre d'apparition (comportement par défaut).",
+    ),
     ctx: AuthCtx = Depends(require_org_access),
 ):
     """Exporte les lignes en staging de cette session (mêmes filtres que
@@ -741,11 +819,20 @@ def export_pipeline_session_rows(
             if c not in full_cols:
                 full_cols.append(c)
 
+    # `columns` (ordre + sélection choisis côté écran, voir docstring) --
+    # ne garde que les colonnes demandées ET réellement présentes (une
+    # colonne du preset absente des données actuelles est ignorée
+    # silencieusement, jamais ajoutée vide), dans l'ordre demandé. Une
+    # colonne présente mais pas dans `columns` est explicitement exclue --
+    # même règle que "Colonnes incluses/exclues" de views/tab4_export.py.
+    requested_cols = [c for c in columns.split(",") if c]
+    export_cols = [c for c in requested_cols if c in full_cols] if requested_cols else full_cols
+
     df = pd.DataFrame(rows) if rows else pd.DataFrame()
-    for c in full_cols:
+    for c in export_cols:
         if c not in df.columns:
             df[c] = None
-    df = df[full_cols] if full_cols else df
+    df = df[export_cols] if export_cols else df
 
     file_base = sanitize_filename(session.get("source_filename") or session_id, default="export_pipeline")
 

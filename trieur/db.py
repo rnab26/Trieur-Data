@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import streamlit as st
 
 # Import differe (dans la fonction, pas au niveau module) : la librairie
@@ -730,15 +732,30 @@ def append_pipeline_rows_bulk(
         return 0
     session = get_pipeline_session(client, session_id)
     base_count = session["row_count"] if session else 0
-    n_inserted = 0
-    for start in range(0, len(rows), batch_size):
+
+    def _insert_chunk(start: int) -> int:
         chunk = rows[start:start + batch_size]
         payload = [
             {"session_id": session_id, "row_index": start_index + start + i, "data": row}
             for i, row in enumerate(chunk)
         ]
         _td(client, "pipeline_rows").insert(payload).execute()
-        n_inserted += len(chunk)
+        return len(chunk)
+
+    # Deuxieme correctif de perf (mesure reelle : 91987 lignes reelles de
+    # l'utilisateur -> 46 lots sequentiels, chacun attendant la reponse
+    # reseau du precedent avant de commencer -- ~2 min sur l'hebergement
+    # gratuit). Les lots sont independants (row_index distinct par lot,
+    # aucune ecriture partagee) : on les lance en parallele via un pool de
+    # threads. Le client Supabase (postgrest-py) partage un httpx.Client
+    # entre appels, concu pour le concurrent (verifie dans son code source
+    # installe) -- chaque `.table(...)` cree un nouveau builder, aucun etat
+    # mutable partage entre lots. Concurrence bornee a 8 pour ne pas
+    # saturer le plan gratuit Supabase/Render.
+    starts = list(range(0, len(rows), batch_size))
+    with ThreadPoolExecutor(max_workers=min(8, len(starts))) as pool:
+        n_inserted = sum(pool.map(_insert_chunk, starts))
+
     _td(client, "pipeline_sessions").update(
         {"row_count": base_count + n_inserted}
     ).eq("id", session_id).execute()

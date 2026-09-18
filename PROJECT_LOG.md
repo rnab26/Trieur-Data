@@ -2462,3 +2462,113 @@ nécessaire — les 9 points sont réels et corrects tels que rapportés.
 Commentaire posté sur PR #24 récapitulant les 9 points.
 
 **Pas de merge sur `main` — pas demandé, décision utilisateur.**
+
+---
+
+## Branche `fix/pipeline-full-parity` — parité Streamlit du pipeline, vérification indépendante + push (2026-09-18)
+
+**Contexte** : suite au retour de l'utilisateur ("la refonte React du
+pipeline a perdu l'auto-assignation et plein de fonctionnalités de
+l'ancien Streamlit, le visuel n'est pas pro, un fichier de <1 Mo met
+~30s à charger"), deux agents (backend puis frontend) ont retravaillé
+la branche `fix/pipeline-full-parity` pour retrouver la parité
+fonctionnelle avec les onglets 2-4 Streamlit et corriger la lenteur.
+Cette entrée documente la vérification indépendante de leur travail
+(rien pris pour argent comptant, un rapport précédent sur ce projet
+s'était déjà révélé faux) avant push.
+
+**Correctif de performance — vérifié réel, pas juste relu le rapport** :
+lu `trieur/db.py` : `append_pipeline_rows` (fonction existante, gardée)
+fait bien un SELECT (row_count) + UPDATE à CHAQUE lot de 500 lignes en
+plus de l'INSERT — 3 allers-retours réseau par lot. La nouvelle
+`append_pipeline_rows_bulk` ne fait qu'UNE seule lecture de row_count
+avant la boucle d'INSERT et UNE seule écriture après, quel que soit le
+nombre de lots (`batch_size`, par défaut 2000 lignes/lot, pour rester
+sous la limite de payload PostgREST). Test dédié
+`test_append_pipeline_rows_bulk_only_updates_row_count_once` vérifié :
+force le comptage des appels `update` sur `pipeline_sessions` et
+affirme qu'il n'y en a qu'un seul même avec plusieurs lots — passe.
+Vérifié aussi que l'endpoint d'import (`api/main.py`,
+`create_pipeline_session_endpoint`) appelle bien
+`append_pipeline_rows_bulk` (pas l'ancienne fonction) — la cause racine
+mesurée par l'agent backend (~29s pour 1 Mo/5787 lignes avec
+l'ancienne boucle, ~2.7s pour le même volume en un seul INSERT) est
+donc réellement corrigée dans le chemin de code utilisé, pas seulement
+dans une fonction annexe non appelée.
+
+**Parité fonctionnelle — vérifiée en lisant le code, pas le rapport** :
+- Import multi-fichiers + Google Sheets dans le même batch
+  (`_read_pipeline_sources`/`_merge_pipeline_sheets`, suffixage des noms
+  dupliqués) : confirmé dans `api/main.py`.
+- Auto-assignation : confirmé que `apply_pipeline_mapping` appelle
+  `trieur/matching.py:auto_assign_with_memory` avec le mapping mémorisé
+  par empreinte de colonnes (`get_remembered_mapping_for_shape`),
+  sauvegardé après confirmation (`save_remembered_mapping_for_shape`) —
+  scopé à l'organisation (nouvelle table `pipeline_remembered_mappings`).
+- Dédoublonnage réel : `POST/DELETE .../pipeline/sessions/{id}/dedup`
+  réutilisent `trieur/filters.py:dedupe_dataframe`, persistant via
+  `pipeline_sessions.dedup_config`, réappliqué à `/rows` et `/export`
+  (`_apply_active_dedup`) jusqu'à annulation explicite — confirmé.
+- Presets d'export nommés : CRUD confirmé sur
+  `/orgs/{org_id}/pipeline/export-presets`, nouvelle table
+  `pipeline_export_presets`.
+- Écran React refait en 4 onglets (Colonnes maîtres / Importer / Filtrer
+  / Exporter), même découpage que la version Streamlit, au lieu de
+  l'assistant linéaire à 3 étapes livré par la refonte précédente
+  (celle que l'utilisateur a rejetée) — confirmé en lisant
+  `PipelineScreen.tsx` et les nouveaux composants
+  (`PipelineImportPanel`, `PipelineMappingGrid`, `PipelineDedupPanel`,
+  `PipelineExportPanel`).
+
+**Tests / build — réexécutés, pas relus** :
+- `python3 -m pytest -q` (suite complète) → **277 passed, 1 failed**
+  (`test_master_columns_localstorage_fallback`). Ce test échoue déjà de
+  façon intermittente sur ce projet (voir l'entrée "Revue Copilot PR
+  #24" ci-dessus, bisecté et documenté comme flaky/dépendant de l'ordre
+  d'exécution, indépendant du code touché) — pas une régression
+  introduite par cette branche.
+- `cd frontend && npm run build` → exit 0 (`tsc -b && vite build`, 0
+  erreur TypeScript).
+- `git diff --stat main -- views/ app.py` → **vide**. Le code Streamlit
+  original n'a pas été touché par cette branche.
+
+**Migration base de données — appliquée** : la migration
+`supabase/migrations/0012_pipeline_parity.sql` (2 nouvelles tables
+`pipeline_remembered_mappings`/`pipeline_export_presets` + colonne
+`dedup_config` sur `pipeline_sessions`, RLS activée avec policies sur
+le même modèle que les tables existantes) n'avait pas encore été
+appliquée en base par les agents précédents. Vérifié sur le projet
+Supabase réel (`bexiyvmdbxcwxasgslxp`, celui qui contient
+`trieur_data.*`) qu'elle manquait, puis appliquée directement (ajout
+pur, aucune donnée existante touchée). Sans ça, les nouvelles routes
+mapping/dédoublonnage/presets auraient échoué en production dès le
+premier appel réel.
+
+**Limites connues, non fermées** (héritées des rapports des agents,
+vérifiées réelles en lisant le code, pas de raison de les corriger dans
+ce lot) :
+- Import PDF/SEPA (relevés bancaires) toujours absent de l'API
+  pipeline — seuls Excel/CSV/Google Sheets sont couverts.
+- Pas d'UI d'inclusion/exclusion par fichier/onglet avant mapping : tous
+  les fichiers/onglets d'un import sont fusionnés en une session dès le
+  départ (limite backend documentée dans son propre code).
+- Les filtres `/rows` et `/export` restent le système simple par
+  colonne, pas les groupes OU/ET par "critères département" de l'onglet
+  3 Streamlit d'origine — seul le dédoublonnage a été porté fidèlement.
+  Corriger ça demande un chantier backend séparé (le contrat de
+  `list_pipeline_session_rows`/`export_pipeline_session_rows` n'expose
+  que `col_filters` simple).
+- L'application du mapping fait encore un `update` par ligne en boucle
+  (pas optimisé en lot comme l'import initial) — pas mesuré, pourrait
+  être lent sur de très gros volumes (l'utilisateur mentionne des
+  fichiers de 50-80 Mo, plusieurs à la fois, pas encore testés).
+
+**Poussé** sur `origin/fix/pipeline-full-parity` (commits `ca8e566`,
+`a9c6d76`). **Pas de merge sur `main`** — l'utilisateur a explicitement
+rejeté un merge précédent qui avait changé l'architecture sans son
+accord ; cette branche corrige justement ce problème, mais le go/no-go
+de merge reste sa décision.
+
+**Visuel/design** : l'utilisateur a indiqué qu'il fournira lui-même un
+template de design à suivre pour une prochaine passe — non traité dans
+ce lot, volontairement, en attendant ce template.

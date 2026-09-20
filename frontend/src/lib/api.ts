@@ -497,12 +497,26 @@ export function confirmImport(
 // cibles du mapping restent get/setMasterColumns ci-dessus, PAS une
 // deuxième liste -- ne jamais dupliquer cette notion côté frontend non
 // plus.
+//
+// Le mapping est PAR ONGLET (sheet_key -> {source: maître}) -- fidèle à
+// views/tab2_import_mapping.py : chaque fichier peut avoir plusieurs
+// onglets Excel (sheet_key = "{fichier} :: {onglet}", ou juste le nom
+// du fichier/onglet pour un CSV/PDF/fichier unique), chacun avec son
+// propre mapping. Ne jamais fusionner ça en un mapping global.
 // ---------------------------------------------------------------
 
 // Sentinelle "non assigné" -- même valeur exacte que
 // trieur/matching.py:auto_assign_columns_fast et api/main.py, ne jamais
 // diverger (le backend compare cette chaîne littéralement).
 export const PIPELINE_UNASSIGNED = '(non assigne)'
+
+export type PipelineSheetSummary = {
+  sheet_key: string
+  columns: string[]
+  row_count: number
+  n_duplicates: number
+  preview_rows: Record<string, unknown>[]
+}
 
 export type PipelineSessionCreated = {
   session_id: string
@@ -511,7 +525,11 @@ export type PipelineSessionCreated = {
   columns: string[]
   unknown_columns: string[]
   preview_rows: Record<string, unknown>[]
+  sheets: PipelineSheetSummary[]
 }
+
+// Mapping par onglet : sheet_key -> {colonne source: colonne maître}.
+export type PipelineMappingBySheet = Record<string, Record<string, string>>
 
 // Requête multipart dédiée (fichier seul, pas d'autres champs) -- même
 // raison que importRequest ci-dessus : rester autonome plutôt que de
@@ -542,12 +560,11 @@ export function createPipelineSession(orgId: string, files: File[]) {
 
 export type PipelineMappingSuggestion = {
   session_id: string
-  suggested_mapping: Record<string, string>
-  columns: string[]
+  suggested_mapping: PipelineMappingBySheet
 }
 
-// dry_run=true : suggestion d'auto-assignation, rien n'est écrit --
-// voir api/main.py:apply_pipeline_mapping.
+// dry_run=true : suggestion d'auto-assignation PAR ONGLET, rien n'est
+// écrit -- voir api/main.py:apply_pipeline_mapping.
 export function suggestPipelineMapping(orgId: string, sessionId: string) {
   return request<PipelineMappingSuggestion>(
     `/orgs/${orgId}/pipeline/sessions/${sessionId}/mapping`,
@@ -564,16 +581,18 @@ export type PipelineIbanWarning = { column: string; n_invalid: number; sample_ro
 export type PipelineMappingResult = {
   session_id: string
   status: string
-  mapping: Record<string, string>
+  mapping: PipelineMappingBySheet
   n_rows_updated: number
+  n_rows_excluded: number
   iban_columns_detected: string[]
   iban_warnings: PipelineIbanWarning[]
 }
 
-// Applique le mapping fourni (l'appelant doit envoyer le mapping
-// COMPLET voulu, pas un patch -- même contrat que côté serveur) et fait
-// passer la session au statut "mapped".
-export function applyPipelineMapping(orgId: string, sessionId: string, mapping: Record<string, string>) {
+// Applique le mapping fourni (PAR ONGLET -- l'appelant doit envoyer le
+// mapping COMPLET voulu pour chaque onglet qu'il inclut, pas un patch ;
+// un onglet absent de `mapping` est exclu de la base fusionnée, même
+// contrat que côté serveur) et fait passer la session au statut "mapped".
+export function applyPipelineMapping(orgId: string, sessionId: string, mapping: PipelineMappingBySheet) {
   return request<PipelineMappingResult>(
     `/orgs/${orgId}/pipeline/sessions/${sessionId}/mapping`,
     { method: 'POST', body: JSON.stringify({ mapping, dry_run: false }) },

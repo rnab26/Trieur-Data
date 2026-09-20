@@ -664,6 +664,42 @@ def test_import_rejects_oversized_upload_before_reading(client_factory, monkeypa
     assert fake.postgrest.tables["records"] == []
 
 
+def test_import_rejects_upload_with_unknown_size():
+    """Même défense en profondeur que POST .../pipeline/sessions (voir
+    test_pipeline_session_create_rejects_upload_with_unknown_size) : un
+    .size indisponible est refusé plutôt que silencieusement compté à 0
+    octet. Appel direct de l'endpoint (impossible à simuler via
+    TestClient, qui calcule toujours une vraie taille pendant le parsing
+    multipart)."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from api import main as api_main
+
+    fake = _make_client()
+    ctx = api_main.get_current_ctx(authorization=f"Bearer {TOKEN}", client=fake)
+    ctx = api_main.require_org_access("org-1", ctx)
+
+    fake_upload = SimpleNamespace(size=None, filename="clients.csv")
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            api_main.import_records(
+                org_id="org-1",
+                file=fake_upload,
+                iban_col=None,
+                add_unknown_columns=False,
+                dry_run=False,
+                ctx=ctx,
+            )
+        )
+
+    assert exc_info.value.status_code == 413
+    assert "indéterminable" in exc_info.value.detail
+    assert fake.postgrest.tables["records"] == []
+
+
 def test_import_dry_run_previews_without_writing(client_factory):
     fake = _make_client()
     tc = client_factory(fake)

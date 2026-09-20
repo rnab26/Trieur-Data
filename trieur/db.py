@@ -765,25 +765,35 @@ def delete_pipeline_rows(client: Client, session_id: str, row_ids: list[str]) ->
     return n_deleted
 
 
-def try_lock_pipeline_dedupe(client: Client, session_id: str, ttl_seconds: int = 30) -> bool:
-    """Tente de poser un verrou court sur la session (voir migration 0013)
-    avant un dédoublonnage : True si obtenu, False si un autre
+def try_lock_pipeline_dedupe(client: Client, session_id: str, owner: str, ttl_seconds: int = 30) -> bool:
+    """Tente de poser un verrou court sur la session (voir migrations
+    0013/0014) avant un dédoublonnage : True si obtenu, False si un autre
     dédoublonnage est déjà en cours sur cette session (verrou récent, pas
     encore expiré). Empêche deux appels concurrents de choisir chacun une
     ligne différente à garder dans le même groupe de doublons puis de
-    supprimer chacun celle que l'autre voulait garder."""
+    supprimer chacun celle que l'autre voulait garder.
+
+    `owner` doit être un jeton unique par appel (ex. uuid4), pas l'id de
+    session : sans propriétaire distinct du verrou lui-même, une requête
+    qui dépasse la TTL et perd la propriété du verrou pourrait, dans son
+    `finally`, libérer sans le savoir le verrou d'une requête plus
+    récente (trouvaille Copilot sur la migration 0013 d'origine)."""
     res = client.postgrest.schema("trieur_data").rpc(
-        "try_lock_pipeline_dedupe", {"p_session_id": session_id, "p_ttl_seconds": ttl_seconds}
+        "try_lock_pipeline_dedupe",
+        {"p_session_id": session_id, "p_owner": owner, "p_ttl_seconds": ttl_seconds},
     ).execute()
     return bool(res.data)
 
 
-def unlock_pipeline_dedupe(client: Client, session_id: str) -> None:
+def unlock_pipeline_dedupe(client: Client, session_id: str, owner: str) -> None:
     """Libère le verrou posé par `try_lock_pipeline_dedupe`, à appeler
     dans un `finally` pour ne jamais laisser une session verrouillée par
-    erreur au-delà de sa TTL."""
+    erreur au-delà de sa TTL. `owner` doit être le MÊME jeton que celui
+    passé au claim correspondant : le RPC ne libère le verrou que s'il
+    appartient encore à cet appelant (voir migration 0014), jamais celui
+    d'un appelant plus récent."""
     client.postgrest.schema("trieur_data").rpc(
-        "unlock_pipeline_dedupe", {"p_session_id": session_id}
+        "unlock_pipeline_dedupe", {"p_session_id": session_id, "p_owner": owner}
     ).execute()
 
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -1226,14 +1227,18 @@ def apply_pipeline_dedupe(
         raise HTTPException(status_code=400, detail="mode invalide (attendu 'rule' ou 'manual').")
     _validate_filter_groups(body.groups)
 
-    # Verrou court (migration 0013) : sans lui, deux appels concurrents
-    # sur la même session pourraient chacun analyser le même groupe de
-    # doublons, retenir une ligne différente à garder, puis supprimer
-    # chacun celle que l'autre voulait garder -- le groupe entier
-    # disparaîtrait alors qu'aucun appel pris isolément n'est incorrect
-    # (revue GitHub Copilot, PR #25). Un deuxième appel pendant qu'un
-    # premier est en cours reçoit un 409 plutôt que de risquer ça.
-    if not try_lock_pipeline_dedupe(ctx.client, session_id):
+    # Verrou court (migrations 0013/0014) : sans lui, deux appels
+    # concurrents sur la même session pourraient chacun analyser le même
+    # groupe de doublons, retenir une ligne différente à garder, puis
+    # supprimer chacun celle que l'autre voulait garder -- le groupe
+    # entier disparaîtrait alors qu'aucun appel pris isolément n'est
+    # incorrect (revue GitHub Copilot, PR #25). Un deuxième appel pendant
+    # qu'un premier est en cours reçoit un 409 plutôt que de risquer ça.
+    # `lock_owner` (jeton unique par appel) : une requête qui dépasse la
+    # TTL et perd la propriété du verrou ne doit jamais pouvoir libérer,
+    # dans son `finally`, le verrou d'un appel plus récent.
+    lock_owner = str(uuid.uuid4())
+    if not try_lock_pipeline_dedupe(ctx.client, session_id, lock_owner):
         raise HTTPException(
             status_code=409,
             detail="Un dédoublonnage est déjà en cours sur cette session, réessayez dans quelques secondes.",
@@ -1292,7 +1297,7 @@ def apply_pipeline_dedupe(
             "row_count": session["row_count"] if session else None,
         }
     finally:
-        unlock_pipeline_dedupe(ctx.client, session_id)
+        unlock_pipeline_dedupe(ctx.client, session_id, lock_owner)
 
 
 # ---------------------------------------------------------------

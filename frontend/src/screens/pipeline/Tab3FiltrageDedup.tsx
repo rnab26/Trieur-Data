@@ -76,6 +76,12 @@ function CriterionRow({
       </select>
       {isDept ? (
         <Input
+          // `key` sur la colonne+nature : `defaultValue` n'est lu qu'au
+          // montage, donc sans ce remontage forcé le champ garderait le
+          // texte tapé pour l'ancienne colonne après un changement de
+          // colonne (qui réinitialise `criterion.values` côté état) --
+          // trouvaille Copilot, PR #25.
+          key={`${criterion.column}:${criterion.kind}`}
           className="max-w-xs"
           placeholder="Départements, ex: 02,33,77"
           defaultValue={criterion.values.join(',')}
@@ -93,6 +99,7 @@ function CriterionRow({
         />
       ) : (
         <Input
+          key={`${criterion.column}:${criterion.kind}`}
           className="max-w-xs"
           placeholder={`Valeur(s) pour ${criterion.column}, séparées par ;`}
           defaultValue={criterion.values.join(';')}

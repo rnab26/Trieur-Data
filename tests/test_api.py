@@ -176,12 +176,15 @@ class _FakePostgrest:
 
             return SimpleNamespace(execute=_execute)
         # Reproduit trieur_data.try_lock_pipeline_dedupe / unlock_pipeline_dedupe
-        # (migration 0013) : verrou court par UPDATE ... WHERE atomique, voir
-        # trieur/db.py:try_lock_pipeline_dedupe. Pas de vraie concurrence dans ce
-        # faux client synchrone : le verrou est simulé fidèlement (un verrou déjà
-        # posé et non expiré bloque un 2e claim) pour que les tests puissent
-        # vérifier le comportement, mais aucun test n'exécute deux requêtes en
-        # parallèle ici.
+        # (migrations 0013/0014) : verrou court par UPDATE ... WHERE atomique,
+        # avec propriétaire (p_owner) pour qu'une requête qui a dépassé sa TTL
+        # et perdu le verrou ne libère jamais celui d'un appelant plus récent
+        # -- voir trieur/db.py:try_lock_pipeline_dedupe. Pas de vraie
+        # concurrence dans ce faux client synchrone : le verrou est simulé
+        # fidèlement (un verrou déjà posé et non expiré bloque un 2e claim,
+        # unlock ne fait rien si le propriétaire ne correspond plus) pour que
+        # les tests puissent vérifier le comportement, mais aucun test
+        # n'exécute deux requêtes en parallèle ici.
         if name == "try_lock_pipeline_dedupe":
             def _execute():
                 session = next(
@@ -194,6 +197,7 @@ class _FakePostgrest:
                 if lock_at is not None and (datetime.now(timezone.utc) - lock_at).total_seconds() < ttl:
                     return SimpleNamespace(data=False)
                 session["dedupe_lock_at"] = datetime.now(timezone.utc)
+                session["dedupe_lock_owner"] = params["p_owner"]
                 return SimpleNamespace(data=True)
 
             return SimpleNamespace(execute=_execute)
@@ -202,8 +206,9 @@ class _FakePostgrest:
                 session = next(
                     (r for r in self.tables.get("pipeline_sessions", []) if r["id"] == params["p_session_id"]), None,
                 )
-                if session is not None:
+                if session is not None and session.get("dedupe_lock_owner") == params["p_owner"]:
                     session["dedupe_lock_at"] = None
+                    session["dedupe_lock_owner"] = None
                 return SimpleNamespace(data=None)
 
             return SimpleNamespace(execute=_execute)
@@ -2042,6 +2047,43 @@ def test_pipeline_dedupe_releases_lock_after_success_so_a_later_call_works(clien
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert second.status_code == 200, "le verrou doit être libéré après un appel réussi"
+
+
+def test_pipeline_dedupe_expired_owner_cannot_unlock_a_newer_owner(client_factory):
+    """Migration 0014 (revue Copilot sur la migration 0013 elle-même) :
+    sans jeton propriétaire, une requête qui dépasse la TTL et perd la
+    propriété du verrou pourrait, dans son `finally`, libérer sans le
+    savoir le verrou posé entre-temps par une requête plus récente."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\nMartin,z@y.com\n",
+    )
+    session = next(r for r in fake.postgrest.tables["pipeline_sessions"] if r["id"] == session_id)
+
+    # Simule une 1re requête dont le verrou vient d'expirer (owner "stale"),
+    # et une 2e requête qui vient de réclamer le verrou juste après.
+    session["dedupe_lock_at"] = datetime.now(timezone.utc)
+    session["dedupe_lock_owner"] = "owner-recent"
+
+    # La 1re requête (propriétaire périmé) tente de libérer son propre jeton,
+    # qui n'est plus celui posé en base : ça ne doit RIEN changer.
+    fake.postgrest.rpc(
+        "unlock_pipeline_dedupe", {"p_session_id": session_id, "p_owner": "owner-stale"},
+    ).execute()
+
+    assert session["dedupe_lock_owner"] == "owner-recent", (
+        "un propriétaire périmé ne doit jamais pouvoir libérer le verrou d'un propriétaire plus récent"
+    )
+
+    # Un 3e appel HTTP doit donc toujours recevoir 409 : le verrou tenu par
+    # "owner-recent" est toujours actif.
+    third = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "rule", "keep": "first"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert third.status_code == 409
 
 
 def test_pipeline_dedupe_rule_complete_keeps_fullest_row(client_factory):

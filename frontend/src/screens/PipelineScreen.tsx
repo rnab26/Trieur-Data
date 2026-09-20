@@ -116,13 +116,24 @@ export function PipelineScreen() {
     setTab('2')
   }
 
-  function loadMasterColumns(orgIdVal: string) {
+  // `cancelled` : la requête d'une ANCIENNE org peut se résoudre après le
+  // changement d'org suivant (réseau lent, org changée deux fois vite) --
+  // sans ce garde, elle écraserait `masterColumns` avec une liste qui ne
+  // correspond plus à `orgId` (trouvaille Copilot, PR #25 -- même défaut
+  // que l'ancienne implémentation évitait déjà avec ce même patron).
+  function loadMasterColumns(orgIdVal: string): () => void {
+    let cancelled = false
     setMasterColumnsError(null)
     getMasterColumns(orgIdVal)
-      .then((data) => setMasterColumns(data.columns))
-      .catch((err: unknown) => {
-        setMasterColumnsError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+      .then((data) => {
+        if (!cancelled) setMasterColumns(data.columns)
       })
+      .catch((err: unknown) => {
+        if (!cancelled) setMasterColumnsError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+      })
+    return () => {
+      cancelled = true
+    }
   }
 
   // Chargement initial des colonnes maîtres (utilisées par les onglets 2 et
@@ -130,7 +141,8 @@ export function PipelineScreen() {
   // onColumnsChange dès qu'elles sont créées/modifiées, pour rester à jour
   // sans revenir sur l'onglet 1.
   useEffect(() => {
-    if (orgId) loadMasterColumns(orgId)
+    if (!orgId) return
+    return loadMasterColumns(orgId)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orgId])
 

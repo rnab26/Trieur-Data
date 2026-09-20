@@ -765,6 +765,28 @@ def delete_pipeline_rows(client: Client, session_id: str, row_ids: list[str]) ->
     return n_deleted
 
 
+def try_lock_pipeline_dedupe(client: Client, session_id: str, ttl_seconds: int = 30) -> bool:
+    """Tente de poser un verrou court sur la session (voir migration 0013)
+    avant un dédoublonnage : True si obtenu, False si un autre
+    dédoublonnage est déjà en cours sur cette session (verrou récent, pas
+    encore expiré). Empêche deux appels concurrents de choisir chacun une
+    ligne différente à garder dans le même groupe de doublons puis de
+    supprimer chacun celle que l'autre voulait garder."""
+    res = client.postgrest.schema("trieur_data").rpc(
+        "try_lock_pipeline_dedupe", {"p_session_id": session_id, "p_ttl_seconds": ttl_seconds}
+    ).execute()
+    return bool(res.data)
+
+
+def unlock_pipeline_dedupe(client: Client, session_id: str) -> None:
+    """Libère le verrou posé par `try_lock_pipeline_dedupe`, à appeler
+    dans un `finally` pour ne jamais laisser une session verrouillée par
+    erreur au-delà de sa TTL."""
+    client.postgrest.schema("trieur_data").rpc(
+        "unlock_pipeline_dedupe", {"p_session_id": session_id}
+    ).execute()
+
+
 def delete_pipeline_session(client: Client, session_id: str) -> None:
     """Supprime une session de pipeline et toutes ses lignes (cascade,
     voir migration 0010) -- abandon explicite du pipeline en cours par

@@ -63,6 +63,8 @@ from trieur.db import (
     save_user_column_set,
     set_active_column_set,
     set_chantier_todo_done,
+    try_lock_pipeline_dedupe,
+    unlock_pipeline_dedupe,
     update_chantier_status,
     update_pipeline_row_data,
     update_pipeline_session_status,
@@ -1224,58 +1226,73 @@ def apply_pipeline_dedupe(
         raise HTTPException(status_code=400, detail="mode invalide (attendu 'rule' ou 'manual').")
     _validate_filter_groups(body.groups)
 
-    all_rows = _all_pipeline_rows(ctx.client, session_id)
-    kept = _apply_pipeline_filters(all_rows, body.groups, body.search, body.col_filters)
-    id_rows = [{"id": r["id"], "data": _without_sheet_key(r["data"])} for r in kept]
+    # Verrou court (migration 0013) : sans lui, deux appels concurrents
+    # sur la même session pourraient chacun analyser le même groupe de
+    # doublons, retenir une ligne différente à garder, puis supprimer
+    # chacun celle que l'autre voulait garder -- le groupe entier
+    # disparaîtrait alors qu'aucun appel pris isolément n'est incorrect
+    # (revue GitHub Copilot, PR #25). Un deuxième appel pendant qu'un
+    # premier est en cours reçoit un 409 plutôt que de risquer ça.
+    if not try_lock_pipeline_dedupe(ctx.client, session_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Un dédoublonnage est déjà en cours sur cette session, réessayez dans quelques secondes.",
+        )
+    try:
+        all_rows = _all_pipeline_rows(ctx.client, session_id)
+        kept = _apply_pipeline_filters(all_rows, body.groups, body.search, body.col_filters)
+        id_rows = [{"id": r["id"], "data": _without_sheet_key(r["data"])} for r in kept]
 
-    if body.mode == "manual":
-        if not body.keep_ids:
-            raise HTTPException(status_code=400, detail="keep_ids requis en mode 'manual' (1 id par groupe).")
-        # `keep_ids` vient du client, à partir d'une analyse de doublons
-        # potentiellement périmée (filtre changé entretemps, sélection
-        # incomplète côté écran) : on revérifie ICI, sur le périmètre
-        # filtré ACTUEL, qu'il couvre bien CHAQUE groupe de doublons
-        # (exactement 1 id à garder par groupe, et aucun id hors de son
-        # groupe) -- sinon dedupe_dataframe_manual (trieur/filters.py)
-        # ne garderait AUCUNE ligne du groupe non couvert et supprimerait
-        # tout le groupe par erreur. On ne supprime rien tant que ce
-        # n'est pas vérifié.
-        dup_groups = pipeline_engine.duplicate_groups_for_rows(id_rows, body.column)
-        keep_id_set = set(body.keep_ids)
-        row_id_set = {r["id"] for r in id_rows}
-        unknown_ids = sorted(keep_id_set - row_id_set)
-        if unknown_ids:
-            raise HTTPException(
-                status_code=400,
-                detail=f"keep_ids contient des id hors du périmètre filtré actuel : {unknown_ids}.",
-            )
-        for g in dup_groups:
-            matched = keep_id_set & set(g["row_ids"])
-            if len(matched) != 1:
+        if body.mode == "manual":
+            if not body.keep_ids:
+                raise HTTPException(status_code=400, detail="keep_ids requis en mode 'manual' (1 id par groupe).")
+            # `keep_ids` vient du client, à partir d'une analyse de doublons
+            # potentiellement périmée (filtre changé entretemps, sélection
+            # incomplète côté écran) : on revérifie ICI, sur le périmètre
+            # filtré ACTUEL, qu'il couvre bien CHAQUE groupe de doublons
+            # (exactement 1 id à garder par groupe, et aucun id hors de son
+            # groupe) -- sinon dedupe_dataframe_manual (trieur/filters.py)
+            # ne garderait AUCUNE ligne du groupe non couvert et supprimerait
+            # tout le groupe par erreur. On ne supprime rien tant que ce
+            # n'est pas vérifié.
+            dup_groups = pipeline_engine.duplicate_groups_for_rows(id_rows, body.column)
+            keep_id_set = set(body.keep_ids)
+            row_id_set = {r["id"] for r in id_rows}
+            unknown_ids = sorted(keep_id_set - row_id_set)
+            if unknown_ids:
                 raise HTTPException(
                     status_code=400,
-                    detail=(
-                        f"keep_ids périmé ou incomplet : le groupe de doublons "
-                        f"'{g['value']}' doit avoir exactement 1 id à conserver dans "
-                        f"keep_ids ({len(matched)} trouvé(s)). Relancez l'analyse de "
-                        f"doublons avant de réessayer."
-                    ),
+                    detail=f"keep_ids contient des id hors du périmètre filtré actuel : {unknown_ids}.",
                 )
-        _, removed_ids = pipeline_engine.dedupe_manual(id_rows, body.column, body.keep_ids)
-    else:
-        if body.keep not in ("first", "complete"):
-            raise HTTPException(status_code=400, detail="keep invalide (attendu 'first' ou 'complete').")
-        _, removed_ids = pipeline_engine.dedupe_rule(id_rows, body.column, keep=body.keep)
+            for g in dup_groups:
+                matched = keep_id_set & set(g["row_ids"])
+                if len(matched) != 1:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"keep_ids périmé ou incomplet : le groupe de doublons "
+                            f"'{g['value']}' doit avoir exactement 1 id à conserver dans "
+                            f"keep_ids ({len(matched)} trouvé(s)). Relancez l'analyse de "
+                            f"doublons avant de réessayer."
+                        ),
+                    )
+            _, removed_ids = pipeline_engine.dedupe_manual(id_rows, body.column, body.keep_ids)
+        else:
+            if body.keep not in ("first", "complete"):
+                raise HTTPException(status_code=400, detail="keep invalide (attendu 'first' ou 'complete').")
+            _, removed_ids = pipeline_engine.dedupe_rule(id_rows, body.column, keep=body.keep)
 
-    n_removed = delete_pipeline_rows(ctx.client, session_id, removed_ids)
-    session = get_pipeline_session(ctx.client, session_id)
-    return {
-        "session_id": session_id,
-        "column": body.column,
-        "mode": body.mode,
-        "n_removed": n_removed,
-        "row_count": session["row_count"] if session else None,
-    }
+        n_removed = delete_pipeline_rows(ctx.client, session_id, removed_ids)
+        session = get_pipeline_session(ctx.client, session_id)
+        return {
+            "session_id": session_id,
+            "column": body.column,
+            "mode": body.mode,
+            "n_removed": n_removed,
+            "row_count": session["row_count"] if session else None,
+        }
+    finally:
+        unlock_pipeline_dedupe(ctx.client, session_id)
 
 
 # ---------------------------------------------------------------

@@ -4,6 +4,7 @@ app.dependency_overrides plutôt qu'en remplaçant trieur.db lui-même :
 les endpoints appellent les VRAIES fonctions de trieur/db.py, avec un
 faux client Supabase en entrée."""
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -172,6 +173,38 @@ class _FakePostgrest:
                 if session is not None:
                     session["row_count"] = max(0, session["row_count"] + params["p_delta"])
                 return SimpleNamespace(data=[{"adjust_pipeline_row_count": session["row_count"]}] if session else [])
+
+            return SimpleNamespace(execute=_execute)
+        # Reproduit trieur_data.try_lock_pipeline_dedupe / unlock_pipeline_dedupe
+        # (migration 0013) : verrou court par UPDATE ... WHERE atomique, voir
+        # trieur/db.py:try_lock_pipeline_dedupe. Pas de vraie concurrence dans ce
+        # faux client synchrone : le verrou est simulé fidèlement (un verrou déjà
+        # posé et non expiré bloque un 2e claim) pour que les tests puissent
+        # vérifier le comportement, mais aucun test n'exécute deux requêtes en
+        # parallèle ici.
+        if name == "try_lock_pipeline_dedupe":
+            def _execute():
+                session = next(
+                    (r for r in self.tables.get("pipeline_sessions", []) if r["id"] == params["p_session_id"]), None,
+                )
+                if session is None:
+                    return SimpleNamespace(data=False)
+                lock_at = session.get("dedupe_lock_at")
+                ttl = params.get("p_ttl_seconds", 30)
+                if lock_at is not None and (datetime.now(timezone.utc) - lock_at).total_seconds() < ttl:
+                    return SimpleNamespace(data=False)
+                session["dedupe_lock_at"] = datetime.now(timezone.utc)
+                return SimpleNamespace(data=True)
+
+            return SimpleNamespace(execute=_execute)
+        if name == "unlock_pipeline_dedupe":
+            def _execute():
+                session = next(
+                    (r for r in self.tables.get("pipeline_sessions", []) if r["id"] == params["p_session_id"]), None,
+                )
+                if session is not None:
+                    session["dedupe_lock_at"] = None
+                return SimpleNamespace(data=None)
 
             return SimpleNamespace(execute=_execute)
         raise NotImplementedError(f"RPC non simulé dans ce faux client : {name}")
@@ -1963,6 +1996,52 @@ def test_pipeline_dedupe_rule_first_removes_all_but_the_first_per_value(client_f
     remaining = fake.postgrest.tables["pipeline_rows"]
     assert len(remaining) == 2
     assert [r["data"]["NOM"] for r in remaining] == ["Dupont", "Martin"]
+
+
+def test_pipeline_dedupe_concurrent_call_on_same_session_is_409_not_a_race(client_factory):
+    """Migration 0013 (revue Copilot, PR #25) : un dédoublonnage déjà en
+    cours sur une session doit rejeter un 2e appel plutôt que de laisser
+    deux requêtes analyser le même groupe et supprimer chacune la ligne
+    que l'autre voulait garder. Simule la concurrence en posant le verrou
+    manuellement avant l'appel HTTP, comme le ferait une 1re requête
+    encore en cours."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\nDupont2,x@y.com\nMartin,z@y.com\n",
+    )
+    session = next(r for r in fake.postgrest.tables["pipeline_sessions"] if r["id"] == session_id)
+    session["dedupe_lock_at"] = datetime.now(timezone.utc)
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "rule", "keep": "first"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 409
+    remaining = fake.postgrest.tables["pipeline_rows"]
+    assert len(remaining) == 3, "rien ne doit être supprimé quand le verrou est déjà pris"
+
+
+def test_pipeline_dedupe_releases_lock_after_success_so_a_later_call_works(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\nDupont2,x@y.com\nMartin,z@y.com\n",
+    )
+    first = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "rule", "keep": "first"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert first.status_code == 200
+
+    second = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "NOM", "mode": "rule", "keep": "first"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert second.status_code == 200, "le verrou doit être libéré après un appel réussi"
 
 
 def test_pipeline_dedupe_rule_complete_keeps_fullest_row(client_factory):

@@ -73,10 +73,21 @@ async function safeFetch(url: string, init: RequestInit): Promise<Response> {
 // brute hors ApiError sur cette 2e moitié de la requête (revue Copilot,
 // PR #28).
 async function safeReadJson<T>(res: Response): Promise<T> {
+  // res.json() confond deux choses : la LECTURE du corps (peut échouer sur
+  // coupure réseau) et son PARSING (peut échouer sur un JSON invalide --
+  // proxy qui renvoie du HTML, réponse serveur malformée...). Les séparer
+  // pour ne pas accuser à tort la connexion d'une réponse serveur
+  // défaillante (revue Copilot, PR #28).
+  let text: string
   try {
-    return (await res.json()) as T
+    text = await res.text()
   } catch {
     throw new ApiError(0, NETWORK_ERROR_MESSAGE)
+  }
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    throw new ApiError(res.status, "Réponse du serveur invalide.")
   }
 }
 

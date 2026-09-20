@@ -696,9 +696,14 @@ def append_pipeline_rows(client: Client, session_id: str, rows: list[dict], star
         for i, row in enumerate(rows)
     ]
     _td(client, "pipeline_rows").insert(payload).execute()
-    session = get_pipeline_session(client, session_id)
-    new_count = (session["row_count"] if session else 0) + len(rows)
-    _td(client, "pipeline_sessions").update({"row_count": new_count}).eq("id", session_id).execute()
+    # UPDATE atomique côté SQL (migration 0012), même RPC et même raison
+    # que delete_pipeline_rows : un read (get_pipeline_session) puis write
+    # séparés laisserait deux imports par lots concurrents sur la même
+    # session lire le même ancien compteur et écraser le travail l'un de
+    # l'autre au lieu de s'additionner.
+    client.postgrest.schema("trieur_data").rpc(
+        "adjust_pipeline_row_count", {"p_session_id": session_id, "p_delta": len(rows)}
+    ).execute()
     return len(rows)
 
 

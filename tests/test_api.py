@@ -1322,6 +1322,36 @@ def test_pipeline_session_create_rejects_oversized_upload_before_parsing(client_
     assert not fake.postgrest.tables["pipeline_sessions"]
 
 
+def test_pipeline_session_create_rejects_upload_with_unknown_size():
+    """Même défense en profondeur que sur POST /orgs/{org_id}/import (voir
+    test_import_rejects_upload_with_unknown_size) : un .size indisponible
+    est refusé plutôt que silencieusement compté à 0 octet -- sinon
+    `await f.read()` juste après matérialise le fichier en mémoire malgré
+    le plafond (revue Copilot, PR #28). Appel direct de l'endpoint
+    (impossible à simuler via TestClient, qui calcule toujours une vraie
+    taille pendant le parsing multipart)."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from api import main as api_main
+
+    fake = _make_client()
+    ctx = api_main.get_current_ctx(authorization=f"Bearer {TOKEN}", client=fake)
+    ctx = api_main.require_org_access("org-1", ctx)
+
+    fake_upload = SimpleNamespace(size=None, filename="clients.csv")
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            api_main.create_pipeline_session_endpoint(org_id="org-1", files=[fake_upload], ctx=ctx)
+        )
+
+    assert exc_info.value.status_code == 413
+    assert "indéterminable" in exc_info.value.detail
+    assert not fake.postgrest.tables["pipeline_sessions"]
+
+
 def test_pipeline_session_create_stages_rows_and_detects_columns(client_factory):
     fake = _make_client()
     tc = client_factory(fake)

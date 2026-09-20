@@ -913,7 +913,18 @@ async def create_pipeline_session_endpoint(
     # plafond ne protège rien, chaque fichier est déjà entièrement
     # matérialisé en mémoire par le moment où la somme est comparée --
     # exactement la défaillance qu'il doit éviter (revue Copilot, PR #28).
-    total_bytes = sum((f.size or 0) for f in files)
+    if any(f.size is None for f in files):
+        # Starlette initialise toujours UploadFile.size dès la lecture du
+        # multipart (vérifié sur MultiPartParser) -- si jamais absent, on
+        # refuse plutôt que de compter silencieusement 0 octet : un total
+        # sous-estimé contournerait ce plafond ET laisserait passer
+        # `await f.read()` juste après sur un fichier arbitrairement
+        # volumineux (revue Copilot, PR #28).
+        raise HTTPException(
+            status_code=413,
+            detail="Taille de fichier indéterminable -- réessayez l'import.",
+        )
+    total_bytes = sum(f.size for f in files)
     if total_bytes > PIPELINE_MAX_UPLOAD_BYTES:
         # Rejeté AVANT le parsing pandas/openpyxl (voir
         # PIPELINE_MAX_UPLOAD_BYTES) : un fichier trop volumineux fait

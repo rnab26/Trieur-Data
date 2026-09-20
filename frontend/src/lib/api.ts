@@ -41,6 +41,16 @@ function handleUnauthorized() {
   void supabase.auth.signOut()
 }
 
+// Message générique -- ce wrapper couvre TOUTES les requêtes de ce
+// client (dashboard, listes, export, import...), pas seulement l'import
+// de fichiers : un avertissement "ne quitte pas la page pendant
+// l'import" serait faux/trompeur sur un simple GET. L'avertissement
+// spécifique à l'import reste affiché dans Tab2ImportMapping.tsx
+// pendant que l'upload est actif -- pas ici (revue Copilot, PR #28).
+const NETWORK_ERROR_MESSAGE =
+  "Connexion interrompue -- vérifie ta connexion et ne quitte pas cette page (ni un autre "
+  + "onglet/appli) tant qu'une action est en cours, puis réessaie."
+
 // `fetch` lui-même peut échouer sans jamais renvoyer de Response --
 // connexion coupée en cours d'envoi (page mise en arrière-plan sur
 // mobile : le navigateur suspend/tue la requête), page/appli quittée,
@@ -52,11 +62,29 @@ async function safeFetch(url: string, init: RequestInit): Promise<Response> {
   try {
     return await fetch(url, init)
   } catch {
-    throw new ApiError(
-      0,
-      "Connexion interrompue pendant l'envoi -- vérifie ta connexion et ne quitte pas cette page "
-      + '(ni un autre onglet/appli) tant que l\'import est en cours, puis réessaie.',
-    )
+    throw new ApiError(0, NETWORK_ERROR_MESSAGE)
+  }
+}
+
+// Une connexion peut aussi être coupée APRÈS avoir reçu les en-têtes de
+// la Response, pendant la lecture du corps (res.json()/res.blob()) --
+// safeFetch ne voit rien de ça (la promesse de fetch() s'est déjà
+// résolue). Sans ce wrapper, la même coupure produit encore une erreur
+// brute hors ApiError sur cette 2e moitié de la requête (revue Copilot,
+// PR #28).
+async function safeReadJson<T>(res: Response): Promise<T> {
+  try {
+    return (await res.json()) as T
+  } catch {
+    throw new ApiError(0, NETWORK_ERROR_MESSAGE)
+  }
+}
+
+async function safeReadBlob(res: Response): Promise<Blob> {
+  try {
+    return await res.blob()
+  } catch {
+    throw new ApiError(0, NETWORK_ERROR_MESSAGE)
   }
 }
 
@@ -66,7 +94,7 @@ async function throwForErrorResponse(res: Response): Promise<never> {
     const body = await res.json()
     detail = body.detail ?? detail
   } catch {
-    // pas de corps JSON -- on garde le statusText
+    // pas de corps JSON (ou lecture coupée) -- on garde le statusText
   }
   if (res.status === 401) {
     handleUnauthorized()
@@ -88,7 +116,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     return throwForErrorResponse(res)
   }
   if (res.status === 204) return undefined as T
-  return res.json() as Promise<T>
+  return safeReadJson<T>(res)
 }
 
 export type Organization = {
@@ -248,7 +276,7 @@ async function importRequest<T>(
   if (!res.ok) {
     return throwForErrorResponse(res)
   }
-  return res.json() as Promise<T>
+  return safeReadJson<T>(res)
 }
 
 export type SavedView = {
@@ -362,7 +390,7 @@ export async function exportRecords(
   if (!res.ok) {
     return throwForErrorResponse(res)
   }
-  const blob = await res.blob()
+  const blob = await safeReadBlob(res)
   const disposition = res.headers.get('content-disposition') ?? ''
   const match = /filename="?([^"]+)"?/.exec(disposition)
   const filename = match ? match[1] : `export.${opts.format}`
@@ -566,7 +594,7 @@ async function uploadPipelineFiles<T>(orgId: string, files: File[]): Promise<T> 
   if (!res.ok) {
     return throwForErrorResponse(res)
   }
-  return res.json() as Promise<T>
+  return safeReadJson<T>(res)
 }
 
 // Plusieurs fichiers fusionnés en UNE session -- restaure le
@@ -736,7 +764,7 @@ export async function exportPipelineSessionRows(
   if (!res.ok) {
     return throwForErrorResponse(res)
   }
-  const blob = await res.blob()
+  const blob = await safeReadBlob(res)
   const disposition = res.headers.get('content-disposition') ?? ''
   const match = /filename="?([^"]+)"?/.exec(disposition)
   const serverFilename = match ? match[1] : `export_pipeline.${opts.format}`

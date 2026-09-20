@@ -1513,6 +1513,150 @@ def test_pipeline_mapping_apply_rekeys_rows_and_marks_mapped(client_factory):
     assert session["status"] == "mapped"
 
 
+def test_pipeline_mapping_reapply_on_already_mapped_session_is_409(client_factory):
+    """Trouvaille Copilot, PR #27 : merge_mapped_row retire `_sheet` des
+    données à la 1re application. Sans ce garde, un retry (double clic,
+    requête rejouée) regrouperait toutes les lignes sous "" -- ne
+    correspondant plus à aucun onglet du mapping fourni -- et les
+    supprimerait TOUTES via la boucle d'exclusion. Rejeté avant."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_csv(tc, "org-1", b"NOM\nDupont\n").json()["session_id"]
+
+    first = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {"clients": {"NOM": "NOM"}}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert first.status_code == 200
+
+    second = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {"clients": {"NOM": "NOM"}}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert second.status_code == 409
+    # La ligne mappée par le 1er appel doit rester intacte.
+    rows = fake.postgrest.tables["pipeline_rows"]
+    assert len(rows) == 1
+    assert rows[0]["data"] == {"NOM": "Dupont"}
+
+
+def test_pipeline_mapping_dry_run_still_works_on_a_mapped_session(client_factory):
+    """dry_run reste autorisé après coup (lecture seule, jamais d'écriture) --
+    seule l'application réelle est bloquée sur une session déjà mappée."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_csv(tc, "org-1", b"NOM\nDupont\n").json()["session_id"]
+    tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {"clients": {"NOM": "NOM"}}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"dry_run": True},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+
+
+def test_pipeline_mapping_unknown_sheet_key_is_400_and_deletes_nothing(client_factory):
+    """Trouvaille Copilot, PR #27 : un mapping référençant une clé d'onglet
+    inexistante (typo côté client) laissait tous les VRAIS onglets sans
+    assignation (absents du dict fourni) -> tous supprimés silencieusement,
+    réponse "mapped" à zéro ligne. Rejeté avant toute mutation."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_csv(tc, "org-1", b"NOM\nDupont\nMartin\n").json()["session_id"]
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {"onglet-qui-nexiste-pas": {"NOM": "NOM"}}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+    rows = fake.postgrest.tables["pipeline_rows"]
+    assert len(rows) == 2, "aucune ligne ne doit être supprimée sur un mapping invalide"
+    session = get_pipeline_session_via_api(tc, session_id)
+    assert session["status"] == "importing", "la session ne doit pas passer à 'mapped' sur un rejet"
+
+
+def test_pipeline_mapping_excludes_one_of_two_sheets_across_multiple_batches(client_factory, monkeypatch):
+    """Trouvaille Copilot, PR #27 : un onglet exclu supprimait toutes ses
+    lignes en un seul appel .in_("id", ...) -- risque de dépasser les
+    limites de taille de requête sur les gros volumes. Vérifie que
+    l'exclusion fonctionne intégralement même sur plus d'un lot
+    (PIPELINE_APPEND_BATCH réduit ici pour tester sans générer un vrai
+    fichier de centaines de lignes)."""
+    from api import main as api_main
+
+    monkeypatch.setattr(api_main, "PIPELINE_APPEND_BATCH", 2)
+
+    fake = _make_client()
+    tc = client_factory(fake)
+    content_a = b"NOM\n" + b"\n".join(f"A{i}".encode() for i in range(5)) + b"\n"
+    content_b = b"NOM\nGarde\n"
+    upload = tc.post(
+        "/orgs/org-1/pipeline/sessions",
+        files=[
+            ("files", ("a.csv", content_a, "text/csv")),
+            ("files", ("b.csv", content_b, "text/csv")),
+        ],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    ).json()
+    session_id = upload["session_id"]
+    # Deux fichiers -> clés préfixées par le nom de fichier (voir
+    # _parse_and_merge_pipeline_files) : on les lit dans la réponse plutôt
+    # que de deviner le format exact.
+    sheet_keys = {s["sheet_key"] for s in upload["sheets"]}
+    sheet_key_b = next(k for k in sheet_keys if "b.csv" in k)
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {sheet_key_b: {"NOM": "NOM"}}},  # "a" absent -> exclu, 5 lignes sur 3 lots de 2
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["n_rows_excluded"] == 5
+    assert body["n_rows_updated"] == 1
+
+    rows = fake.postgrest.tables["pipeline_rows"]
+    assert len(rows) == 1
+    assert rows[0]["data"] == {"NOM": "Garde"}
+
+
+def test_pipeline_session_create_cleans_up_if_row_count_rpc_fails(client_factory, monkeypatch):
+    """Trouvaille Copilot, PR #27 : si le RPC final adjust_pipeline_row_count
+    échoue APRÈS que tous les lots aient bien été insérés, la session
+    restait en base avec toutes ses lignes mais row_count à 0 et le
+    statut 'importing' -- invisible jusqu'au TTL (24h). Nettoyée
+    maintenant avant de renvoyer 500."""
+    from api import main as api_main
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("panne réseau simulée sur le compteur final")
+
+    monkeypatch.setattr(api_main, "adjust_pipeline_row_count", _boom)
+
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/pipeline/sessions",
+        files=[("files", ("clients.csv", b"NOM\nDupont\n", "text/csv"))],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 500
+    assert not any(
+        r.get("source_filename") == "clients.csv" for r in fake.postgrest.tables["pipeline_sessions"]
+    ), "la session ne doit pas rester visible avec row_count à 0 jusqu'au TTL"
+    # Cascade réelle des lignes vers la session supprimée : garantie par la
+    # contrainte FK (migration 0010), pas simulée dans ce faux client.
+
+
 def get_pipeline_session_via_api(tc, session_id):
     return tc.get(f"/orgs/org-1/pipeline/sessions/{session_id}", headers={"Authorization": f"Bearer {TOKEN}"}).json()
 

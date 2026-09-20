@@ -719,6 +719,18 @@ IBAN_DETECTION_SAMPLE_SIZE = 1000
 # un unique insert de plusieurs centaines de milliers de lignes à
 # PostgREST en un seul appel HTTP.
 PIPELINE_APPEND_BATCH = 500
+# Plafond de lignes chargées pour calculer une SUGGESTION de mapping
+# (dry_run, ou repli quand aucun mapping explicite n'est fourni) --
+# distinct du chargement complet nécessaire pour APPLIQUER un mapping
+# (qui doit forcément réécrire chaque ligne). Sans ce plafond, un simple
+# dry_run (appelé automatiquement par le frontend juste après chaque
+# import, avant même que l'utilisateur ait pu regarder quoi que ce soit)
+# matérialisait toute la session en mémoire -- risque réel d'épuisement
+# mémoire sur les gros volumes documentés (>600 000 lignes). Un onglet
+# entièrement au-delà de ce plafond n'aura simplement pas de suggestion
+# automatique (l'utilisateur mappe à la main) -- dégradation, jamais une
+# perte de données.
+PIPELINE_SUGGESTION_ROW_CAP = 3000
 
 
 def _parse_pipeline_file(filename: str, content: bytes) -> dict[str, pd.DataFrame]:
@@ -920,7 +932,23 @@ async def create_pipeline_session_endpoint(
             status_code=500,
             detail="Échec de l'import (un ou plusieurs lots n'ont pas pu être enregistrés). Réessayez.",
         ) from failures[0]
-    adjust_pipeline_row_count(ctx.client, session["id"], len(rows))
+    try:
+        adjust_pipeline_row_count(ctx.client, session["id"], len(rows))
+    except Exception as exc:
+        # Même raison que le nettoyage ci-dessus (revue Copilot, PR #27) :
+        # si CE dernier appel échoue après que toutes les lignes ont bien
+        # été insérées, la session resterait sinon en base avec toutes ses
+        # lignes mais row_count à 0 et le statut "importing" -- invisible
+        # comme "en cours d'import" jusqu'au TTL (24h) au lieu d'échouer
+        # proprement maintenant.
+        try:
+            delete_pipeline_session(ctx.client, session["id"])
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=500,
+            detail="Échec de l'import (mise à jour du compteur). Réessayez.",
+        ) from exc
 
     master_cols = get_org_master_columns(ctx.client, org_id)
     return {
@@ -1178,26 +1206,64 @@ def apply_pipeline_mapping(
     session = _get_pipeline_session_or_404(ctx, org_id, session_id)
     master_cols = get_org_master_columns(ctx.client, org_id)
 
-    # Toute la session est chargée (comme /rows et /export ci-dessus) :
-    # le mapping doit voir chaque onglet en entier, pas juste les 10
-    # premières lignes globales -- une session à plusieurs onglets aurait
-    # sinon ses onglets suivants complètement invisibles à la suggestion.
-    all_rows = _all_pipeline_rows(ctx.client, session_id)
-    sheets_data = _sheet_data_by_key(all_rows)
+    # Une session déjà mappée ne peut plus être re-mappée : merge_mapped_row
+    # retire `_sheet` des données à la 1re application, donc un retry (double
+    # clic, requête rejouée) regrouperait toutes les lignes sous une seule
+    # clé vide "" -- ne correspondant plus à aucun onglet du mapping fourni,
+    # ce qui les ferait TOUTES supprimer par la boucle d'exclusion plus bas
+    # (revue Copilot, PR #27). `dry_run` reste autorisé à tout moment (lecture
+    # seule, jamais d'écriture).
+    if not body.dry_run and session["status"] != "importing":
+        raise HTTPException(
+            status_code=409,
+            detail="Cette session a déjà été mappée (ou n'est plus au statut 'importing') -- rechargez la page.",
+        )
 
-    suggestion: dict[str, dict[str, str]] = {}
-    for sheet_key, sheet_rows in sheets_data.items():
-        real_columns = _detected_columns([r["data"] for r in sheet_rows])
+    def _sheet_suggestion(sheet_rows: list[dict]) -> dict[str, str]:
         sample_df = (
             pd.DataFrame([_without_sheet_key(r["data"]) for r in sheet_rows[:PIPELINE_PREVIEW_SIZE]])
             if sheet_rows else None
         )
-        suggestion[sheet_key] = auto_assign_columns_fast(real_columns, master_cols, sheet_df=sample_df)
+        return auto_assign_columns_fast(_detected_columns([r["data"] for r in sheet_rows]), master_cols, sheet_df=sample_df)
 
     if body.dry_run:
+        # Suggestion seule : PAS besoin de charger toute la session (voir
+        # PIPELINE_SUGGESTION_ROW_CAP) -- ce endpoint est appelé
+        # automatiquement par le frontend juste après CHAQUE import, avant
+        # même que l'utilisateur ait pu regarder quoi que ce soit. Charger
+        # l'intégralité ici matérialisait toute la session en mémoire pour
+        # une simple suggestion, risque réel sur les gros volumes
+        # documentés (>600 000 lignes) -- revue Copilot, PR #27.
+        sample_rows = list_pipeline_rows(ctx.client, session_id, limit=PIPELINE_SUGGESTION_ROW_CAP)
+        sheets_sample = _sheet_data_by_key(sample_rows)
+        suggestion = {sheet_key: _sheet_suggestion(sheet_rows) for sheet_key, sheet_rows in sheets_sample.items()}
         return {"session_id": session_id, "suggested_mapping": suggestion}
 
-    mapping_by_sheet = body.mapping if body.mapping is not None else suggestion
+    # Application réelle : chaque ligne doit être réécrite, la session
+    # entière est donc forcément chargée ici (contrairement au dry_run
+    # ci-dessus) -- le mapping doit voir chaque onglet en entier, pas
+    # juste un échantillon, sinon des lignes resteraient non mappées.
+    all_rows = _all_pipeline_rows(ctx.client, session_id)
+    sheets_data = _sheet_data_by_key(all_rows)
+
+    if body.mapping is not None:
+        # Une clé d'onglet qui ne correspond à AUCUN onglet réel de cette
+        # session (typo cliente, session périmée) laisserait sinon TOUS
+        # les vrais onglets sans assignation (absents du dict fourni) et
+        # donc TOUS supprimés par la boucle d'exclusion plus bas, avec une
+        # réponse "mapped" à zéro ligne -- rejeté avant toute mutation
+        # plutôt que de laisser ça se produire silencieusement (revue
+        # Copilot, PR #27).
+        unknown_keys = sorted(set(body.mapping) - set(sheets_data))
+        if unknown_keys:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Mapping fourni pour des onglets absents de cette session : {unknown_keys}.",
+            )
+        mapping_by_sheet = body.mapping
+    else:
+        mapping_by_sheet = {sheet_key: _sheet_suggestion(sheet_rows) for sheet_key, sheet_rows in sheets_data.items()}
+
     if not any(
         m and m != "(non assigne)"
         for sheet_map in mapping_by_sheet.values()
@@ -1235,8 +1301,16 @@ def apply_pipeline_mapping(
             # sans aucune assignation : exclu de la base fusionnée, comme
             # "Aucune colonne assignée, ignoré" / l'étape [3] de la
             # référence -- ses lignes de staging sont retirées plutôt que
-            # de rester à moitié mappées.
-            n_excluded += delete_pipeline_rows(ctx.client, session_id, [r["id"] for r in sheet_rows])
+            # de rester à moitié mappées. Par LOTS bornés (même taille que
+            # l'import, PIPELINE_APPEND_BATCH) : un seul .in_("id", ...)
+            # avec les ids de tout un onglet dépasserait les limites de
+            # taille de requête PostgREST sur les gros volumes documentés
+            # (>600 000 lignes) -- revue Copilot, PR #27.
+            sheet_ids = [r["id"] for r in sheet_rows]
+            for start in range(0, len(sheet_ids), PIPELINE_APPEND_BATCH):
+                n_excluded += delete_pipeline_rows(
+                    ctx.client, session_id, sheet_ids[start:start + PIPELINE_APPEND_BATCH],
+                )
             continue
 
         applied_mapping[sheet_key] = sheet_map

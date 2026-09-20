@@ -645,12 +645,21 @@ def test_import_rejects_oversized_upload_before_reading(client_factory, monkeypa
     la lecture -- pas juste le code retour."""
     from api import main as api_main
 
+    from starlette.datastructures import UploadFile
+
     monkeypatch.setattr(api_main, "PIPELINE_MAX_UPLOAD_BYTES", 10)
 
     def _boom(*args, **kwargs):
         raise AssertionError("pd.read_csv ne doit jamais être atteint après le rejet 413")
 
+    async def _boom_read(*args, **kwargs):
+        raise AssertionError(
+            "UploadFile.read ne doit jamais être atteint après le rejet 413 -- "
+            "sinon le fichier est chargé en mémoire malgré le plafond."
+        )
+
     monkeypatch.setattr(api_main.pd, "read_csv", _boom)
+    monkeypatch.setattr(UploadFile, "read", _boom_read)
 
     fake = _make_client()
     tc = client_factory(fake)

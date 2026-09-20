@@ -1643,6 +1643,324 @@ def test_pipeline_export_wrong_org_is_404(client_factory):
 
 
 # ---------------------------------------------------------------
+# Pipeline : mapping fidèle (première valeur non vide, Source Data,
+# IBAN) -- voir api/pipeline_mapping.py, règles portées de
+# views/tab2_import_mapping.py.
+# ---------------------------------------------------------------
+
+def test_pipeline_mapping_first_non_empty_value_wins_on_collision(client_factory):
+    """Deux colonnes source vers la même colonne maître : la PREMIÈRE
+    valeur non vide gagne (jamais "la dernière écrase") -- même règle
+    que views/tab2_import_mapping.py, cf api/pipeline_mapping.py."""
+    fake = _make_client(
+        organizations=[{"id": "org-1", "slug": "leads", "name": "Leads", "master_columns": ["NOM", "TELEPHONE MOBILE"]}],
+    )
+    tc = client_factory(fake)
+    session_id = _upload_csv(tc, "org-1", b"nom,tel1,tel2\nDupont,,0601020304\n").json()["session_id"]
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {"nom": "NOM", "tel1": "TELEPHONE MOBILE", "tel2": "TELEPHONE MOBILE"}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    rows = fake.postgrest.tables["pipeline_rows"]
+    assert rows[0]["data"] == {"NOM": "Dupont", "TELEPHONE MOBILE": "0601020304"}
+
+
+def test_pipeline_mapping_sets_source_data_automatically(client_factory):
+    fake = _make_client(
+        organizations=[{"id": "org-1", "slug": "leads", "name": "Leads", "master_columns": ["NOM", "Source Data"]}],
+    )
+    tc = client_factory(fake)
+    session_id = _upload_csv(tc, "org-1", b"nom\nDupont\n", filename="clients.csv").json()["session_id"]
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {"nom": "NOM"}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    rows = fake.postgrest.tables["pipeline_rows"]
+    assert rows[0]["data"]["Source Data"] == "clients.csv (clients)"
+
+
+def test_pipeline_mapping_cleans_iban_spaces_and_reports_invalid_checksum(client_factory):
+    fake = _make_client()  # master_columns = ["NOM", "IBAN"]
+    tc = client_factory(fake)
+    session_id = _upload_csv(
+        tc, "org-1", b"NOM,IBAN\nDupont,FR76 3000 6000 0112 3456 7890 189\nMartin,FR0000000000000000000000000\n",
+    ).json()["session_id"]
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {"NOM": "NOM", "IBAN": "IBAN"}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["iban_columns_detected"] == ["IBAN"]
+    assert len(body["iban_warnings"]) == 1
+    assert body["iban_warnings"][0]["column"] == "IBAN"
+    assert body["iban_warnings"][0]["n_invalid"] == 1
+    assert len(body["iban_warnings"][0]["sample_row_ids"]) == 1
+
+    rows = {r["data"]["NOM"]: r["data"]["IBAN"] for r in fake.postgrest.tables["pipeline_rows"]}
+    # Espaces internes retirés, checksum FR7630006000011234567890189 valide.
+    assert rows["Dupont"] == "FR7630006000011234567890189"
+    assert rows["Martin"] == "FR0000000000000000000000000"
+
+
+# ---------------------------------------------------------------
+# Pipeline : filtre multi-critères groupes OU / critères ET (`groups`,
+# format EXACT de trieur/filters.py:apply_filter_groups) -- le "cœur
+# métier" de l'onglet 3, absent de l'API avant ce portage.
+# ---------------------------------------------------------------
+
+def test_pipeline_rows_groups_filter_departements_and_or(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1",
+        b"NOM,CP,VILLE\nA,34000,Montpellier\nB,71000,Lyon\nC,71000,Macon\nD,75001,Paris\n",
+    )
+    groups = [
+        [{"column": "CP", "kind": "departements", "values": ["34"]}],
+        [
+            {"column": "CP", "kind": "departements", "values": ["71"]},
+            {"column": "VILLE", "kind": "valeurs", "values": ["Lyon"]},
+        ],
+    ]
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"groups": json.dumps(groups)},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert {r["NOM"] for r in body["rows"]} == {"A", "B"}
+    assert body["count"] == 2
+
+
+def test_pipeline_rows_invalid_groups_json_is_400(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(tc, "org-1", b"NOM\nDupont\n")
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"groups": "not-json"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_pipeline_export_groups_filter(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(tc, "org-1", b"NOM,CP\nA,34000\nB,75001\n")
+    groups = [[{"column": "CP", "kind": "departements", "values": ["34"]}]]
+
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/export",
+        params={"format": "csv", "groups": json.dumps(groups)},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    content = res.content.decode("utf-8-sig")
+    assert "A" in content
+    assert "B" not in content
+
+
+# ---------------------------------------------------------------
+# Pipeline : détection et suppression de doublons (onglet 3, le "cœur
+# métier" -- trieur/filters.py, porté via api/pipeline_engine.py).
+# ---------------------------------------------------------------
+
+def test_pipeline_duplicates_detects_groups_and_suggests_most_complete(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\n,x@y.com\nMartin,z@y.com\n",
+    )
+
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/duplicates",
+        params={"column": "EMAIL"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["group_count"] == 1
+    assert body["duplicate_row_count"] == 2
+    group = body["groups"][0]
+    assert group["value"] == "x@y.com"
+    assert len(group["row_ids"]) == 2
+    assert group["suggested_keep_id"] in group["row_ids"]
+
+
+def test_pipeline_duplicates_no_duplicates_is_empty(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\nMartin,z@y.com\n")
+
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/duplicates",
+        params={"column": "EMAIL"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.json()["groups"] == []
+
+
+def test_pipeline_dedupe_rule_first_removes_all_but_the_first_per_value(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\nDupont2,x@y.com\nMartin,z@y.com\n",
+    )
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "rule", "keep": "first"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["n_removed"] == 1
+    assert body["row_count"] == 2
+
+    remaining = fake.postgrest.tables["pipeline_rows"]
+    assert len(remaining) == 2
+    assert [r["data"]["NOM"] for r in remaining] == ["Dupont", "Martin"]
+
+
+def test_pipeline_dedupe_rule_complete_keeps_fullest_row(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,EMAIL,VILLE\nDupont,x@y.com,\nDupontComplet,x@y.com,Paris\n",
+    )
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "rule", "keep": "complete"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    remaining = fake.postgrest.tables["pipeline_rows"]
+    assert [r["data"]["NOM"] for r in remaining] == ["DupontComplet"]
+
+
+def test_pipeline_dedupe_manual_keeps_chosen_row_per_group(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\nDupont2,x@y.com\n",
+    )
+    analysis = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/duplicates",
+        params={"column": "EMAIL"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    ).json()
+    keep_id = analysis["groups"][0]["row_ids"][1]
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "manual", "keep_ids": [keep_id]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.json()["n_removed"] == 1
+    remaining = fake.postgrest.tables["pipeline_rows"]
+    assert len(remaining) == 1
+    assert remaining[0]["id"] == keep_id
+
+
+def test_pipeline_dedupe_manual_without_keep_ids_is_400(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\nDupont2,x@y.com\n")
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "manual", "keep_ids": []},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_pipeline_dedupe_invalid_mode_is_400(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\n")
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "n_importe_quoi"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_pipeline_dedupe_respects_active_filter_scope(client_factory):
+    """Comme l'onglet 3 (dedup appliqué sur `filtered_df`, jamais sur les
+    lignes déjà exclues par le filtre) : une ligne hors du filtre actif
+    n'est jamais supprimée, même si elle ferait doublon."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,EMAIL,VILLE\nA,x@y.com,Paris\nB,x@y.com,Lyon\n",
+    )
+    groups = [[{"column": "VILLE", "kind": "valeurs", "values": ["Paris"]}]]
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "rule", "keep": "first", "groups": groups},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.json()["n_removed"] == 0
+    assert len(fake.postgrest.tables["pipeline_rows"]) == 2
+
+
+def test_pipeline_duplicates_wrong_org_is_404(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\n")
+    fake.postgrest.tables["pipeline_sessions"][0]["org_id"] = "org-2"
+
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/duplicates",
+        params={"column": "EMAIL"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 404
+
+
+# ---------------------------------------------------------------
+# Pipeline : import PDF (relevés SEPA, trieur/io_pdf.py) -- routage
+# vérifié via monkeypatch (pas de vrai PDF de test disponible, voir
+# tests/test_sepa.py pour la logique d'extraction elle-même).
+# ---------------------------------------------------------------
+
+def test_parse_pipeline_file_routes_pdf_to_sepa_reader(monkeypatch):
+    import pandas as pd
+
+    from api import main as api_main
+
+    called = {}
+
+    def _fake_read_pdf_sepa(file_obj, filename):
+        called["filename"] = filename
+        return {"PDF": pd.DataFrame([{"Montant": 41.66}])}, []
+
+    monkeypatch.setattr(api_main, "read_pdf_sepa", _fake_read_pdf_sepa)
+    sheets = api_main._parse_pipeline_file("releve.pdf", b"contenu-pdf-quelconque")
+
+    assert called["filename"] == "releve.pdf"
+    assert list(sheets.keys()) == ["PDF"]
+
+
+# ---------------------------------------------------------------
 # Jeux de colonnes maîtres personnels (compte, /me/column-sets*)
 # ---------------------------------------------------------------
 

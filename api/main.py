@@ -48,6 +48,7 @@ from trieur.db import (
     get_pipeline_session,
     get_record,
     import_dataframe,
+    is_pipeline_dedupe_lock_owner,
     list_all_records,
     list_chantier_messages,
     list_chantier_todos,
@@ -1287,6 +1288,21 @@ def apply_pipeline_dedupe(
                 raise HTTPException(status_code=400, detail="keep invalide (attendu 'first' ou 'complete').")
             _, removed_ids = pipeline_engine.dedupe_rule(id_rows, body.column, keep=body.keep)
 
+        # Revérifie qu'on est TOUJOURS propriétaire du verrou juste avant
+        # le DELETE (migration 0015) : le calcul ci-dessus peut avoir
+        # dépassé la TTL, auquel cas un autre appel a pu reprendre le
+        # verrou entretemps -- continuer sur cette analyse périmée
+        # supprimerait des lignes incohérentes avec ce nouvel appel en
+        # cours. Réduit la fenêtre de course de toute la durée de
+        # l'opération à l'instant entre cette revérification et le DELETE.
+        if not is_pipeline_dedupe_lock_owner(ctx.client, session_id, lock_owner):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Le dédoublonnage a pris trop de temps et un autre appel a repris la main "
+                    "sur cette session entretemps, rien n'a été supprimé. Réessayez."
+                ),
+            )
         n_removed = delete_pipeline_rows(ctx.client, session_id, removed_ids)
         session = get_pipeline_session(ctx.client, session_id)
         return {

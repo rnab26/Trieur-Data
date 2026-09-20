@@ -785,6 +785,20 @@ def try_lock_pipeline_dedupe(client: Client, session_id: str, owner: str, ttl_se
     return bool(res.data)
 
 
+def is_pipeline_dedupe_lock_owner(client: Client, session_id: str, owner: str) -> bool:
+    """Revérifie, juste avant le DELETE (voir migration 0015), que
+    `owner` est TOUJOURS le propriétaire du verrou -- si un dédoublonnage
+    a dépassé sa TTL pendant son calcul, un autre appel a pu reprendre le
+    verrou entretemps ; continuer sur une analyse devenue périmée
+    supprimerait des lignes incohérentes avec le nouvel appel en cours.
+    Réduit la fenêtre de course de toute la durée de l'opération à
+    l'instant entre cet appel et le DELETE qui le suit immédiatement."""
+    res = client.postgrest.schema("trieur_data").rpc(
+        "is_pipeline_dedupe_lock_owner", {"p_session_id": session_id, "p_owner": owner}
+    ).execute()
+    return bool(res.data)
+
+
 def unlock_pipeline_dedupe(client: Client, session_id: str, owner: str) -> None:
     """Libère le verrou posé par `try_lock_pipeline_dedupe`, à appeler
     dans un `finally` pour ne jamais laisser une session verrouillée par

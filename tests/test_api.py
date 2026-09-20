@@ -212,6 +212,18 @@ class _FakePostgrest:
                 return SimpleNamespace(data=None)
 
             return SimpleNamespace(execute=_execute)
+        # Reproduit trieur_data.is_pipeline_dedupe_lock_owner (migration
+        # 0015) : revérification juste avant le DELETE que l'appelant est
+        # toujours propriétaire du verrou, voir trieur/db.py:is_pipeline_dedupe_lock_owner.
+        if name == "is_pipeline_dedupe_lock_owner":
+            def _execute():
+                session = next(
+                    (r for r in self.tables.get("pipeline_sessions", []) if r["id"] == params["p_session_id"]), None,
+                )
+                is_owner = session is not None and session.get("dedupe_lock_owner") == params["p_owner"]
+                return SimpleNamespace(data=is_owner)
+
+            return SimpleNamespace(execute=_execute)
         raise NotImplementedError(f"RPC non simulé dans ce faux client : {name}")
 
     def auth(self, _token):
@@ -2084,6 +2096,46 @@ def test_pipeline_dedupe_expired_owner_cannot_unlock_a_newer_owner(client_factor
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert third.status_code == 409
+
+
+def test_pipeline_dedupe_lock_stolen_mid_operation_deletes_nothing(client_factory, monkeypatch):
+    """Migration 0015 (revue Copilot sur la migration 0014 elle-même) :
+    le jeton propriétaire empêche une requête périmée de libérer le
+    verrou d'une requête plus récente, mais ne protège pas à lui seul
+    l'opération entière. Simule un calcul de dédoublonnage si long qu'un
+    autre appel reprend le verrou (TTL dépassée) AVANT le DELETE :
+    l'appel en cours doit détecter qu'il n'est plus propriétaire à la
+    revérification et abandonner sans rien supprimer."""
+    from api import main as api_main
+
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\nDupont2,x@y.com\nMartin,z@y.com\n",
+    )
+
+    real_dedupe_rule = api_main.pipeline_engine.dedupe_rule
+
+    def _steal_lock_then_dedupe(*args, **kwargs):
+        # Simule une autre requête qui réclame le verrou pendant que
+        # celle-ci calcule encore -- la TTL a expiré entretemps côté réel,
+        # ici on le simule directement en changeant le propriétaire.
+        session = next(
+            r for r in fake.postgrest.tables["pipeline_sessions"] if r["id"] == session_id
+        )
+        session["dedupe_lock_owner"] = "owner-du-nouvel-appel"
+        return real_dedupe_rule(*args, **kwargs)
+
+    monkeypatch.setattr(api_main.pipeline_engine, "dedupe_rule", _steal_lock_then_dedupe)
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "rule", "keep": "first"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 409
+    remaining = fake.postgrest.tables["pipeline_rows"]
+    assert len(remaining) == 3, "rien ne doit être supprimé si le verrou a changé de propriétaire entretemps"
 
 
 def test_pipeline_dedupe_rule_complete_keeps_fullest_row(client_factory):

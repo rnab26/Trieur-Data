@@ -18,9 +18,10 @@ const PREVIEW_COLS_MAX = 8
 //
 // Écarts volontaires par rapport au Python, dictés par le contrat API déjà
 // en place (api/main.py, section "Pipeline Trieur de Data") :
-//   - UN seul fichier par session (pas de multi-fichiers ni Google Sheets) --
-//     POST .../pipeline/sessions ne prend qu'un `file`. Un fichier
-//     multi-onglets reste supporté (fusionné en une seule session).
+//   - Pas de Google Sheets (URL publique) -- seuls Excel/CSV/PDF sont
+//     supportés par POST .../pipeline/sessions. Plusieurs fichiers, un
+//     fichier multi-onglets : tout est fusionné en une seule session,
+//     comme l'original (st.file_uploader(accept_multiple_files=True)).
 //   - Import PDF (relevés SEPA) supporté par le même endpoint (voir
 //     api/main.py:_parse_pipeline_file), donc proposé ici aussi.
 //   - Le mapping est GLOBAL à la session (pas par onglet source) -- déjà
@@ -55,13 +56,13 @@ export function Tab2ImportMapping({
   const [building, setBuilding] = useState(false)
   const [buildError, setBuildError] = useState<string | null>(null)
 
-  async function handleFileChange(file: File | null) {
-    if (!file) return
+  async function handleFilesChange(files: File[]) {
+    if (!files.length) return
     setUploading(true)
     setUploadElapsedSec(0)
     setUploadError(null)
     setBuildError(null)
-    // La création de session lit/écrit le fichier ENTIER de façon
+    // La création de session lit/écrit le(s) fichier(s) ENTIER(S) de façon
     // synchrone côté serveur -- pas de vraie progression connue à
     // l'avance. Un chrono texte suffit tant que l'attente reste de
     // l'ordre de quelques secondes (voir mesure PROJECT_LOG.md).
@@ -70,7 +71,7 @@ export function Tab2ImportMapping({
       setUploadElapsedSec(Math.floor((Date.now() - startedAt) / 1000))
     }, 1000)
     try {
-      const data = await createPipelineSession(orgId, file)
+      const data = await createPipelineSession(orgId, files)
       onSessionCreated(data)
       await loadSuggestion(data.session_id)
     } catch (err) {
@@ -145,14 +146,15 @@ export function Tab2ImportMapping({
       {!session && (
         <div className="flex flex-col gap-3">
           <p className="text-sm text-[var(--muted)]">
-            Déposez un fichier Excel, CSV ou PDF (relevé de prélèvements). Le fichier n'est pas
-            encore écrit définitivement : cette session reste temporaire (24h) jusqu'à la
-            construction de la base ci-dessous.
+            Déposez un ou plusieurs fichiers Excel, CSV ou PDF (relevé de prélèvements) -- ils
+            sont fusionnés en une seule base de travail. Rien n'est encore écrit définitivement :
+            cette session reste temporaire (24h) jusqu'à la construction de la base ci-dessous.
           </p>
           <input
             type="file"
             accept=".csv,.xlsx,.xls,.pdf"
-            onChange={(e) => void handleFileChange(e.target.files?.[0] ?? null)}
+            multiple
+            onChange={(e) => void handleFilesChange(Array.from(e.target.files ?? []))}
             className="text-sm"
           />
           <p className="text-xs text-[var(--muted)]">

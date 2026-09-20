@@ -707,6 +707,36 @@ def append_pipeline_rows(client: Client, session_id: str, rows: list[dict], star
     return len(rows)
 
 
+def insert_pipeline_rows_only(client: Client, session_id: str, rows: list[dict], start_index: int = 0) -> int:
+    """Même INSERT que `append_pipeline_rows`, mais SANS mettre à jour
+    `row_count` -- réservé au chemin rapide de l'import initial
+    (POST .../pipeline/sessions), qui insère plusieurs lots EN PARALLÈLE
+    (voir api/main.py) et fait un seul `adjust_pipeline_row_count` final
+    pour la totalité, au lieu d'un aller-retour RPC par lot. N'appelle
+    JAMAIS ça pour un ajout isolé (la session resterait avec un
+    row_count incohérent) -- utilise `append_pipeline_rows` dans ce cas."""
+    if not rows:
+        return 0
+    payload = [
+        {"session_id": session_id, "row_index": start_index + i, "data": row}
+        for i, row in enumerate(rows)
+    ]
+    _td(client, "pipeline_rows").insert(payload).execute()
+    return len(rows)
+
+
+def adjust_pipeline_row_count(client: Client, session_id: str, delta: int) -> None:
+    """Appelle le RPC atomique `adjust_pipeline_row_count` (migration
+    0012) directement -- utilisé après `insert_pipeline_rows_only` pour
+    régler `row_count` en UN seul appel une fois tous les lots insérés,
+    au lieu d'un aller-retour par lot comme le fait `append_pipeline_rows`."""
+    if delta == 0:
+        return
+    client.postgrest.schema("trieur_data").rpc(
+        "adjust_pipeline_row_count", {"p_session_id": session_id, "p_delta": delta}
+    ).execute()
+
+
 def list_pipeline_rows(client: Client, session_id: str, limit: int = LIST_PAGE_SIZE, offset: int = 0) -> list[dict]:
     """Lignes d'une session de pipeline, dans l'ordre du fichier importé
     d'origine (`row_index`, pas l'ordre d'insertion Postgres) -- même

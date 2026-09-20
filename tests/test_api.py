@@ -1201,7 +1201,7 @@ def test_chantier_todo_unknown_id_is_404(client_factory):
 def _upload_csv(tc, org_id, content: bytes, filename="clients.csv"):
     return tc.post(
         f"/orgs/{org_id}/pipeline/sessions",
-        files={"file": (filename, content, "text/csv")},
+        files={"files": (filename, content, "text/csv")},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
 
@@ -1228,6 +1228,70 @@ def test_pipeline_session_create_stages_rows_and_detects_columns(client_factory)
     rows = fake.postgrest.tables["pipeline_rows"]
     assert len(rows) == 2
     assert all(r["session_id"] == session_id for r in rows)
+
+
+def test_pipeline_session_create_merges_multiple_files_into_one_session(client_factory):
+    """Restaure le multi-fichiers de l'original Streamlit
+    (st.file_uploader(accept_multiple_files=True), views/tab2_import_mapping.py) --
+    régression signalée par l'utilisateur : un seul fichier sélectionnable
+    dans le premier portage React. Plusieurs fichiers, même colonnes,
+    doivent fusionner en UNE session avec toutes les lignes."""
+    fake = _make_client()
+    tc = client_factory(fake)
+
+    res = tc.post(
+        "/orgs/org-1/pipeline/sessions",
+        files=[
+            ("files", ("fichier1.csv", b"NOM,EMAIL\nDupont,d@x.com\n", "text/csv")),
+            ("files", ("fichier2.csv", b"NOM,EMAIL\nMartin,m@x.com\nDurand,du@x.com\n", "text/csv")),
+        ],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["row_count"] == 3
+    assert {r["NOM"] for r in body["preview_rows"]} == {"Dupont", "Martin", "Durand"}
+
+    # Une seule session en base, avec TOUTES les lignes des deux fichiers.
+    session_id = body["session_id"]
+    rows = fake.postgrest.tables["pipeline_rows"]
+    assert len(rows) == 3
+    assert all(r["session_id"] == session_id for r in rows)
+
+    session = next(r for r in fake.postgrest.tables["pipeline_sessions"] if r["id"] == session_id)
+    assert session["source_filename"] == "2 fichiers (fichier1.csv, fichier2.csv)"
+    assert session["row_count"] == 3
+
+
+def test_pipeline_session_create_inserts_all_rows_across_parallel_batches(client_factory):
+    """Import rapide (revue de l'utilisateur -- import trop lent) :
+    insertion de plusieurs LOTS (PIPELINE_APPEND_BATCH=500) EN PARALLÈLE
+    (asyncio.gather/to_thread), avec un seul row_count final au lieu d'un
+    par lot. Vérifie qu'aucune ligne n'est perdue ni dupliquée sur un
+    fichier qui déclenche plusieurs lots, et que le row_count final est
+    exact malgré l'insertion concurrente."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    n_rows = 1200  # 3 lots de 500/500/200
+    content = b"NOM\n" + b"\n".join(f"L{i}".encode() for i in range(n_rows)) + b"\n"
+
+    res = tc.post(
+        "/orgs/org-1/pipeline/sessions",
+        files=[("files", ("gros_fichier.csv", content, "text/csv"))],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["row_count"] == n_rows
+
+    session_id = body["session_id"]
+    rows = fake.postgrest.tables["pipeline_rows"]
+    assert len(rows) == n_rows
+    assert len({r["id"] for r in rows}) == n_rows, "pas de doublon d'id malgré l'insertion parallèle"
+    assert {r["row_index"] for r in rows} == set(range(n_rows)), "aucune ligne perdue, index continu"
+
+    session = next(r for r in fake.postgrest.tables["pipeline_sessions"] if r["id"] == session_id)
+    assert session["row_count"] == n_rows, "un seul appel final au compteur, pas un par lot"
 
 
 def test_pipeline_session_create_cleans_up_expired_sessions_of_same_org_first(client_factory):
@@ -1279,7 +1343,7 @@ def test_pipeline_session_unreadable_file_is_400(client_factory):
     tc = client_factory(fake)
     res = tc.post(
         "/orgs/org-1/pipeline/sessions",
-        files={"file": ("clients.xlsx", b"pas un vrai xlsx", "application/octet-stream")},
+        files={"files": ("clients.xlsx", b"pas un vrai xlsx", "application/octet-stream")},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 400
@@ -1434,7 +1498,7 @@ def test_pipeline_mapping_unknown_session_is_404(client_factory):
 
 def test_pipeline_requires_auth(client_factory):
     tc = client_factory(_make_client())
-    res = tc.post("/orgs/org-1/pipeline/sessions", files={"file": ("a.csv", b"NOM\nX\n", "text/csv")})
+    res = tc.post("/orgs/org-1/pipeline/sessions", files={"files": ("a.csv", b"NOM\nX\n", "text/csv")})
     assert res.status_code == 401
 
 

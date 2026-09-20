@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
@@ -31,6 +32,7 @@ from trieur.db import (
     add_chantier_message,
     add_chantier_todo,
     add_org_master_columns,
+    adjust_pipeline_row_count,
     append_pipeline_rows,
     count_records,
     create_chantier,
@@ -48,6 +50,7 @@ from trieur.db import (
     get_pipeline_session,
     get_record,
     import_dataframe,
+    insert_pipeline_rows_only,
     is_pipeline_dedupe_lock_owner,
     list_all_records,
     list_chantier_messages,
@@ -737,6 +740,32 @@ def _parse_pipeline_file(filename: str, content: bytes) -> dict[str, pd.DataFram
     return sheets
 
 
+def _parse_and_merge_pipeline_files(files: list[tuple[str, bytes]]) -> dict[str, pd.DataFrame]:
+    """Lit PLUSIEURS fichiers et fusionne tous leurs onglets en un seul
+    dict -- équivalent de la boucle `for f in files` de
+    views/tab2_import_mapping.py::render (st.file_uploader(...,
+    accept_multiple_files=True)), un seul fichier restant le cas
+    particulier à 1 élément. Les clés (`_sheet` posé ensuite par
+    `_merge_pipeline_sheets`) sont préfixées par le nom de fichier dès
+    qu'il y en a plus d'un, pour ne jamais faire collision entre deux
+    fichiers Excel qui auraient chacun un onglet nommé pareil (ex.
+    "Feuil1") -- même souci que le "[FIX doublons de nom]" de l'original,
+    réglé ici en dédupliquant la clé finale plutôt que le nom affiché."""
+    combined: dict[str, pd.DataFrame] = {}
+    used_keys: set[str] = set()
+    multi = len(files) > 1
+    for filename, content in files:
+        for sheet_name, df in _parse_pipeline_file(filename, content).items():
+            key = f"{filename} :: {sheet_name}" if multi else sheet_name
+            base_key, n = key, 2
+            while key in used_keys:
+                key = f"{base_key} ({n})"
+                n += 1
+            used_keys.add(key)
+            combined[key] = df
+    return combined
+
+
 def _merge_pipeline_sheets(sheets: dict[str, pd.DataFrame]) -> tuple[list[dict], list[str]]:
     """Fusionne tous les onglets lus en une seule liste de lignes à mettre
     en staging, et renvoie (lignes, colonnes détectées -- union dans
@@ -785,20 +814,21 @@ def _detected_columns(rows: list[dict]) -> list[str]:
 @app.post("/orgs/{org_id}/pipeline/sessions")
 async def create_pipeline_session_endpoint(
     org_id: str,
-    file: UploadFile = File(...),
+    files: list[UploadFile] = File(...),
     ctx: AuthCtx = Depends(require_org_access),
 ):
-    """Ouvre une session de pipeline : lit le fichier, met les lignes en
-    staging (trieur_data.pipeline_rows, TTL 24h), et renvoie un aperçu +
-    les colonnes détectées pour l'étape de mapping suivante. N'écrit
-    jamais dans trieur_data.records (donnée permanente) -- ça reste la
-    validation finale du pipeline, pas encore portée ici."""
-    content = await file.read()
-    filename = file.filename or "import"
-    sheets = _parse_pipeline_file(filename, content)
+    """Ouvre une session de pipeline : lit UN OU PLUSIEURS fichiers (comme
+    st.file_uploader(accept_multiple_files=True) de l'onglet 2 d'origine,
+    voir views/tab2_import_mapping.py), fusionne tous leurs onglets en une
+    seule session de staging (trieur_data.pipeline_rows, TTL 24h), et
+    renvoie un aperçu + les colonnes détectées pour l'étape de mapping
+    suivante. N'écrit jamais dans trieur_data.records (donnée permanente)
+    -- ça reste la validation finale du pipeline, pas encore portée ici."""
+    parsed = [(f.filename or "import", await f.read()) for f in files]
+    sheets = _parse_and_merge_pipeline_files(parsed)
     rows, columns = _merge_pipeline_sheets(sheets)
     if not rows:
-        raise HTTPException(status_code=400, detail="Fichier vide ou sans ligne exploitable.")
+        raise HTTPException(status_code=400, detail="Fichier(s) vide(s) ou sans ligne exploitable.")
 
     # Nettoyage opportuniste des sessions expirées de CET org avant d'en
     # ouvrir une nouvelle (revue PR #24, point #8 -- voir docstring de
@@ -810,11 +840,28 @@ async def create_pipeline_session_endpoint(
     except Exception:
         pass
 
-    session = create_pipeline_session(ctx.client, org_id, ctx.user.id, source_filename=filename)
-    for start in range(0, len(rows), PIPELINE_APPEND_BATCH):
-        append_pipeline_rows(
-            ctx.client, session["id"], rows[start:start + PIPELINE_APPEND_BATCH], start_index=start,
-        )
+    source_label = (
+        parsed[0][0] if len(parsed) == 1 else f"{len(parsed)} fichiers ({', '.join(f for f, _ in parsed[:3])}{'…' if len(parsed) > 3 else ''})"
+    )
+    session = create_pipeline_session(ctx.client, org_id, ctx.user.id, source_filename=source_label)
+
+    # Import rapide : tous les lots insérés EN PARALLÈLE (asyncio.gather +
+    # to_thread, le client Supabase est synchrone) au lieu d'un aller-retour
+    # séquentiel par lot -- puis UN SEUL appel RPC pour tout le compteur à
+    # la fin, au lieu d'un par lot (voir insert_pipeline_rows_only). Pour un
+    # fichier de plusieurs milliers de lignes, ça change l'import de
+    # plusieurs dizaines d'allers-retours réseau séquentiels à une poignée
+    # en parallèle -- cause réelle de lenteur signalée par l'utilisateur,
+    # mesurée avant ce correctif (revue PR #26 après merge).
+    batches = [
+        (start, rows[start:start + PIPELINE_APPEND_BATCH])
+        for start in range(0, len(rows), PIPELINE_APPEND_BATCH)
+    ]
+    await asyncio.gather(*(
+        asyncio.to_thread(insert_pipeline_rows_only, ctx.client, session["id"], batch, start)
+        for start, batch in batches
+    ))
+    adjust_pipeline_row_count(ctx.client, session["id"], len(rows))
 
     master_cols = get_org_master_columns(ctx.client, org_id)
     return {

@@ -517,10 +517,10 @@ export type PipelineSessionCreated = {
 // raison que importRequest ci-dessus : rester autonome plutôt que de
 // partager un helper générique qui devrait gérer deux formes de champs
 // différentes.
-async function uploadPipelineFile<T>(orgId: string, file: File): Promise<T> {
+async function uploadPipelineFiles<T>(orgId: string, files: File[]): Promise<T> {
   const headers = await authHeader()
   const form = new FormData()
-  form.set('file', file)
+  for (const file of files) form.append('files', file)
   const res = await fetch(`${API_URL}/orgs/${orgId}/pipeline/sessions`, {
     method: 'POST',
     headers,
@@ -532,8 +532,12 @@ async function uploadPipelineFile<T>(orgId: string, file: File): Promise<T> {
   return res.json() as Promise<T>
 }
 
-export function createPipelineSession(orgId: string, file: File) {
-  return uploadPipelineFile<PipelineSessionCreated>(orgId, file)
+// Plusieurs fichiers fusionnés en UNE session -- restaure le
+// st.file_uploader(accept_multiple_files=True) de l'onglet 2 d'origine
+// (views/tab2_import_mapping.py), perdu dans le premier portage React
+// (un seul fichier sélectionnable, régression signalée par l'utilisateur).
+export function createPipelineSession(orgId: string, files: File[]) {
+  return uploadPipelineFiles<PipelineSessionCreated>(orgId, files)
 }
 
 export type PipelineMappingSuggestion = {

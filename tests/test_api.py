@@ -160,6 +160,22 @@ class _FakePostgrest:
     def table(self, name):
         return _FakeTable(self.tables.setdefault(name, []), name=name)
 
+    def rpc(self, name, params):
+        # Reproduit trieur_data.adjust_pipeline_row_count (migration 0012) :
+        # UPDATE atomique de row_count -- voir trieur/db.py:delete_pipeline_rows.
+        # `rpc()` renvoie un objet chaînable avec `.execute()`, comme postgrest-py.
+        if name == "adjust_pipeline_row_count":
+            def _execute():
+                session = next(
+                    (r for r in self.tables.get("pipeline_sessions", []) if r["id"] == params["p_session_id"]), None,
+                )
+                if session is not None:
+                    session["row_count"] = max(0, session["row_count"] + params["p_delta"])
+                return SimpleNamespace(data=[{"adjust_pipeline_row_count": session["row_count"]}] if session else [])
+
+            return SimpleNamespace(execute=_execute)
+        raise NotImplementedError(f"RPC non simulé dans ce faux client : {name}")
+
     def auth(self, _token):
         return self
 

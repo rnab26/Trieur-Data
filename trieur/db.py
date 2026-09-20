@@ -748,9 +748,15 @@ def delete_pipeline_rows(client: Client, session_id: str, row_ids: list[str]) ->
     )
     n_deleted = len(res.data or [])
     if n_deleted:
-        session = get_pipeline_session(client, session_id)
-        new_count = max(0, (session["row_count"] if session else 0) - n_deleted)
-        _td(client, "pipeline_sessions").update({"row_count": new_count}).eq("id", session_id).execute()
+        # UPDATE atomique côté SQL (migration 0012) -- PAS un
+        # read (get_pipeline_session) puis write séparés comme avant :
+        # deux suppressions concurrentes sur la même session liraient le
+        # même ancien compteur et écriraient chacune "ancien - n",
+        # laissant row_count au-dessus du nombre réel de lignes
+        # restantes. Voir trieur_data.adjust_pipeline_row_count.
+        client.postgrest.schema("trieur_data").rpc(
+            "adjust_pipeline_row_count", {"p_session_id": session_id, "p_delta": -n_deleted}
+        ).execute()
     return n_deleted
 
 

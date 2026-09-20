@@ -138,6 +138,23 @@ class _FakePostgrest:
     def table(self, name):
         return _FakeTable(self._store, name)
 
+    def rpc(self, name, params):
+        # Reproduit trieur_data.adjust_pipeline_row_count (migration 0012) :
+        # UPDATE atomique de row_count -- la seule fonction SQL exercée
+        # par ces tests (delete_pipeline_rows), voir trieur/db.py. `rpc()`
+        # renvoie un objet chaînable avec `.execute()`, comme postgrest-py.
+        if name == "adjust_pipeline_row_count":
+            def _execute():
+                session = next(
+                    (r for r in self._store["pipeline_sessions"] if r["id"] == params["p_session_id"]), None,
+                )
+                if session is not None:
+                    session["row_count"] = max(0, session["row_count"] + params["p_delta"])
+                return SimpleNamespace(data=[{"adjust_pipeline_row_count": session["row_count"]}] if session else [])
+
+            return SimpleNamespace(execute=_execute)
+        raise NotImplementedError(f"RPC non simulé dans ce faux client : {name}")
+
 
 class _FakeClient:
     def __init__(self):
@@ -233,6 +250,38 @@ def test_delete_pipeline_rows_removes_only_listed_ids_and_updates_row_count():
     remaining = list_pipeline_rows(client, session["id"])
     assert [r["data"]["NOM"] for r in remaining] == ["B"]
     assert get_pipeline_session(client, session["id"])["row_count"] == 1
+
+
+def test_delete_pipeline_rows_row_count_ignores_stale_session_snapshot(monkeypatch):
+    """Correctif revue Copilot PR #25 (#6) : AVANT, delete_pipeline_rows
+    recalculait row_count à partir d'un get_pipeline_session() lu à part,
+    puis réécrivait "ancien - n" -- deux suppressions "concurrentes" qui
+    liraient toutes les deux le MÊME ancien compteur avant que l'autre
+    n'ait écrit laisseraient row_count au-dessus du nombre réel de
+    lignes restantes (perte silencieuse, pas juste temporairement faux).
+    Ce test force get_pipeline_session à toujours renvoyer un row_count
+    périmé (figé au moment de l'appel, jamais rafraîchi) et vérifie que
+    le compteur final reste correct malgré tout : la preuve que le calcul
+    passe désormais par un UPDATE atomique côté SQL
+    (trieur_data.adjust_pipeline_row_count, migration 0012), pas par un
+    READ + WRITE Python séparés. Avec l'ancien code, ce test échouerait
+    (row_count final = 3 au lieu de 2 : la 2e suppression, lisant encore
+    "4" via le mock, écraserait "4 - 1 = 3" au lieu d'accumuler)."""
+    import trieur.db as db
+
+    client = _FakeClient()
+    session = create_pipeline_session(client, "org-1", "user-1")
+    append_pipeline_rows(client, session["id"], [{"NOM": f"L{i}"} for i in range(4)])
+    rows = list_pipeline_rows(client, session["id"])
+
+    stale_snapshot = dict(get_pipeline_session(client, session["id"]))  # row_count = 4
+    monkeypatch.setattr(db, "get_pipeline_session", lambda c, sid: dict(stale_snapshot))
+
+    db.delete_pipeline_rows(client, session["id"], [rows[0]["id"]])  # -1
+    db.delete_pipeline_rows(client, session["id"], [rows[1]["id"]])  # -1
+
+    final_row_count = client.store["pipeline_sessions"][0]["row_count"]
+    assert final_row_count == 2
 
 
 def test_delete_pipeline_rows_empty_list_is_a_noop():

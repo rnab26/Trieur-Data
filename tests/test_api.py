@@ -1727,6 +1727,44 @@ def test_pipeline_mapping_cleans_iban_spaces_and_reports_invalid_checksum(client
     assert rows["Martin"] == "FR0000000000000000000000000"
 
 
+def test_pipeline_mapping_detects_iban_column_with_generic_name_beyond_preview_size(client_factory):
+    """Trouvaille Copilot PR #25 (#3, sévérité moyenne) : la détection
+    IBAN par CONTENU ne scannait avant que PIPELINE_PREVIEW_SIZE (10)
+    lignes -- une colonne au nom générique ("Compte") dont les vraies
+    valeurs IBAN commencent après la ligne 10 n'était jamais détectée.
+    Ici : 10 lignes de "bruit" (pas des IBAN) suivies de 45 lignes IBAN
+    valides (espaces internes) -- 45/55 = 81,8% de la session ressemble à
+    un IBAN, largement au-dessus du seuil de detect_iban_column (80%),
+    mais 0% des 10 premières lignes. Doit quand même être détectée et
+    nettoyée sur TOUTE la session, pas seulement l'aperçu."""
+    fake = _make_client(
+        organizations=[{"id": "org-1", "slug": "leads", "name": "Leads", "master_columns": ["NOM", "Compte"]}],
+    )
+    tc = client_factory(fake)
+
+    lines = ["NOM,Compte"]
+    for i in range(10):
+        lines.append(f"Bruit{i},valeur-non-iban-{i}")
+    for i in range(45):
+        lines.append(f"Client{i},FR76 3000 6000 0112 3456 7890 189")
+    content = ("\n".join(lines) + "\n").encode()
+
+    session_id = _upload_csv(tc, "org-1", content).json()["session_id"]
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {"NOM": "NOM", "Compte": "Compte"}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["iban_columns_detected"] == ["Compte"]
+
+    rows = {r["data"]["NOM"]: r["data"]["Compte"] for r in fake.postgrest.tables["pipeline_rows"]}
+    # Espaces internes retirés sur une ligne bien après la 10e -- preuve
+    # que le nettoyage/la détection a bien porté sur toute la session.
+    assert rows["Client44"] == "FR7630006000011234567890189"
+
+
 # ---------------------------------------------------------------
 # Pipeline : filtre multi-critères groupes OU / critères ET (`groups`,
 # format EXACT de trieur/filters.py:apply_filter_groups) -- le "cœur
@@ -1765,6 +1803,83 @@ def test_pipeline_rows_invalid_groups_json_is_400(client_factory):
     res = tc.get(
         f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
         params={"groups": "not-json"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_pipeline_rows_malformed_groups_structure_is_400_not_500(client_factory):
+    """Trouvaille Copilot PR #25 (#1, sévérité haute) : un `groups` dont
+    la structure ne respecte pas le format attendu (ex: un GROUPE envoyé
+    comme un objet au lieu d'une liste de critères) atteignait
+    apply_filter_groups (trieur/filters.py) et y faisait planter
+    `c.get(...)` (AttributeError sur un str) -- 500 au lieu d'une 400
+    propre. Le cas ["column":"CP"] à la place de [[{"column":"CP",...}]]."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(tc, "org-1", b"NOM,CP\nA,34000\n")
+
+    # Un groupe qui est un objet (dict) au lieu d'une liste de critères.
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"groups": json.dumps([{"column": "CP"}])},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+    # Un critère qui n'est pas un objet.
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"groups": json.dumps([["CP"]])},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+    # `values` d'un mauvais type (pas une liste).
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"groups": json.dumps([[{"column": "CP", "kind": "departements", "values": "34"}]])},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+    # `kind` hors des valeurs attendues.
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"groups": json.dumps([[{"column": "CP", "kind": "n_importe_quoi", "values": ["34"]}]])},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_pipeline_rows_incomplete_group_is_still_ignored_gracefully(client_factory):
+    """Un groupe/critère juste INCOMPLET (colonne ou valeurs pas encore
+    choisies côté écran, ex: `values: []`) n'est PAS une erreur -- même
+    comportement documenté par trieur/filters.py:apply_filter_groups
+    (ignoré, pas de filtre actif), la validation ne doit pas le rejeter."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(tc, "org-1", b"NOM,CP\nA,34000\nB,75001\n")
+
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"groups": json.dumps([[{"column": "CP", "kind": "departements", "values": []}]])},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.json()["count"] == 2
+
+
+def test_pipeline_dedupe_malformed_groups_body_is_400(client_factory):
+    """Même validation côté POST .../dedupe (body.groups, pas la query
+    string `groups` des GET) -- même structure malformée, même 400."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\n")
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "rule", "keep": "first", "groups": [{"column": "CP"}]},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 400
@@ -1903,6 +2018,62 @@ def test_pipeline_dedupe_manual_without_keep_ids_is_400(client_factory):
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 400
+
+
+def test_pipeline_dedupe_manual_group_uncovered_by_keep_ids_is_400_and_deletes_nothing(client_factory):
+    """Trouvaille Copilot PR #25 (#2, sévérité haute) : si un groupe de
+    doublons de l'analyse filtrée actuelle n'a AUCUN id dans `keep_ids`
+    (analyse périmée, sélection incomplète côté écran), l'ancien code
+    laissait dedupe_dataframe_manual ne garder AUCUNE ligne de ce groupe
+    -- perte de données. Ici, 2 groupes de doublons (EMAIL) mais
+    `keep_ids` ne couvre que le 1er : la requête doit être rejetée en
+    400 et RIEN ne doit être supprimé (les 4 lignes doivent toutes
+    encore être là après)."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1",
+        b"NOM,EMAIL\nDupont,x@y.com\nDupont2,x@y.com\nMartin,z@y.com\nMartin2,z@y.com\n",
+    )
+    analysis = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/duplicates",
+        params={"column": "EMAIL"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    ).json()
+    assert analysis["group_count"] == 2
+    # Ne couvre que le groupe x@y.com, pas z@y.com.
+    covered_group = next(g for g in analysis["groups"] if g["value"] == "x@y.com")
+    keep_id = covered_group["row_ids"][0]
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "manual", "keep_ids": [keep_id]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+    remaining = fake.postgrest.tables["pipeline_rows"]
+    assert len(remaining) == 4  # rien supprimé
+
+
+def test_pipeline_dedupe_manual_keep_id_from_wrong_group_is_400(client_factory):
+    """`keep_ids` contient un id qui n'appartient à AUCUN groupe de
+    doublons (ex: id d'une ligne unique, ou d'une autre session) : rejeté
+    aussi, plutôt que silencieusement ignoré."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\nDupont2,x@y.com\nSeul,unique@y.com\n",
+    )
+    rows = fake.postgrest.tables["pipeline_rows"]
+    unique_row_id = next(r["id"] for r in rows if r["data"]["EMAIL"] == "unique@y.com")
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "manual", "keep_ids": [unique_row_id]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+    assert len(fake.postgrest.tables["pipeline_rows"]) == 3
 
 
 def test_pipeline_dedupe_invalid_mode_is_400(client_factory):

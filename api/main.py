@@ -328,6 +328,49 @@ def _parse_col_filters(raw: str) -> dict:
     return parsed
 
 
+_ALLOWED_FILTER_KINDS = {"departements", "valeurs"}
+
+
+def _validate_filter_groups(parsed: list) -> None:
+    """Valide la STRUCTURE de `groups` avant de la transmettre au moteur
+    (trieur/filters.py:apply_filter_groups). Ce moteur ignore déjà
+    gracieusement un groupe/critère incomplet (colonne ou valeurs pas
+    encore choisies, cf sa docstring) -- ce n'est PAS une erreur. Ce qui
+    doit être rejeté ici, c'est une structure qui ferait planter
+    `c.get(...)` dans le moteur (critère qui n'est pas un objet, groupe
+    qui n'est pas une liste) ou un champ mal typé/hors valeurs attendues."""
+    for i, group in enumerate(parsed):
+        if not isinstance(group, list):
+            raise HTTPException(
+                status_code=400, detail=f"groups[{i}] doit être une liste de critères."
+            )
+        for j, criterion in enumerate(group):
+            if not isinstance(criterion, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"groups[{i}][{j}] doit être un objet {{column, kind, values}}.",
+                )
+            column = criterion.get("column")
+            if column is not None and not isinstance(column, str):
+                raise HTTPException(
+                    status_code=400, detail=f"groups[{i}][{j}].column doit être une chaîne."
+                )
+            kind = criterion.get("kind")
+            if kind is not None and kind not in _ALLOWED_FILTER_KINDS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"groups[{i}][{j}].kind invalide (attendu "
+                        f"{sorted(_ALLOWED_FILTER_KINDS)})."
+                    ),
+                )
+            values = criterion.get("values")
+            if values is not None and not isinstance(values, list):
+                raise HTTPException(
+                    status_code=400, detail=f"groups[{i}][{j}].values doit être une liste."
+                )
+
+
 def _parse_filter_groups(raw: str) -> list:
     """`groups` : liste de groupes (OU) de critères (ET), exactement le
     format de trieur/filters.py:apply_filter_groups -- voir
@@ -344,6 +387,7 @@ def _parse_filter_groups(raw: str) -> list:
             status_code=400,
             detail="groups doit être une liste de groupes, chacun une liste de critères.",
         )
+    _validate_filter_groups(parsed)
     return parsed
 
 
@@ -651,6 +695,15 @@ async def import_records(
 # ---------------------------------------------------------------
 
 PIPELINE_PREVIEW_SIZE = 10
+# Taille de l'échantillon utilisé pour la détection IBAN par CONTENU
+# (trieur/matching.py:detect_iban_column) lors du mapping -- volontairement
+# bien plus grand que PIPELINE_PREVIEW_SIZE (qui ne sert qu'à la suggestion
+# de colonnes affichée à l'écran) : une colonne au nom générique ("Compte")
+# dont les vraies valeurs IBAN n'apparaissent qu'après les 10 premières
+# lignes doit quand même être détectée. Alignée sur le plafond interne de
+# detect_iban_column (sample*5 = 1000 lignes lues au maximum) : aller
+# au-delà ne changerait rien à sa détection, donc inutile de charger plus.
+IBAN_DETECTION_SAMPLE_SIZE = 1000
 # Taille de lot pour le staging (append_pipeline_rows) : évite d'envoyer
 # un unique insert de plusieurs centaines de milliers de lignes à
 # PostgREST en un seul appel HTTP.
@@ -1013,15 +1066,23 @@ def apply_pipeline_mapping(
     if not any(m and m != "(non assigne)" for m in mapping.values()):
         raise HTTPException(status_code=400, detail="Aucune colonne assignée dans ce mapping.")
 
-    # Colonnes IBAN (nom OU contenu) détectées sur l'échantillon déjà
-    # mappé -- une seule détection pour toute la session (comme
+    # Colonnes IBAN (nom OU contenu) détectées sur un échantillon dédié
+    # (IBAN_DETECTION_SAMPLE_SIZE, pas le petit `sample` de prévisualisation
+    # ci-dessus) -- une seule détection pour toute la session (comme
     # views/tab2_import_mapping.py sur la base fusionnée), pas relancée
-    # à chaque ligne.
-    mapped_sample = [
+    # à chaque ligne. Un échantillon trop petit raterait une colonne au nom
+    # générique dont les vraies valeurs IBAN n'apparaissent que plus loin
+    # dans le fichier.
+    iban_sample = (
+        sample
+        if len(sample) >= IBAN_DETECTION_SAMPLE_SIZE
+        else list_pipeline_rows(ctx.client, session_id, limit=IBAN_DETECTION_SAMPLE_SIZE)
+    )
+    mapped_iban_sample = [
         merge_mapped_row(_without_sheet_key(r["data"]), mapping, master_cols, None, set())
-        for r in sample
+        for r in iban_sample
     ]
-    iban_masters = detect_iban_master_columns(mapped_sample, master_cols)
+    iban_masters = detect_iban_master_columns(mapped_iban_sample, master_cols)
 
     n_updated = 0
     iban_invalid_counts: dict[str, int] = {}
@@ -1161,6 +1222,7 @@ def apply_pipeline_dedupe(
     _get_pipeline_session_or_404(ctx, org_id, session_id)
     if body.mode not in ("rule", "manual"):
         raise HTTPException(status_code=400, detail="mode invalide (attendu 'rule' ou 'manual').")
+    _validate_filter_groups(body.groups)
 
     all_rows = _all_pipeline_rows(ctx.client, session_id)
     kept = _apply_pipeline_filters(all_rows, body.groups, body.search, body.col_filters)
@@ -1169,6 +1231,36 @@ def apply_pipeline_dedupe(
     if body.mode == "manual":
         if not body.keep_ids:
             raise HTTPException(status_code=400, detail="keep_ids requis en mode 'manual' (1 id par groupe).")
+        # `keep_ids` vient du client, à partir d'une analyse de doublons
+        # potentiellement périmée (filtre changé entretemps, sélection
+        # incomplète côté écran) : on revérifie ICI, sur le périmètre
+        # filtré ACTUEL, qu'il couvre bien CHAQUE groupe de doublons
+        # (exactement 1 id à garder par groupe, et aucun id hors de son
+        # groupe) -- sinon dedupe_dataframe_manual (trieur/filters.py)
+        # ne garderait AUCUNE ligne du groupe non couvert et supprimerait
+        # tout le groupe par erreur. On ne supprime rien tant que ce
+        # n'est pas vérifié.
+        dup_groups = pipeline_engine.duplicate_groups_for_rows(id_rows, body.column)
+        keep_id_set = set(body.keep_ids)
+        row_id_set = {r["id"] for r in id_rows}
+        unknown_ids = sorted(keep_id_set - row_id_set)
+        if unknown_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=f"keep_ids contient des id hors du périmètre filtré actuel : {unknown_ids}.",
+            )
+        for g in dup_groups:
+            matched = keep_id_set & set(g["row_ids"])
+            if len(matched) != 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"keep_ids périmé ou incomplet : le groupe de doublons "
+                        f"'{g['value']}' doit avoir exactement 1 id à conserver dans "
+                        f"keep_ids ({len(matched)} trouvé(s)). Relancez l'analyse de "
+                        f"doublons avant de réessayer."
+                    ),
+                )
         _, removed_ids = pipeline_engine.dedupe_manual(id_rows, body.column, body.keep_ids)
     else:
         if body.keep not in ("first", "complete"):

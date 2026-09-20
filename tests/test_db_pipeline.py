@@ -10,6 +10,7 @@ from trieur.db import (
     append_pipeline_rows,
     create_pipeline_session,
     delete_expired_pipeline_sessions_for_org,
+    delete_pipeline_rows,
     delete_pipeline_session,
     get_pipeline_session,
     list_pipeline_rows,
@@ -56,6 +57,10 @@ class _FakeTable:
         self._filters[field] = value
         return self
 
+    def in_(self, field, values):
+        self._filters[field] = ("in", set(values))
+        return self
+
     def lt(self, field, value):
         self._lt_filters[field] = value
         return self
@@ -81,10 +86,15 @@ class _FakeTable:
         return self
 
     def _matched(self):
+        def _match_one(r, k, v):
+            if isinstance(v, tuple) and v[0] == "in":
+                return r.get(k) in v[1]
+            return r.get(k) == v
+
         return [
             r
             for r in self._store[self._name]
-            if all(r.get(k) == v for k, v in self._filters.items())
+            if all(_match_one(r, k, v) for k, v in self._filters.items())
             and all(r.get(k) is not None and r.get(k) < v for k, v in self._lt_filters.items())
         ]
 
@@ -205,6 +215,49 @@ def test_list_pipeline_rows_ordered_by_row_index_not_insertion_order():
     rows = list_pipeline_rows(client, session["id"])
 
     assert [r["data"]["NOM"] for r in rows] == ["A", "B", "C"]
+
+
+def test_delete_pipeline_rows_removes_only_listed_ids_and_updates_row_count():
+    """Utilisé par la suppression de doublons (onglet 3, api/pipeline_engine.py) :
+    seules les lignes listées disparaissent, `row_count` reflète le
+    nouveau total -- une seule source de vérité pour ce compteur."""
+    client = _FakeClient()
+    session = create_pipeline_session(client, "org-1", "user-1")
+    append_pipeline_rows(client, session["id"], [{"NOM": "A"}, {"NOM": "B"}, {"NOM": "C"}])
+    rows = list_pipeline_rows(client, session["id"])
+    to_remove = [rows[0]["id"], rows[2]["id"]]
+
+    n = delete_pipeline_rows(client, session["id"], to_remove)
+
+    assert n == 2
+    remaining = list_pipeline_rows(client, session["id"])
+    assert [r["data"]["NOM"] for r in remaining] == ["B"]
+    assert get_pipeline_session(client, session["id"])["row_count"] == 1
+
+
+def test_delete_pipeline_rows_empty_list_is_a_noop():
+    client = _FakeClient()
+    session = create_pipeline_session(client, "org-1", "user-1")
+    append_pipeline_rows(client, session["id"], [{"NOM": "A"}])
+
+    n = delete_pipeline_rows(client, session["id"], [])
+
+    assert n == 0
+    assert get_pipeline_session(client, session["id"])["row_count"] == 1
+
+
+def test_delete_pipeline_rows_scoped_to_session_ignores_ids_of_other_sessions():
+    client = _FakeClient()
+    s1 = create_pipeline_session(client, "org-1", "user-1")
+    s2 = create_pipeline_session(client, "org-1", "user-1")
+    append_pipeline_rows(client, s1["id"], [{"NOM": "A"}])
+    append_pipeline_rows(client, s2["id"], [{"NOM": "B"}])
+    other_row_id = list_pipeline_rows(client, s2["id"])[0]["id"]
+
+    n = delete_pipeline_rows(client, s1["id"], [other_row_id])
+
+    assert n == 0
+    assert len(list_pipeline_rows(client, s2["id"])) == 1
 
 
 def test_list_pipeline_rows_paginates_with_limit_and_offset():

@@ -36,6 +36,7 @@ from trieur.db import (
     create_pipeline_session,
     create_section,
     delete_expired_pipeline_sessions_for_org,
+    delete_pipeline_rows,
     delete_record,
     delete_saved_view,
     delete_user_column_set,
@@ -69,7 +70,8 @@ from trieur.db import (
 )
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
 from trieur.io_excel import read_csv_file, read_excel_all_sheets_from_file
-from trieur.matching import apply_header_inference_excel, auto_assign_columns_fast
+from trieur.io_pdf import read_pdf_sepa
+from trieur.matching import apply_header_inference_excel, auto_assign_columns_fast, iban_is_valid
 from views._auth import accessible_organizations
 from views._ui import unknown_columns
 from views.tab_database import (
@@ -79,6 +81,9 @@ from views.tab_database import (
     _resolve_modifier_names,
     diff_rows,
 )
+
+from api import pipeline_engine
+from api.pipeline_mapping import detect_iban_master_columns, merge_mapped_row
 
 app = FastAPI(title="Trieur de Data API", description="API REST sur trieur/db.py")
 
@@ -320,6 +325,25 @@ def _parse_col_filters(raw: str) -> dict:
         raise HTTPException(status_code=400, detail=f"col_filters n'est pas un JSON valide : {exc}")
     if not isinstance(parsed, dict):
         raise HTTPException(status_code=400, detail="col_filters doit être un objet JSON {colonne: {op, value}}.")
+    return parsed
+
+
+def _parse_filter_groups(raw: str) -> list:
+    """`groups` : liste de groupes (OU) de critères (ET), exactement le
+    format de trieur/filters.py:apply_filter_groups -- voir
+    api/pipeline_engine.py:filter_rows. Un critère =
+    {"column": str, "kind": "departements"|"valeurs", "values": [...]}."""
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"groups n'est pas un JSON valide : {exc}")
+    if not isinstance(parsed, list):
+        raise HTTPException(
+            status_code=400,
+            detail="groups doit être une liste de groupes, chacun une liste de critères.",
+        )
     return parsed
 
 
@@ -634,13 +658,19 @@ PIPELINE_APPEND_BATCH = 500
 
 
 def _parse_pipeline_file(filename: str, content: bytes) -> dict[str, pd.DataFrame]:
-    """Lit un fichier Excel/CSV avec les lecteurs déjà écrits pour
-    l'onglet 2 (trieur/io_excel.py, trieur/matching.py:apply_header_inference_excel)
-    -- jamais une deuxième façon de lire un fichier qui pourrait diverger
-    (moteurs, repli, déduction d'en-tête absente...)."""
+    """Lit un fichier Excel/CSV/PDF avec les lecteurs déjà écrits pour
+    les onglets 2 (trieur/io_excel.py, trieur/io_pdf.py,
+    trieur/matching.py:apply_header_inference_excel) -- jamais une
+    deuxième façon de lire un fichier qui pourrait diverger (moteurs,
+    repli, déduction d'en-tête absente, format des relevés SEPA...)."""
     bio = io.BytesIO(content)
     if filename.lower().endswith(".csv"):
         sheets, _inferred = read_csv_file(bio, filename)
+    elif filename.lower().endswith(".pdf"):
+        # [PDF] Prélèvements SEPA -> une ligne par prélèvement (trieur/io_pdf.py) --
+        # même lecteur que views/tab2_import_mapping.py, plus couvert par un
+        # "limite connue" côté API depuis le premier incrément du pipeline.
+        sheets, _inferred = read_pdf_sepa(bio, filename)
     else:
         sheets = read_excel_all_sheets_from_file(bio, filename)
         sheets, _inferred = apply_header_inference_excel(sheets, bio)
@@ -781,6 +811,37 @@ def _all_pipeline_rows(client, session_id: str) -> list[dict]:
     return all_rows
 
 
+def _apply_pipeline_filters(
+    all_rows: list[dict], groups: list, search: str, col_filters: dict,
+) -> list[dict]:
+    """Filtre les lignes brutes d'une session de pipeline (telles que
+    renvoyées par `_all_pipeline_rows`, [{"id", "row_index", "data"}, ...])
+    en deux temps :
+      1) le filtre multi-critères groupes OU / critères ET, EXACTEMENT
+         celui de l'onglet 3 (trieur/filters.py:apply_filter_groups, via
+         api/pipeline_engine.py:filter_rows) -- pas de traitement
+         spécial du département CP par une deuxième logique ;
+      2) recherche/filtres par colonne à la Google Sheets
+         (_filter_by_search/_filter_by_columns, même fonctions que
+         GET /orgs/{org_id}/records) -- extra additif par rapport à
+         l'onglet 3 d'origine, gardé pour ne pas casser le contrat déjà
+         utilisé par le frontend actuel.
+    Renvoie le sous-ensemble filtré de `all_rows` (mêmes dicts, même
+    ordre) -- l'appelant garde donc "id" et "row_index" pour les étapes
+    suivantes (pagination, export, doublons, suppression)."""
+    working = [{"id": r["id"], "data": _without_sheet_key(r["data"])} for r in all_rows]
+    if groups:
+        working = pipeline_engine.filter_rows(working, groups)
+
+    plain = [w["data"] for w in working]
+    plain = _filter_by_search(plain, search)
+    plain = _filter_by_columns(plain, col_filters)
+    kept_ids = {id(d) for d in plain}
+
+    by_id = {r["id"]: r for r in all_rows}
+    return [by_id[w["id"]] for w in working if id(w["data"]) in kept_ids]
+
+
 @app.get("/orgs/{org_id}/pipeline/sessions/{session_id}/rows")
 def list_pipeline_session_rows(
     org_id: str,
@@ -789,30 +850,41 @@ def list_pipeline_session_rows(
     page_size: int = Query(LIST_PAGE_SIZE, ge=1, le=2000),
     search: str = Query(""),
     col_filters: str = Query("{}", description="JSON : {colonne: {op, value}}"),
+    groups: str = Query(
+        "[]",
+        description="JSON : filtre multi-critères de l'onglet 3, groupes (OU) de critères "
+                    "(ET) -- format EXACT de trieur/filters.py:apply_filter_groups : "
+                    "[[{\"column\": str, \"kind\": \"departements\"|\"valeurs\", \"values\": [...]}]]. "
+                    "\"departements\" filtre sur les 2 premiers chiffres du code postal "
+                    "(valeurs = préfixes, ex: [\"33\",\"77\"]) ; \"valeurs\" filtre sur une "
+                    "égalité exacte. Appliqué AVANT search/col_filters ci-dessus.",
+    ),
     ctx: AuthCtx = Depends(require_org_access),
 ):
     """Lignes en staging (trieur_data.pipeline_rows) de cette session,
-    filtrées avec les MÊMES fonctions que /orgs/{org_id}/records
-    (_filter_by_search/_filter_by_columns, views/tab_database.py) -- pas
-    une deuxième logique de filtre. Porte sur trieur_data.pipeline_rows
-    (staging TTL 24h), jamais trieur_data.records (donnée permanente).
+    filtrées avec le VRAI moteur de filtre de l'onglet 3
+    (trieur/filters.py:apply_filter_groups, via `groups`) puis, en plus,
+    les mêmes fonctions que /orgs/{org_id}/records
+    (_filter_by_search/_filter_by_columns) -- voir _apply_pipeline_filters.
+    Porte sur trieur_data.pipeline_rows (staging TTL 24h), jamais
+    trieur_data.records (donnée permanente).
 
     Paginée (`page`/`page_size`, même contrat que GET /orgs/{org_id}/records)
     depuis la revue PR #24 (point #7) : avant, cette route renvoyait
     TOUTE la session en une réponse (potentiellement des centaines de
     milliers de lignes) alors que l'écran n'en affiche que 50 à la fois.
-    Contrairement à /records, la recherche/les filtres portent ici sur
-    TOUTE la session (pas seulement la page renvoyée) : `_all_pipeline_rows`
+    Contrairement à /records, les filtres portent ici sur TOUTE la
+    session (pas seulement la page renvoyée) : `_all_pipeline_rows`
     charge et filtre l'intégralité du staging côté serveur (comme avant),
     seule la DÉCOUPE en page change -- `count` reste le total filtré réel,
     pas juste la taille de la page renvoyée."""
     _get_pipeline_session_or_404(ctx, org_id, session_id)
     parsed_filters = _parse_col_filters(col_filters)
+    parsed_groups = _parse_filter_groups(groups)
 
     all_rows = _all_pipeline_rows(ctx.client, session_id)
-    rows = [_without_sheet_key(r["data"]) for r in all_rows]
-    rows = _filter_by_search(rows, search)
-    rows = _filter_by_columns(rows, parsed_filters)
+    kept = _apply_pipeline_filters(all_rows, parsed_groups, search, parsed_filters)
+    rows = [_without_sheet_key(r["data"]) for r in kept]
 
     start = (page - 1) * page_size
     page_rows = rows[start:start + page_size]
@@ -834,6 +906,7 @@ def export_pipeline_session_rows(
     format: str = Query("csv", pattern="^(csv|xlsx)$"),
     search: str = Query(""),
     col_filters: str = Query("{}", description="JSON : {colonne: {op, value}}"),
+    groups: str = Query("[]", description="JSON : mêmes groupes de filtre multi-critères que GET .../rows"),
     columns: str = Query(
         "", description="Ordre + sélection des colonnes à l'export, séparées par des virgules "
                         "(équivalent du glisser-déposer streamlit-sortables de l'onglet 4 : une "
@@ -849,11 +922,11 @@ def export_pipeline_session_rows(
     logique dupliquée."""
     session = _get_pipeline_session_or_404(ctx, org_id, session_id)
     parsed_filters = _parse_col_filters(col_filters)
+    parsed_groups = _parse_filter_groups(groups)
 
     all_rows = _all_pipeline_rows(ctx.client, session_id)
-    rows = [_without_sheet_key(r["data"]) for r in all_rows]
-    rows = _filter_by_search(rows, search)
-    rows = _filter_by_columns(rows, parsed_filters)
+    kept = _apply_pipeline_filters(all_rows, parsed_groups, search, parsed_filters)
+    rows = [_without_sheet_key(r["data"]) for r in kept]
 
     full_cols: list[str] = []
     for row in rows:
@@ -912,12 +985,20 @@ def apply_pipeline_mapping(
     En dehors d'un dry_run, applique le mapping (fourni, ou la suggestion
     si omis) : chaque ligne de la session est réécrite avec les clés
     COLONNES MAÎTRES (une colonne source sur "(non assigne)" disparaît de
-    la ligne), puis la session passe au statut 'mapped'. Limite connue,
-    simplification volontaire par rapport à l'onglet 2 : si deux colonnes
-    source sont mappées sur la MÊME colonne maître, la dernière écrase la
-    précédente (l'onglet 2 garde la première valeur non vide) -- à revoir
-    si un vrai cas d'usage l'exige."""
-    _get_pipeline_session_or_404(ctx, org_id, session_id)
+    la ligne), puis la session passe au statut 'mapped'. Même règles que
+    le bouton "Construire la base de travail fusionnée" de
+    views/tab2_import_mapping.py (voir api/pipeline_mapping.py) :
+      - si deux colonnes source pointent vers la MÊME colonne maître, la
+        PREMIÈRE valeur non vide gagne (pas "la dernière écrase") ;
+      - "Source Data" (si présente dans les colonnes maîtres) est
+        toujours renseignée automatiquement (fichier + onglet d'origine),
+        jamais depuis une colonne source ;
+      - les colonnes IBAN détectées (nom ou contenu) ont leurs espaces
+        internes retirés (clean_iban) ; leur checksum (mod 97) est
+        vérifié et les lignes invalides remontées dans `iban_warnings`
+        (rien n'est bloqué ni supprimé automatiquement -- même choix que
+        Streamlit, à vérifier avant l'export)."""
+    session = _get_pipeline_session_or_404(ctx, org_id, session_id)
     master_cols = get_org_master_columns(ctx.client, org_id)
 
     sample = list_pipeline_rows(ctx.client, session_id, limit=PIPELINE_PREVIEW_SIZE)
@@ -932,24 +1013,176 @@ def apply_pipeline_mapping(
     if not any(m and m != "(non assigne)" for m in mapping.values()):
         raise HTTPException(status_code=400, detail="Aucune colonne assignée dans ce mapping.")
 
+    # Colonnes IBAN (nom OU contenu) détectées sur l'échantillon déjà
+    # mappé -- une seule détection pour toute la session (comme
+    # views/tab2_import_mapping.py sur la base fusionnée), pas relancée
+    # à chaque ligne.
+    mapped_sample = [
+        merge_mapped_row(_without_sheet_key(r["data"]), mapping, master_cols, None, set())
+        for r in sample
+    ]
+    iban_masters = detect_iban_master_columns(mapped_sample, master_cols)
+
     n_updated = 0
+    iban_invalid_counts: dict[str, int] = {}
+    iban_invalid_samples: dict[str, list[str]] = {}
     offset = 0
     while True:
         page = list_pipeline_rows(ctx.client, session_id, limit=LIST_PAGE_SIZE, offset=offset)
         if not page:
             break
         for row in page:
-            new_data = {
-                master: row["data"][src]
-                for src, master in mapping.items()
-                if master and master != "(non assigne)" and src in row["data"]
-            }
+            src_data = row["data"]
+            sheet = src_data.get("_sheet")
+            source_label = None
+            if "Source Data" in master_cols:
+                base = session.get("source_filename") or "import"
+                source_label = f"{base} ({sheet})" if sheet else base
+
+            new_data = merge_mapped_row(
+                _without_sheet_key(src_data), mapping, master_cols, source_label, iban_masters,
+            )
+
+            for col in iban_masters:
+                if col in new_data and iban_is_valid(new_data[col]) is False:
+                    iban_invalid_counts[col] = iban_invalid_counts.get(col, 0) + 1
+                    samples = iban_invalid_samples.setdefault(col, [])
+                    if len(samples) < 20:
+                        samples.append(row["id"])
+
             update_pipeline_row_data(ctx.client, row["id"], new_data)
             n_updated += 1
         offset += len(page)
 
     update_pipeline_session_status(ctx.client, session_id, "mapped")
-    return {"session_id": session_id, "status": "mapped", "mapping": mapping, "n_rows_updated": n_updated}
+    return {
+        "session_id": session_id,
+        "status": "mapped",
+        "mapping": mapping,
+        "n_rows_updated": n_updated,
+        "iban_columns_detected": sorted(iban_masters),
+        "iban_warnings": [
+            {"column": col, "n_invalid": iban_invalid_counts[col], "sample_row_ids": iban_invalid_samples[col]}
+            for col in sorted(iban_invalid_counts)
+        ],
+    }
+
+
+# ---------------------------------------------------------------
+# Pipeline -- étape 3 : filtrage + moteur de dédoublonnage/rapprochement,
+# EXACTEMENT trieur/filters.py (le "cœur métier" de l'onglet 3 Streamlit),
+# adapté aux lignes {id, data} du staging Postgres par
+# api/pipeline_engine.py -- aucune règle métier réécrite ici.
+#
+# Écart volontaire par rapport à Streamlit : là où l'onglet 3 gardait la
+# ligne dédoublonnée dans `st.session_state` (annulable par un bouton
+# "↩️ Annuler", car le DataFrame source restait intact), un backend
+# FastAPI stateless n'a pas d'équivalent -- POST .../dedupe SUPPRIME
+# réellement les lignes perdantes du staging (trieur_data.pipeline_rows).
+# Pas d'"annuler" possible après coup (documenté ici, pas caché) : c'est
+# une conséquence directe du choix d'architecture "staging Postgres, pas
+# de session serveur" déjà pris pour tout le pipeline (voir migration
+# 0010), pas une simplification de la RÈGLE de dédoublonnage elle-même,
+# qui reste identique bit à bit à trieur/filters.py.
+# ---------------------------------------------------------------
+
+@app.get("/orgs/{org_id}/pipeline/sessions/{session_id}/duplicates")
+def get_pipeline_duplicates(
+    org_id: str,
+    session_id: str,
+    column: str = Query(..., description="Colonne maître sur laquelle détecter les doublons"),
+    search: str = Query(""),
+    col_filters: str = Query("{}", description="JSON : {colonne: {op, value}}"),
+    groups: str = Query("[]", description="JSON : mêmes groupes de filtre multi-critères que GET .../rows"),
+    ctx: AuthCtx = Depends(require_org_access),
+):
+    """Groupes de doublons sur `column`, PARMI les lignes qui passent le
+    filtre actif (mêmes paramètres que GET .../rows) -- même portée que
+    l'analyse de doublons de l'onglet 3, qui opère sur `filtered_df`, pas
+    sur la session entière. Pour chaque groupe : les ids des lignes
+    concernées et l'id suggéré à garder (la ligne la plus complète,
+    trieur/filters.py:most_complete_row_index) -- même pré-sélection que
+    la revue manuelle groupe par groupe côté Streamlit."""
+    _get_pipeline_session_or_404(ctx, org_id, session_id)
+    parsed_filters = _parse_col_filters(col_filters)
+    parsed_groups = _parse_filter_groups(groups)
+
+    all_rows = _all_pipeline_rows(ctx.client, session_id)
+    kept = _apply_pipeline_filters(all_rows, parsed_groups, search, parsed_filters)
+    id_rows = [{"id": r["id"], "data": _without_sheet_key(r["data"])} for r in kept]
+
+    dup_groups = pipeline_engine.duplicate_groups_for_rows(id_rows, column)
+    return {
+        "session_id": session_id,
+        "column": column,
+        "group_count": len(dup_groups),
+        "duplicate_row_count": sum(len(g["row_ids"]) for g in dup_groups),
+        "filtered_row_count": len(id_rows),
+        "groups": dup_groups,
+    }
+
+
+class PipelineDedupe(BaseModel):
+    column: str
+    # "rule"   : une règle globale appliquée à TOUS les groupes de doublons
+    #            (garder la 1re ligne importée, ou la plus complète).
+    # "manual" : un id choisi par groupe (revue groupe par groupe côté écran) ;
+    #            au-delà de DEDUP_GROUP_THRESHOLD groupes, Streamlit bascule
+    #            automatiquement sur "rule" -- laissé au choix du frontend ici.
+    mode: str = "rule"
+    keep: str = "first"  # "first" | "complete", utilisé seulement si mode="rule"
+    keep_ids: list[str] = []  # utilisé seulement si mode="manual" : 1 id par groupe
+    search: str = ""
+    col_filters: dict = {}
+    groups: list = []
+
+
+# Au-delà de ce nombre de GROUPES de doublons, la revue manuelle
+# groupe-par-groupe devient impraticable côté écran -- même seuil que
+# views/tab3_filtrage_dedup.py:DEDUP_GROUP_THRESHOLD, renvoyé au
+# frontend pour qu'il propose la même bascule automatique vers une règle
+# globale (pas une limite technique imposée ici, une simple UX à
+# reproduire côté React).
+DEDUP_GROUP_THRESHOLD = 50
+
+
+@app.post("/orgs/{org_id}/pipeline/sessions/{session_id}/dedupe")
+def apply_pipeline_dedupe(
+    org_id: str, session_id: str, body: PipelineDedupe, ctx: AuthCtx = Depends(require_org_access),
+):
+    """Supprime les doublons sur `column`, PARMI les lignes qui passent
+    le filtre actif (`search`/`col_filters`/`groups`, mêmes paramètres
+    que GET .../rows) -- même portée que "Supprimer les doublons" de
+    l'onglet 3 (qui n'agit que sur `filtered_df`, jamais sur les lignes
+    déjà exclues par le filtre). Voir la note d'architecture au-dessus de
+    GET .../duplicates : contrairement à Streamlit, cette suppression est
+    DÉFINITIVE (pas de bouton "annuler" possible après coup)."""
+    _get_pipeline_session_or_404(ctx, org_id, session_id)
+    if body.mode not in ("rule", "manual"):
+        raise HTTPException(status_code=400, detail="mode invalide (attendu 'rule' ou 'manual').")
+
+    all_rows = _all_pipeline_rows(ctx.client, session_id)
+    kept = _apply_pipeline_filters(all_rows, body.groups, body.search, body.col_filters)
+    id_rows = [{"id": r["id"], "data": _without_sheet_key(r["data"])} for r in kept]
+
+    if body.mode == "manual":
+        if not body.keep_ids:
+            raise HTTPException(status_code=400, detail="keep_ids requis en mode 'manual' (1 id par groupe).")
+        _, removed_ids = pipeline_engine.dedupe_manual(id_rows, body.column, body.keep_ids)
+    else:
+        if body.keep not in ("first", "complete"):
+            raise HTTPException(status_code=400, detail="keep invalide (attendu 'first' ou 'complete').")
+        _, removed_ids = pipeline_engine.dedupe_rule(id_rows, body.column, keep=body.keep)
+
+    n_removed = delete_pipeline_rows(ctx.client, session_id, removed_ids)
+    session = get_pipeline_session(ctx.client, session_id)
+    return {
+        "session_id": session_id,
+        "column": body.column,
+        "mode": body.mode,
+        "n_removed": n_removed,
+        "row_count": session["row_count"] if session else None,
+    }
 
 
 # ---------------------------------------------------------------

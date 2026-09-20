@@ -729,6 +729,31 @@ def update_pipeline_row_data(client: Client, row_id: str, data: dict) -> None:
     _td(client, "pipeline_rows").update({"data": data}).eq("id", row_id).execute()
 
 
+def delete_pipeline_rows(client: Client, session_id: str, row_ids: list[str]) -> int:
+    """Supprime des lignes précises d'une session de pipeline (utilisé
+    par la suppression de doublons -- onglet 3 -- voir
+    api/pipeline_engine.py) et met à jour `row_count` en conséquence,
+    même principe que `append_pipeline_rows`. Scopé à `session_id` en
+    plus des ids : un id d'une AUTRE session ne peut jamais être
+    supprimé par erreur via cet appel. Retourne le nombre de lignes
+    réellement supprimées."""
+    if not row_ids:
+        return 0
+    res = (
+        _td(client, "pipeline_rows")
+        .delete()
+        .eq("session_id", session_id)
+        .in_("id", row_ids)
+        .execute()
+    )
+    n_deleted = len(res.data or [])
+    if n_deleted:
+        session = get_pipeline_session(client, session_id)
+        new_count = max(0, (session["row_count"] if session else 0) - n_deleted)
+        _td(client, "pipeline_sessions").update({"row_count": new_count}).eq("id", session_id).execute()
+    return n_deleted
+
+
 def delete_pipeline_session(client: Client, session_id: str) -> None:
     """Supprime une session de pipeline et toutes ses lignes (cascade,
     voir migration 0010) -- abandon explicite du pipeline en cours par

@@ -885,8 +885,12 @@ async def create_pipeline_session_endpoint(
     renvoie un aperçu + les colonnes détectées pour l'étape de mapping
     suivante. N'écrit jamais dans trieur_data.records (donnée permanente)
     -- ça reste la validation finale du pipeline, pas encore portée ici."""
-    parsed = [(f.filename or "import", await f.read()) for f in files]
-    total_bytes = sum(len(content) for _, content in parsed)
+    # Vérifié AVANT toute lecture (f.size, connu dès la fin du parsing
+    # multipart par Starlette -- jamais un await f.read()) : sinon le
+    # plafond ne protège rien, chaque fichier est déjà entièrement
+    # matérialisé en mémoire par le moment où la somme est comparée --
+    # exactement la défaillance qu'il doit éviter (revue Copilot, PR #28).
+    total_bytes = sum((f.size or 0) for f in files)
     if total_bytes > PIPELINE_MAX_UPLOAD_BYTES:
         # Rejeté AVANT le parsing pandas/openpyxl (voir
         # PIPELINE_MAX_UPLOAD_BYTES) : un fichier trop volumineux fait
@@ -901,6 +905,7 @@ async def create_pipeline_session_endpoint(
                 "CSV (bien plus léger que .xlsx pour le même volume) ou importez en plusieurs fois."
             ),
         )
+    parsed = [(f.filename or "import", await f.read()) for f in files]
     sheets = _parse_and_merge_pipeline_files(parsed)
     rows, columns = _merge_pipeline_sheets(sheets)
     if not rows:

@@ -96,10 +96,17 @@ export function PipelineScreen() {
     })
   }
 
-  function resetPipeline() {
+  // `defaultColumn` est explicite (pas déduit de `masterColumns` en lisant
+  // la closure) : appelé juste après un changement d'org (handleOrgChange
+  // ci-dessous), `masterColumns` de CE rendu est encore celui de l'ANCIENNE
+  // org (le state vient tout juste d'être vidé par `setMasterColumns(null)`,
+  // qui ne s'applique qu'au rendu suivant) -- utiliser la valeur périmée
+  // initialiserait le 1er critère de filtre sur une colonne qui n'existe
+  // plus, un filtre dessus ne matcherait alors jamais.
+  function resetPipeline(defaultColumn: string = masterColumns?.[0] ?? '') {
     setPipelineSession(null)
     setMappingResult(null)
-    setGroups([{ id: newUid(), criteria: [emptyCriterion(masterColumns?.[0] ?? '')] }])
+    setGroups([{ id: newUid(), criteria: [emptyCriterion(defaultColumn)] }])
     setSearch('')
     setColFilters({})
     setRefreshKey(0)
@@ -130,7 +137,7 @@ export function PipelineScreen() {
   function handleOrgChange(nextOrgId: string) {
     setOrgId(nextOrgId)
     setMasterColumns(null)
-    resetPipeline()
+    resetPipeline('')
     setTab('1')
   }
 
@@ -255,6 +262,8 @@ export function PipelineScreen() {
               orgId={orgId}
               sessionId={pipelineSession?.session_id ?? null}
               sessionMapped={sessionMapped}
+              mappingResult={mappingResult}
+              masterColumns={masterColumns}
               search={search}
               colFilters={colFilters}
               apiGroups={apiGroups}

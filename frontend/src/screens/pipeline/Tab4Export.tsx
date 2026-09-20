@@ -1,7 +1,14 @@
 import { useEffect, useState, type Dispatch, type SetStateAction } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { ApiError, exportPipelineSessionRows, listPipelineSessionRows, type ColFilters, type PipelineFilterGroup } from '@/lib/api'
+import {
+  ApiError,
+  exportPipelineSessionRows,
+  listPipelineSessionRows,
+  type ColFilters,
+  type PipelineFilterGroup,
+  type PipelineMappingResult,
+} from '@/lib/api'
 
 const EXCEL_MAX_ROWS = 1_048_576
 
@@ -24,6 +31,8 @@ export function Tab4Export({
   orgId,
   sessionId,
   sessionMapped,
+  mappingResult,
+  masterColumns,
   search,
   colFilters,
   apiGroups,
@@ -40,6 +49,8 @@ export function Tab4Export({
   orgId: string
   sessionId: string | null
   sessionMapped: boolean
+  mappingResult: PipelineMappingResult | null
+  masterColumns: string[] | null
   search: string
   colFilters: ColFilters
   apiGroups: PipelineFilterGroup[]
@@ -60,9 +71,17 @@ export function Tab4Export({
   const [exporting, setExporting] = useState<'csv' | 'xlsx' | null>(null)
   const [exportError, setExportError] = useState<string | null>(null)
 
-  // Recharge juste le compte + les colonnes détectées (1 ligne suffit) à
-  // chaque changement de filtre -- la base réelle reste en staging côté
-  // serveur, exportée à la demande, jamais recopiée ici.
+  // Recharge juste le compte (1 ligne suffit pour ça) à chaque changement
+  // de filtre -- la base réelle reste en staging côté serveur, exportée à
+  // la demande, jamais recopiée ici. Les colonnes proposées à l'export ne
+  // sont PAS déduites de cette seule ligne récupérée (chaque ligne mappée
+  // n'a que les clés que SA source a effectivement renseignées -- deux
+  // fichiers/onglets sources fusionnés dans la même session peuvent avoir
+  // des colonnes différentes, cf api/pipeline_mapping.py:merge_mapped_row) :
+  // le sur-ensemble fiable, c'est les colonnes maîtres réellement CIBLÉES
+  // par le mapping appliqué (mapping.values(), + "Source Data" si présente
+  // dans les colonnes maîtres -- toujours renseignée automatiquement), pas
+  // seulement celles qui apparaissent sur cette ligne-là.
   useEffect(() => {
     if (!sessionMapped || !sessionId) return
     let cancelled = false
@@ -72,12 +91,17 @@ export function Tab4Export({
       .then((data) => {
         if (cancelled) return
         setRowCount(data.count)
-        const cols: string[] = []
-        for (const row of data.rows) {
-          for (const key of Object.keys(row)) {
-            if (!cols.includes(key)) cols.push(key)
-          }
+        const assigned = new Set<string>()
+        for (const master of Object.values(mappingResult?.mapping ?? {})) {
+          if (master && master !== '(non assigne)') assigned.add(master)
         }
+        if (masterColumns?.includes('Source Data')) assigned.add('Source Data')
+        for (const row of data.rows) {
+          for (const key of Object.keys(row)) assigned.add(key)
+        }
+        const cols = masterColumns
+          ? [...masterColumns.filter((c) => assigned.has(c)), ...[...assigned].filter((c) => !masterColumns.includes(c))]
+          : [...assigned]
         setColOrder((prev) => {
           const known = new Set(prev)
           const stillPresent = prev.filter((c) => cols.includes(c))
@@ -96,7 +120,17 @@ export function Tab4Export({
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orgId, sessionId, sessionMapped, search, JSON.stringify(colFilters), JSON.stringify(apiGroups), refreshKey])
+  }, [
+    orgId,
+    sessionId,
+    sessionMapped,
+    mappingResult,
+    masterColumns,
+    search,
+    JSON.stringify(colFilters),
+    JSON.stringify(apiGroups),
+    refreshKey,
+  ])
 
   async function handleExport(format: 'csv' | 'xlsx') {
     if (!sessionId) return

@@ -11,7 +11,19 @@ import { PersonalColumnSets } from './PersonalColumnSets'
 // renvoie chaque fois la liste entière modifiée via le même
 // POST /orgs/{org_id}/master-columns (déjà réservé aux administrateurs
 // côté API).
-export function MasterColumnsPanel({ orgId, isAdmin }: { orgId: string; isAdmin: boolean }) {
+export function MasterColumnsPanel({
+  orgId,
+  isAdmin,
+  onColumnsChange,
+}: {
+  orgId: string
+  isAdmin: boolean
+  // Optionnel : notifie un parent qui a besoin de connaître la liste à
+  // jour (ex. l'onglet "Import et Mapping" du Trieur de Data, qui cible
+  // ces mêmes colonnes maîtres) -- DatabaseScreen ne le passe pas, aucun
+  // changement de comportement pour lui.
+  onColumnsChange?: (columns: string[]) => void
+}) {
   const [columns, setColumns] = useState<string[] | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -27,6 +39,7 @@ export function MasterColumnsPanel({ orgId, isAdmin }: { orgId: string; isAdmin:
       .then((data) => {
         if (cancelled) return
         setColumns(data.columns)
+        onColumnsChange?.(data.columns)
       })
       .catch((err: unknown) => {
         if (cancelled) return
@@ -46,6 +59,7 @@ export function MasterColumnsPanel({ orgId, isAdmin }: { orgId: string; isAdmin:
     try {
       await setMasterColumns(orgId, next)
       setColumns(next)
+      onColumnsChange?.(next)
     } catch (err) {
       setSaveError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
     } finally {

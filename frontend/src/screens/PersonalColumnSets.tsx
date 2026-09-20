@@ -18,7 +18,17 @@ import {
 // depuis n'importe quel environnement. Le dernier jeu appliqué est
 // auto-chargé une fois au montage (comme `active_master_column_set_id`
 // côté profil), pour ne pas avoir à le resélectionner à chaque connexion.
-export function PersonalColumnSets() {
+export function PersonalColumnSets({
+  onApply,
+}: {
+  // Appelé avec les colonnes du jeu appliqué, pour les écrire dans les
+  // colonnes maîtres RÉELLES de l'environnement (comme l'original
+  // Streamlit : "Appliquer" écrivait tout de suite dans
+  // st.session_state.master_columns + save_master_columns). Omis si
+  // l'utilisateur n'est pas admin de l'environnement -- il peut quand
+  // même gérer ses jeux personnels, juste pas les appliquer ici.
+  onApply?: (columns: string[]) => Promise<void> | void
+}) {
   const [sets, setSets] = useState<UserColumnSet[] | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -75,6 +85,10 @@ export function PersonalColumnSets() {
       setSelectedId(applied.id)
       setWorkingColumns(applied.columns)
       setAutoLoadedLabel(null)
+      // Comme l'original : appliquer un jeu l'écrit tout de suite dans les
+      // colonnes maîtres réelles de l'environnement, pas seulement dans la
+      // mémoire personnelle -- sinon "Appliquer" ne fait visiblement rien.
+      if (onApply) await onApply(applied.columns)
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
     } finally {
@@ -170,9 +184,26 @@ export function PersonalColumnSets() {
       <div>
         <h2 className="text-base font-semibold">Jeux de colonnes personnels (liés à ton compte)</h2>
         <p className="text-sm text-[var(--muted)]">
-          Distinct des colonnes maîtres de l'environnement ci-dessus : ces jeux te suivent quel que
-          soit l'environnement, et le dernier appliqué se recharge automatiquement à ta prochaine
-          connexion.
+          Un « jeu » est une liste de colonnes que tu enregistres une fois sous un nom, pour la
+          réutiliser dans n'importe quel environnement -- pratique si tu bascules souvent entre
+          "Prélèvement" et "Énergie" par exemple, plutôt que de retaper les colonnes à chaque fois.
+        </p>
+        <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-[var(--muted)]">
+          <li>
+            <strong>Enregistrer un jeu</strong> : ajuste les colonnes ci-dessous, donne-leur un nom
+            et clique « 💾 Enregistrer ». Le jeu est sauvegardé sur ton compte, indépendamment de
+            l'environnement actuel.
+          </li>
+          <li>
+            <strong>Appliquer un jeu</strong> : choisis-le dans la liste et clique
+            « ✅ Appliquer ce jeu ». Ça écrit immédiatement ces colonnes comme colonnes maîtres de
+            l'environnement où tu es actuellement (ci-dessus) -- exactement comme si tu les avais
+            retapées à la main.
+          </li>
+        </ol>
+        <p className="mt-2 text-sm text-[var(--muted)]">
+          Le dernier jeu appliqué se recharge automatiquement à ta prochaine connexion (mais
+          n'écrase pas les colonnes maîtres tout seul -- il faut cliquer « Appliquer »).
         </p>
       </div>
 

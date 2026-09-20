@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {
   ApiError,
@@ -52,6 +52,9 @@ export function Tab2ImportMapping({
   const [uploading, setUploading] = useState(false)
   const [uploadElapsedSec, setUploadElapsedSec] = useState(0)
   const [uploadError, setUploadError] = useState<string | null>(null)
+  const [pendingFiles, setPendingFiles] = useState<File[]>([])
+  const [dragOver, setDragOver] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const [suggestLoading, setSuggestLoading] = useState<string | 'all' | null>(null)
   const [suggestError, setSuggestError] = useState<string | null>(null)
@@ -90,14 +93,16 @@ export function Tab2ImportMapping({
 
   async function handleFilesChange(files: File[]) {
     if (!files.length) return
+    setPendingFiles(files)
     setUploading(true)
     setUploadElapsedSec(0)
     setUploadError(null)
     setBuildError(null)
-    // La création de session lit/écrit le(s) fichier(s) ENTIER(S) de façon
-    // synchrone côté serveur -- pas de vraie progression connue à
-    // l'avance. Un chrono texte suffit tant que l'attente reste de
-    // l'ordre de quelques secondes (voir mesure PROJECT_LOG.md).
+    // La création de session envoie tous les fichiers en UN SEUL appel
+    // (fusionnés côté serveur) -- il n'y a pas de progression par fichier
+    // individuelle connue à l'avance. Chaque carte fichier tourne donc en
+    // même temps ; elles passent toutes en succès ou en erreur ensemble,
+    // ce qui reflète honnêtement ce que fait réellement l'appel réseau.
     const startedAt = Date.now()
     const interval = window.setInterval(() => {
       setUploadElapsedSec(Math.floor((Date.now() - startedAt) / 1000))
@@ -106,6 +111,7 @@ export function Tab2ImportMapping({
       const data = await createPipelineSession(orgId, files)
       onSessionCreated(data)
       setExcludedSheets(new Set())
+      setPendingFiles([])
       // [5] Auto-assignation de TOUS les onglets dès l'import, pour
       // qu'aucun onglet ne reste vide sans avoir à cliquer.
       await loadSuggestion(data.session_id, 'all')
@@ -115,6 +121,20 @@ export function Tab2ImportMapping({
       window.clearInterval(interval)
       setUploading(false)
     }
+  }
+
+  function handleDrop(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault()
+    setDragOver(false)
+    if (uploading) return
+    const files = Array.from(e.dataTransfer.files ?? [])
+    if (files.length) void handleFilesChange(files)
+  }
+
+  function formatFileSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} o`
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} Ko`
+    return `${(bytes / (1024 * 1024)).toFixed(1)} Mo`
   }
 
   // Charge la suggestion d'auto-assignation pour TOUS les onglets (dry_run,
@@ -224,25 +244,87 @@ export function Tab2ImportMapping({
             construction de la base.
           </p>
           <input
+            ref={fileInputRef}
             type="file"
             accept=".csv,.xlsx,.xls,.pdf"
             multiple
             onChange={(e) => void handleFilesChange(Array.from(e.target.files ?? []))}
-            className="text-sm"
+            className="hidden"
           />
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={() => !uploading && fileInputRef.current?.click()}
+            onKeyDown={(e) => {
+              if ((e.key === 'Enter' || e.key === ' ') && !uploading) fileInputRef.current?.click()
+            }}
+            onDragOver={(e) => {
+              e.preventDefault()
+              if (!uploading) setDragOver(true)
+            }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={handleDrop}
+            className={`flex flex-col items-center gap-2 rounded-lg border-2 border-dashed px-6 py-10 text-center transition-colors ${
+              uploading
+                ? 'cursor-not-allowed border-[var(--border)] opacity-60'
+                : dragOver
+                  ? 'cursor-pointer border-[var(--primary)] bg-[var(--primary)]/5'
+                  : 'cursor-pointer border-[var(--border)] hover:border-[var(--primary)]'
+            }`}
+          >
+            <svg
+              width="40"
+              height="40"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              className="text-[var(--muted)]"
+              aria-hidden="true"
+            >
+              <path d="M12 16V4m0 0-4 4m4-4 4 4" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            <p className="text-sm font-medium">
+              Glissez vos fichiers ici, ou <span className="text-[var(--primary)] underline">cliquez pour choisir</span>
+            </p>
+            <p className="text-xs text-[var(--muted)]">
+              Excel, CSV ou PDF (relevé de prélèvements) -- plusieurs fichiers à la fois
+            </p>
+          </div>
           <p className="text-xs text-[var(--muted)]">
             💡 Pour de très gros volumes (plusieurs millions de lignes), le <strong>CSV</strong> est
             bien plus rapide et léger que le .xlsx.
           </p>
-          {uploading && (
-            <p className="flex items-center gap-2 text-sm text-[var(--muted)]">
-              <span
-                className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent"
-                aria-hidden="true"
-              />
-              Chargement des fichiers… ({uploadElapsedSec}s)
-              {uploadElapsedSec >= 8 && ' -- un gros fichier peut prendre encore quelques instants.'}
-            </p>
+          {pendingFiles.length > 0 && (
+            <div className="flex flex-col gap-2 rounded-md border border-[var(--border)] p-3">
+              {pendingFiles.map((f, i) => (
+                <div key={`${f.name}-${i}`} className="flex items-center gap-3 text-sm">
+                  {uploading ? (
+                    <span
+                      className="inline-block h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-current border-t-transparent text-[var(--primary)]"
+                      aria-hidden="true"
+                    />
+                  ) : uploadError ? (
+                    <span className="shrink-0 text-[var(--danger)]" aria-hidden="true">
+                      ❌
+                    </span>
+                  ) : (
+                    <span className="shrink-0 text-[var(--success,#16a34a)]" aria-hidden="true">
+                      ✅
+                    </span>
+                  )}
+                  <span className="truncate">{f.name}</span>
+                  <span className="ml-auto shrink-0 text-xs text-[var(--muted)]">{formatFileSize(f.size)}</span>
+                </div>
+              ))}
+              {uploading && (
+                <p className="flex items-center gap-2 text-xs text-[var(--muted)]">
+                  Import en cours… ({uploadElapsedSec}s)
+                  {uploadElapsedSec >= 8 && ' -- un gros fichier peut prendre encore quelques instants.'}
+                </p>
+              )}
+            </div>
           )}
           {uploadError && <p className="text-sm text-[var(--danger)]">❌ Erreur : {uploadError}</p>}
         </div>

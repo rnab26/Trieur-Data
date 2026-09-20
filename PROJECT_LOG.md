@@ -2595,7 +2595,144 @@ manquants depuis le schéma réel, soit confirmer qu'ils viennent d'un
 autre repo/chantier.
 
 **Reste à faire côté Raphaël** :
-- [ ] Vérifier le flux complet en conditions réelles (vraies données,
-  vrai compte) -- non testable dans le sandbox de dev (pas
-  d'identifiants Supabase réels).
-- [ ] Régulariser le drift de migrations ci-dessus.
+- [x] Vérifier le flux complet en conditions réelles (vraies données,
+  vrai compte) -- voir chantier "Cold start + landing + migrations"
+  ci-dessous (PR #26), vérifié en live via curl sur `trieur-data`.
+- [x] Régulariser le drift de migrations ci-dessus -- voir même
+  chantier (PR #26).
+
+---
+
+## Cold start + landing par défaut + régularisation migrations (PR #26, 2026-09-20)
+
+- Écran d'atterrissage par défaut : "Trieur de Data" au lieu de "Base
+  de données" (`App.tsx`).
+- Cold start ~1 min éliminé sans dépense supplémentaire : réutilisation
+  du plan payant déjà pris (`trieur-data`, Starter ~7$/mois) au lieu
+  d'un nouveau service -- vérifié en live (curl : 0.74s, en-tête CORS
+  présent).
+- Migrations `0016_pipeline_parity.sql`/`0017_pipeline_saved_filters.sql`
+  ajoutées (renumérotées depuis une branche existante), rendues
+  idempotentes (`IF NOT EXISTS`/`DROP POLICY IF EXISTS`), contenu
+  vérifié contre la base réelle (`BEGIN;...ROLLBACK;`). Elles créent
+  `pipeline_remembered_mappings`, `pipeline_export_presets`,
+  `pipeline_saved_filters` et `pipeline_sessions.dedup_config` --
+  actuellement INERTES (pas encore câblées dans l'API).
+- CORS étendu aux domaines de prod réellement utilisés.
+
+Mergé sur `main`. Reste à faire : câbler ces tables inertes si le
+besoin (mémoire de mapping par forme de fichier, presets d'export,
+filtres sauvegardés) est confirmé -- pas fait dans ce chantier ni le
+suivant (#27).
+
+---
+
+## Multi-fichiers, mapping par onglet, vitesse d'import (PR #27, 2026-09-20)
+
+**Pourquoi** : régressions réelles signalées par Raphaël par rapport à
+l'original Streamlit sur l'onglet 2 (Import & Mapping) -- un seul
+fichier à la fois (avant : 10-15 fusionnés), import lent, mapping en un
+seul bloc en bas de page au lieu d'une carte par fichier/onglet avec
+les menus au-dessus de l'aperçu (comme l'original).
+
+**Livré** :
+- Import multi-fichiers fusionnés en une session, parallélisé
+  (`asyncio.gather` + `to_thread`), un seul appel RPC final pour
+  `row_count` au lieu d'un par lot.
+- Mapping PAR ONGLET (`mapping: {sheet_key: {source: maître}}`, fidèle
+  à `views/tab2_import_mapping.py`) : chaque onglet garde son propre
+  mapping, un onglet exclu/non mappé est retiré de la base fusionnée.
+- Frontend : une carte empilée par onglet (résumé, bouton "Auto"
+  local, grille menus/aperçu alignée), bouton global "Auto-assigner
+  tous les onglets", expander d'inclusion fichiers/onglets.
+- Zone d'import : vraie dropzone (glisser-déposer + icône) au lieu du
+  `<input type="file">` natif, carte par fichier avec spinner pendant
+  l'envoi (un seul appel réseau atomique -- les spinners tournent
+  ensemble puis passent tous en succès/erreur ensemble, honnête sur ce
+  que fait réellement l'appel).
+- Bug trouvé en clarifiant l'UI "jeux de colonnes" : "Appliquer ce jeu"
+  ne touchait que la mémoire personnelle du compte, jamais les colonnes
+  maîtres réelles de l'environnement (contrairement à l'original qui
+  les écrivait immédiatement) -- reconnecté (callback `onApply` vers
+  `MasterColumnsPanel`).
+- Textes explicatifs ajoutés : différence "jeux de colonnes"
+  (Enregistrer vs Appliquer) et "environnements" (colonnes maîtres +
+  imports cloisonnés par environnement).
+
+**Revue Copilot, 8 rounds jusqu'à stabilisation, tous les vrais bugs
+corrigés et testés avant merge** :
+1. Nettoyage de session manquant si un lot d'import échoue en
+   parallèle (course entre écriture et suppression).
+2. Nettoyage de session manquant si le RPC final `row_count` échoue
+   après que tous les lots ont réussi.
+3. Dry-run de mapping chargeait TOUTE la session en mémoire à chaque
+   import -- borné à un échantillon (`PIPELINE_SUGGESTION_ROW_CAP`).
+4. Clés d'onglet inconnues dans le mapping fourni acceptées
+   silencieusement -> tous les vrais onglets supprimés avec une
+   réponse "mapped" à zéro ligne. Rejeté avant mutation (400).
+5. Re-mapping d'une session déjà mappée acceptée -> `merge_mapped_row`
+   retire `_sheet`, un retry regroupait tout sous une clé vide et
+   supprimait tout. Rejeté (409).
+6. Suppression des lignes exclues en un seul `.in_("id", ...)` ->
+   risque de dépasser les limites de taille de requête PostgREST sur
+   les gros volumes. Par lots bornés désormais.
+7. **Race condition réelle** : le garde de statut lisait puis testait
+   séparément de l'écriture finale -- deux requêtes concurrentes
+   (double clic, deux onglets) pouvaient toutes deux passer le garde
+   avant qu'aucune n'écrive `mapped`, et muteraient chacune les lignes
+   de l'autre. Corrigé par réservation atomique
+   (`claim_pipeline_session_for_mapping`, `UPDATE ... WHERE
+   status='importing'` en un seul aller-retour SQL) juste avant les
+   mutations.
+8. **Dry-run cassait le multi-fichiers** : l'échantillon utilisait un
+   LIMIT global sur toute la session avant de regrouper par onglet --
+   si le 1er onglet dépassait le plafond, les onglets suivants
+   n'apparaissaient jamais dans la suggestion et se faisaient
+   supprimer silencieusement à l'application. Corrigé : échantillon
+   PAR ONGLET (filtre SQL jsonb `data->>_sheet`), le frontend transmet
+   les `sheet_key` connus.
+9. La réservation atomique (point 7) écrivait déjà le statut `mapped`
+   AVANT la réécriture des lignes -- un échec en cours de route
+   (panne réseau) laissait la session visible comme `mapped` avec un
+   staging à moitié transformé, retry impossible (409). Corrigé :
+   bloc IBAN + réécriture dans un try/except, session entière
+   supprimée sur échec (même choix que pour l'import), l'utilisateur
+   réimporte proprement.
+10. Menus de mapping modifiables manuellement pendant
+    "Auto-assigner tous les onglets" -> une modif manuelle pouvait être
+    écrasée silencieusement par la suggestion qui arrive ensuite.
+    Menus désactivés pendant le chargement global.
+
+**Écart volontaire assumé** : pas de mémoire du mapping par "forme de
+fichier" (remembered_mappings/column_fingerprint, tables inertes créées
+par PR #26) -- nouveau schéma DB déjà en place mais pas câblé, hors
+périmètre de ce chantier.
+
+**Trouvailles Copilot non corrigées, notées pour suivi (non bloquantes,
+sévérité modérée, pas de perte de données)** :
+- Matérialisation complète de la session en mémoire à l'application
+  RÉELLE du mapping (pas le dry-run) -- préexistante à ce chantier
+  (depuis `5c96ece`), nécessiterait un refactor streaming plus large
+  (agrégation IBAN + comptage cohérents à travers les pages).
+- Deux fichiers uploadés avec le MÊME nom se regroupent sous une seule
+  carte dans l'expander d'inclusion (le compteur "fichiers" est alors
+  sous-évalué) -- cas rare, chaque onglet reste individuellement
+  distinguable et contrôlable, juste le regroupement visuel par nom de
+  fichier qui fusionne les deux.
+- Le bouton "Auto" LOCAL d'un onglet envoie quand même les clés de
+  TOUS les onglets au dry-run (juste plus lent avec beaucoup
+  d'onglets, pas un bug de correction).
+- Un fichier déjà choisi puis reproposé après une erreur peut ne pas
+  redéclencher `onChange` si l'input n'a pas été vidé (`fileInputRef`
+  jamais réinitialisé dans `reset()`, contrairement à `ImportPanel.tsx`).
+
+313 tests backend au départ -> 324 à la fin (11 nouveaux, tous les
+correctifs 1-9 ci-dessus couverts par un test dédié). Build frontend et
+lint verts à chaque commit. Mergé sur `main` (commit `abac465`).
+
+**Reste à faire côté Raphaël** :
+- [ ] Mesure réelle de vitesse en production sur un vrai import
+  multi-fichiers (non faite dans cette session -- pas d'identifiants de
+  test disponibles).
+- [ ] Décider si les 4 trouvailles Copilot non bloquantes ci-dessus
+  valent un chantier dédié.

@@ -136,10 +136,26 @@ def stream_excel_sheets(file_obj, header_sample_size=1000):
             if not buffer:
                 continue
 
-            candidate_header = [
-                str(c).strip() if c is not None else f"Unnamed: {i}"
-                for i, c in enumerate(buffer[0])
-            ]
+            # Même convention que pandas (pd.read_excel/ExcelFile.parse,
+            # chemin classique) -- vérifié en conditions réelles, pas
+            # supposé : une cellule vide devient "Unnamed: <index>" (index
+            # de colonne, pas un compteur -- deux cellules vides voisines
+            # donnent "Unnamed: 1"/"Unnamed: 2", jamais de collision entre
+            # elles), et un nom dupliqué reçoit un suffixe ".1", ".2"...
+            # plutôt que d'écraser silencieusement une colonne lors du
+            # dict(zip(...)) plus bas (revue Copilot, PR #29).
+            seen_header_names: dict[str, int] = {}
+            candidate_header = []
+            for i, c in enumerate(buffer[0]):
+                name = str(c).strip() if c is not None else ""
+                if not name:
+                    name = f"Unnamed: {i}"
+                if name in seen_header_names:
+                    seen_header_names[name] += 1
+                    name = f"{name}.{seen_header_names[name]}"
+                else:
+                    seen_header_names[name] = 0
+                candidate_header.append(name)
             if looks_like_header(pd.DataFrame(columns=candidate_header)):
                 columns = candidate_header
                 buffered_data_rows = buffer[1:]

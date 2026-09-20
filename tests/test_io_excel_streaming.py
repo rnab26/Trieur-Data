@@ -46,6 +46,42 @@ def test_stream_excel_sheets_avec_entete_normale():
     ]
 
 
+def test_stream_excel_sheets_entete_vide_ou_dupliquee_comme_le_chemin_classique():
+    """Trouvaille Copilot (PR #29) : une en-tête avec des cellules vides
+    et/ou des noms dupliqués écrasait silencieusement des colonnes via
+    dict(zip(columns, ...)) -- perte de données. Vérifié en conditions
+    réelles (pas supposé) : pandas (chemin classique) transforme une
+    cellule vide en "Unnamed: <index>" et suffixe un nom dupliqué avec
+    ".1", ".2"... -- même convention reproduite ici."""
+    import openpyxl
+
+    from trieur.io_excel import read_excel_all_sheets_from_file
+
+    buf = io.BytesIO()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Feuil1"
+    ws.append(["NOM", "", "", "EMAIL", "EMAIL", "EMAIL"])
+    ws.append(["Dupont", "foo", "bar", "a@x.com", "b@x.com", "c@x.com"])
+    ws.append(["Martin", "baz", "qux", "d@x.com", "e@x.com", "f@x.com"])
+    wb.save(buf)
+    data = buf.getvalue()
+
+    classic = read_excel_all_sheets_from_file(io.BytesIO(data), "f.xlsx")
+    classic_df = classic["Feuil1"]
+
+    streamed = _collect(stream_excel_sheets(io.BytesIO(data)))
+    columns, _n_dup, rows = streamed["Feuil1"]
+
+    assert columns == list(classic_df.columns) == [
+        "NOM", "Unnamed: 1", "Unnamed: 2", "EMAIL", "EMAIL.1", "EMAIL.2",
+    ]
+    assert len(rows) == 2
+    # Aucune colonne écrasée : les 3 valeurs EMAIL/EMAIL.1/EMAIL.2 de
+    # chaque ligne restent bien distinctes.
+    assert [rows[0][c] for c in ("EMAIL", "EMAIL.1", "EMAIL.2")] == ["a@x.com", "b@x.com", "c@x.com"]
+
+
 def test_stream_excel_sheets_sans_entete_deduit_les_colonnes_comme_le_chemin_classique():
     """Même fichier, même résultat final que
     read_excel_all_sheets_from_file + apply_header_inference_excel."""

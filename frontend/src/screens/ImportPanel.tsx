@@ -142,7 +142,15 @@ export function ImportPanel({
             className="text-sm"
           />
 
-          {previewLoading && <p className="text-sm text-[var(--muted)]">Lecture du fichier…</p>}
+          {previewLoading && (
+            <>
+              <p className="text-sm text-[var(--muted)]">Lecture du fichier…</p>
+              <p className="text-xs font-medium text-[var(--danger)]">
+                ⚠️ Ne quitte pas cette page (ni une autre appli/onglet) tant que la lecture est en
+                cours -- ça coupe l'envoi et il faudra recommencer.
+              </p>
+            </>
+          )}
           {previewError && <p className="text-sm text-[var(--danger)]">Erreur : {previewError}</p>}
 
           {preview && (
@@ -223,6 +231,12 @@ export function ImportPanel({
                 </div>
               )}
 
+              {importing && (
+                <p className="text-xs font-medium text-[var(--danger)]">
+                  ⚠️ Ne quitte pas cette page (ni une autre appli/onglet) tant que l'import est en
+                  cours -- ça coupe l'envoi et il faudra recommencer.
+                </p>
+              )}
               {importError && <p className="text-sm text-[var(--danger)]">Erreur : {importError}</p>}
 
               <div>

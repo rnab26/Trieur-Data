@@ -100,12 +100,27 @@ async function safeReadBlob(res: Response): Promise<Blob> {
 }
 
 async function throwForErrorResponse(res: Response): Promise<never> {
+  // Même distinction que safeReadJson : une coupure réseau PENDANT la
+  // lecture du corps d'une réponse d'erreur (en-têtes 4xx/5xx déjà reçus,
+  // puis connexion perdue) doit remonter NETWORK_ERROR_MESSAGE, pas un
+  // simple repli silencieux sur statusText -- sinon l'utilisateur ne voit
+  // jamais le message réseau explicite pour cette moitié des coupures
+  // possibles (revue Copilot, PR #28).
   let detail = res.statusText
+  let text: string | null = null
   try {
-    const body = await res.json()
+    text = await res.text()
+  } catch {
+    if (res.status === 401) {
+      handleUnauthorized()
+    }
+    throw new ApiError(0, NETWORK_ERROR_MESSAGE)
+  }
+  try {
+    const body = JSON.parse(text)
     detail = body.detail ?? detail
   } catch {
-    // pas de corps JSON (ou lecture coupée) -- on garde le statusText
+    // pas de corps JSON (ou corps vide) -- on garde le statusText
   }
   if (res.status === 401) {
     handleUnauthorized()

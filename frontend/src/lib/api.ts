@@ -551,11 +551,19 @@ export function suggestPipelineMapping(orgId: string, sessionId: string) {
   )
 }
 
+// [IBAN] Colonnes IBAN détectées (nom ou contenu) et lignes au checksum
+// invalide -- même vérification que views/tab2_import_mapping.py, mod 97 :
+// rien n'est supprimé automatiquement, juste remonté pour vérification
+// avant export. Voir api/main.py:apply_pipeline_mapping.
+export type PipelineIbanWarning = { column: string; n_invalid: number; sample_row_ids: string[] }
+
 export type PipelineMappingResult = {
   session_id: string
   status: string
   mapping: Record<string, string>
   n_rows_updated: number
+  iban_columns_detected: string[]
+  iban_warnings: PipelineIbanWarning[]
 }
 
 // Applique le mapping fourni (l'appelant doit envoyer le mapping
@@ -597,10 +605,35 @@ function toApiColFiltersPipeline(filters: ColFilters): ColFilters {
   return out
 }
 
+// [13] Filtre multi-critères de l'onglet 3 (trieur/filters.py:apply_filter_groups) :
+// plusieurs GROUPES combinés en OU, chaque groupe pouvant contenir plusieurs
+// CRITÈRES combinés en ET. Format EXACT attendu par l'API (groups=... en JSON) --
+// voir api/main.py:list_pipeline_session_rows.
+export type PipelineFilterCriterion = { column: string; kind: 'departements' | 'valeurs'; values: string[] }
+export type PipelineFilterGroup = PipelineFilterCriterion[]
+
+// Un groupe n'est "complet" que si TOUS ses critères ont une colonne et des
+// valeurs -- même règle que trieur/filters.py:apply_filter_groups (un
+// groupe en cours de saisie est ignoré, jamais envoyé tel quel à l'API).
+export function completeFilterGroups(groups: PipelineFilterGroup[]): PipelineFilterGroup[] {
+  return groups.filter((g) => g.length > 0 && g.every((c) => c.column && c.values.length > 0))
+}
+
+function groupsParam(groups: PipelineFilterGroup[] | undefined): string | null {
+  const complete = completeFilterGroups(groups ?? [])
+  return complete.length > 0 ? JSON.stringify(complete) : null
+}
+
 export function listPipelineSessionRows(
   orgId: string,
   sessionId: string,
-  opts: { page?: number; pageSize?: number; search?: string; colFilters?: ColFilters } = {},
+  opts: {
+    page?: number
+    pageSize?: number
+    search?: string
+    colFilters?: ColFilters
+    groups?: PipelineFilterGroup[]
+  } = {},
 ) {
   const params = new URLSearchParams()
   params.set('page', String(opts.page ?? 1))
@@ -609,6 +642,8 @@ export function listPipelineSessionRows(
   if (opts.colFilters && Object.keys(opts.colFilters).length > 0) {
     params.set('col_filters', JSON.stringify(toApiColFiltersPipeline(opts.colFilters)))
   }
+  const g = groupsParam(opts.groups)
+  if (g) params.set('groups', g)
   return request<PipelineRowsPage>(
     `/orgs/${orgId}/pipeline/sessions/${sessionId}/rows?${params.toString()}`,
   )
@@ -616,10 +651,22 @@ export function listPipelineSessionRows(
 
 // Même mécanique de téléchargement navigateur que exportRecords ci-dessus
 // (pas de JSON en retour) -- voir api/main.py:export_pipeline_session_rows.
+// `filenameBase` : nom de fichier choisi par l'utilisateur (onglet 4,
+// équivalent de raw_name/export_name_base côté Streamlit) -- l'API elle-même
+// nomme toujours le fichier d'après le fichier source (pas de paramètre
+// serveur pour ça, volontairement non modifié ici), donc le renommage se
+// fait uniquement côté navigateur sur l'attribut de téléchargement.
 export async function exportPipelineSessionRows(
   orgId: string,
   sessionId: string,
-  opts: { format: 'csv' | 'xlsx'; search?: string; colFilters?: ColFilters; columns?: string[] },
+  opts: {
+    format: 'csv' | 'xlsx'
+    search?: string
+    colFilters?: ColFilters
+    groups?: PipelineFilterGroup[]
+    columns?: string[]
+    filenameBase?: string
+  },
 ): Promise<void> {
   const headers = await authHeader()
   const params = new URLSearchParams()
@@ -628,6 +675,8 @@ export async function exportPipelineSessionRows(
   if (opts.colFilters && Object.keys(opts.colFilters).length > 0) {
     params.set('col_filters', JSON.stringify(toApiColFiltersPipeline(opts.colFilters)))
   }
+  const g = groupsParam(opts.groups)
+  if (g) params.set('groups', g)
   // Ordre + sélection des colonnes (équivalent glisser-déposer de l'onglet
   // 4 Streamlit) -- voir api/main.py:export_pipeline_session_rows. Absent
   // = toutes les colonnes, ordre d'apparition (comportement précédent).
@@ -643,7 +692,10 @@ export async function exportPipelineSessionRows(
   const blob = await res.blob()
   const disposition = res.headers.get('content-disposition') ?? ''
   const match = /filename="?([^"]+)"?/.exec(disposition)
-  const filename = match ? match[1] : `export_pipeline.${opts.format}`
+  const serverFilename = match ? match[1] : `export_pipeline.${opts.format}`
+  const filename = opts.filenameBase
+    ? `${opts.filenameBase.trim().replace(/[\\/:*?"<>|]+/g, '_') || 'export'}.${opts.format}`
+    : serverFilename
 
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
@@ -653,4 +705,86 @@ export async function exportPipelineSessionRows(
   a.click()
   a.remove()
   URL.revokeObjectURL(url)
+}
+
+// ---------------------------------------------------------------
+// Pipeline "Trieur de Data" -- étape 3 (analyse des doublons + suppression
+// définitive), voir api/main.py:get_pipeline_duplicates / apply_pipeline_dedupe.
+// Même moteur que trieur/filters.py:duplicate_groups/dedupe_dataframe(_manual),
+// adapté aux lignes {id, data} du staging (api/pipeline_engine.py).
+//
+// Écart volontaire par rapport à Streamlit (views/tab3_filtrage_dedup.py) :
+// là-bas, la suppression restait EN MÉMOIRE et annulable (bouton "↩️
+// Annuler") tant que la base source n'était pas touchée. Ici, POST
+// .../dedupe supprime réellement les lignes perdantes du staging Postgres
+// -- pas d'annulation possible après coup. Le frontend doit donc afficher
+// un avertissement explicite avant d'appeler cette route (voir
+// Tab3FiltrageDedup.tsx).
+// ---------------------------------------------------------------
+
+export type PipelineDuplicateGroup = { value: string | null; row_ids: string[]; suggested_keep_id: string }
+
+export type PipelineDuplicates = {
+  session_id: string
+  column: string
+  group_count: number
+  duplicate_row_count: number
+  filtered_row_count: number
+  group_threshold: number
+  groups: PipelineDuplicateGroup[]
+}
+
+export function getPipelineDuplicates(
+  orgId: string,
+  sessionId: string,
+  opts: { column: string; search?: string; colFilters?: ColFilters; groups?: PipelineFilterGroup[] },
+) {
+  const params = new URLSearchParams()
+  params.set('column', opts.column)
+  if (opts.search) params.set('search', opts.search)
+  if (opts.colFilters && Object.keys(opts.colFilters).length > 0) {
+    params.set('col_filters', JSON.stringify(toApiColFiltersPipeline(opts.colFilters)))
+  }
+  const g = groupsParam(opts.groups)
+  if (g) params.set('groups', g)
+  return request<PipelineDuplicates>(
+    `/orgs/${orgId}/pipeline/sessions/${sessionId}/duplicates?${params.toString()}`,
+  )
+}
+
+export type PipelineDedupeResult = {
+  session_id: string
+  column: string
+  mode: string
+  n_removed: number
+  row_count: number | null
+}
+
+export type PipelineDedupeBody = {
+  column: string
+  mode: 'rule' | 'manual'
+  keep?: 'first' | 'complete'
+  keepIds?: string[]
+  search?: string
+  colFilters?: ColFilters
+  groups?: PipelineFilterGroup[]
+}
+
+export function applyPipelineDedupe(orgId: string, sessionId: string, body: PipelineDedupeBody) {
+  const complete = completeFilterGroups(body.groups ?? [])
+  return request<PipelineDedupeResult>(
+    `/orgs/${orgId}/pipeline/sessions/${sessionId}/dedupe`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        column: body.column,
+        mode: body.mode,
+        keep: body.keep ?? 'first',
+        keep_ids: body.keepIds ?? [],
+        search: body.search ?? '',
+        col_filters: body.colFilters ? toApiColFiltersPipeline(body.colFilters) : {},
+        groups: complete,
+      }),
+    },
+  )
 }

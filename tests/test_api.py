@@ -1261,6 +1261,43 @@ def test_pipeline_session_create_streams_above_threshold(client_factory, monkeyp
     assert sorted(r["data"]["NOM"] for r in rows) == ["Dupont", "Martin"]
 
 
+def test_pipeline_session_create_never_streams_xls_even_above_threshold(client_factory, monkeypatch):
+    """Trouvaille Copilot, PR #29 : stream_excel_sheets() repose sur
+    openpyxl, qui ne lit PAS le format .xls binaire (Excel 97-2003,
+    différent de .xlsx). Router un .xls volumineux vers le mode flux
+    ferait donc échouer un import que le chemin classique (engines
+    calamine/openpyxl via pandas, avec repli) pouvait réussir --
+    régression de compatibilité. Un .xls reste donc TOUJOURS sur le
+    chemin classique, quelle que soit sa taille : vérifié ici en
+    empêchant explicitement stream_excel_sheets d'être appelée."""
+    from api import main as api_main
+
+    monkeypatch.setattr(api_main, "PIPELINE_STREAM_THRESHOLD_BYTES", 10)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("stream_excel_sheets ne doit jamais être appelée pour un .xls")
+
+    monkeypatch.setattr(api_main, "stream_excel_sheets", _boom)
+
+    import io as _io
+
+    import pandas as pd
+
+    buf = _io.BytesIO()
+    pd.DataFrame({"NOM": ["Dupont"], "EMAIL": ["d@x.com"]}).to_excel(buf, index=False, sheet_name="Feuil1")
+
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/pipeline/sessions",
+        files=[("files", ("clients.xls", buf.getvalue(),
+                           "application/vnd.ms-excel"))],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.json()["row_count"] == 1
+
+
 def test_pipeline_session_create_stages_rows_and_detects_columns(client_factory):
     fake = _make_client()
     tc = client_factory(fake)

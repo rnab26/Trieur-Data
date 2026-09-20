@@ -117,6 +117,12 @@ def stream_excel_sheets(file_obj, header_sample_size=1000):
     def _row_has_data(row):
         return row is not None and any(v is not None for v in row)
 
+    # Même convention que les autres lecteurs de ce module (read_excel_
+    # all_sheets_from_file, read_csv_file) : rembobiner avant lecture,
+    # jamais supposer que l'appelant l'a déjà fait -- un file_obj réutilisé
+    # ou un pointeur pas remis à 0 ferait échouer/tronquer la lecture
+    # openpyxl silencieusement sinon (revue Copilot, PR #29).
+    file_obj.seek(0)
     wb = openpyxl.load_workbook(file_obj, read_only=True, data_only=True)
     try:
         for ws in wb.worksheets:

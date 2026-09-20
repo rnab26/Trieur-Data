@@ -821,20 +821,26 @@ def _iter_pipeline_sheets(files: list[tuple[str, UploadFile]]):
     """Générateur UNIFIÉ (clé d'onglet déjà dédupliquée, colonnes,
     n_duplicates_sample, itérateur de lignes) sur TOUS les fichiers d'un
     import EN MODE FLUX (voir PIPELINE_STREAM_THRESHOLD_BYTES) :
-      - .xlsx/.xls : stream_excel_sheets (trieur/io_excel.py) -- jamais
-        toute une feuille en mémoire, seule voie qui tient sur de gros
-        volumes avec une RAM bornée (mesuré : ~45x la taille du fichier
-        via le chemin classique, quel que soit le moteur).
-      - .csv/.pdf : lecteurs existants (déjà nettement plus légers en
-        mémoire pour un volume de données équivalent, mesuré ~6x contre
-        ~45x pour le xlsx) -- matérialisés normalement puis itérés, une
-        réécriture en flux n'était pas la priorité de ce chantier.
+      - .xlsx (SEUL format Excel géré par openpyxl -- l'ancien .xls binaire
+        n'est PAS un zip/XML et ne peut pas être lu par
+        stream_excel_sheets ; un .xls volumineux reste donc sur le chemin
+        classique ci-dessous, comme avant ce chantier -- revue Copilot,
+        PR #29) : stream_excel_sheets (trieur/io_excel.py) -- jamais toute
+        une feuille en mémoire, seule voie qui tient sur de gros volumes
+        avec une RAM bornée (mesuré : ~45x la taille du fichier via le
+        chemin classique, quel que soit le moteur).
+      - .xls/.csv/.pdf : lecteurs existants (déjà nettement plus légers en
+        mémoire pour un volume de données équivalent côté csv, mesuré ~6x
+        contre ~45x pour le xlsx ; .xls et .pdf rarement volumineux en
+        pratique) -- matérialisés normalement puis itérés, une réécriture
+        en flux n'était pas la priorité de ce chantier.
     Même dédoublonnage de clé que le chemin classique (_sheet_key_deduper,
     partagé) -- aucune divergence entre les deux modes sur ce point."""
     multi = len(files) > 1
     next_key = _sheet_key_deduper()
     for filename, upload in files:
-        if filename.lower().endswith((".xlsx", ".xls")):
+        if filename.lower().endswith(".xlsx"):
+            upload.file.seek(0)
             for sheet_name, columns, n_dup_sample, row_iter in stream_excel_sheets(upload.file):
                 key = next_key(f"{filename} :: {sheet_name}" if multi else sheet_name)
                 yield key, columns, n_dup_sample, row_iter
@@ -1237,14 +1243,21 @@ class PipelineMapping(BaseModel):
     # confirmation côté frontend, même principe que dry_run sur /import).
     dry_run: bool = False
     # Onglets réels de cette session, tels que renvoyés par
-    # POST .../pipeline/sessions (`sheets[].sheet_key`) -- utilisé
-    # UNIQUEMENT par dry_run, pour échantillonner un nombre borné de
-    # lignes PAR ONGLET (voir list_pipeline_rows_for_sheet) plutôt qu'un
-    # LIMIT global sur toute la session : sans ça, un onglet à lui seul
-    # plus gros que PIPELINE_SUGGESTION_ROW_CAP masque tous les onglets
-    # suivants de la suggestion -- revue Copilot, PR #27. Si omis
-    # (anciens appelants), on retombe sur l'ancien échantillon global,
-    # moins précis mais toujours borné en mémoire.
+    # POST .../pipeline/sessions (`sheets[].sheet_key`) -- utilisé PAR LES
+    # DEUX CHEMINS :
+    #   - dry_run : échantillonne un nombre borné de lignes PAR ONGLET
+    #     (voir list_pipeline_rows_for_sheet) plutôt qu'un LIMIT global sur
+    #     toute la session -- sans ça, un onglet à lui seul plus gros que
+    #     PIPELINE_SUGGESTION_ROW_CAP masque tous les onglets suivants de
+    #     la suggestion (revue Copilot, PR #27) ;
+    #   - application réelle : déclenche le traitement PAR PAGES (voir
+    #     claim_pipeline_session_for_mapping et la boucle plus bas) au lieu
+    #     de _all_pipeline_rows -- indispensable pour les gros imports
+    #     désormais acceptés en mode flux côté import (revue Copilot,
+    #     PR #29).
+    # Si omis (anciens appelants), les deux chemins retombent sur l'ancien
+    # chargement complet -- moins précis/moins économe en mémoire, mais
+    # toujours correct.
     sheet_keys: Optional[list[str]] = None
 
 

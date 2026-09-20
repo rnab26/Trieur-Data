@@ -1805,6 +1805,31 @@ def test_pipeline_full_flow_end_to_end_via_streaming_paths(client_factory, monke
     assert {r["data"]["NOM"] for r in rows} == {f"NOM{i}" for i in range(n)}
     assert all("_sheet" not in r["data"] for r in rows)  # retiré à l'application, comme le chemin classique
 
+    # Suite du parcours complet : filtrage (onglet 3) puis export (onglet 4)
+    # -- vérifie que les lignes importées/mappées EN FLUX restent lisibles
+    # par le reste du pipeline, pas juste correctement insérées.
+    listed = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"search": "NOM1"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert listed.status_code == 200
+    listed_body = listed.json()
+    assert listed_body["row_count"] == n
+    assert {r["NOM"] for r in listed_body["rows"]} == {"NOM1", "NOM10", "NOM11", "NOM12", "NOM13",
+                                                          "NOM14", "NOM15", "NOM16", "NOM17", "NOM18", "NOM19"}
+
+    export_res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/export",
+        params={"format": "csv"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert export_res.status_code == 200
+    exported_text = export_res.content.decode("utf-8-sig")
+    assert exported_text.count("\n") >= n  # en-tête + n lignes
+    for i in range(n):
+        assert f"NOM{i}" in exported_text
+
 
 def test_pipeline_session_create_cleans_up_if_row_count_rpc_fails(client_factory, monkeypatch):
     """Trouvaille Copilot, PR #27 : si le RPC final adjust_pipeline_row_count

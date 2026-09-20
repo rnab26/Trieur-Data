@@ -2462,3 +2462,74 @@ nécessaire — les 9 points sont réels et corrects tels que rapportés.
 Commentaire posté sur PR #24 récapitulant les 9 points.
 
 **Pas de merge sur `main` — pas demandé, décision utilisateur.**
+
+---
+
+## Frontend Trieur de Data -- portage fidèle des 4 onglets (2026-09-20)
+
+**Contexte** : après le portage backend fidèle (mapping + moteur
+filtre/dédoublonnage réel, commits `5c96ece`/`f1c4fae`/`2729e7d` sur
+`claude/data-sorter-react-migration-kw7l7y`), `PipelineScreen.tsx`
+restait un mirroir simplifié en un seul fichier (711 lignes, pas de
+filtre multi-critères, pas de dédoublonnage côté écran). Reconstruit en
+suivant le VISUEL et l'enchaînement exact des 4 vues Streamlit
+d'origine (`views/tab1_colonnes_maitres.py` à `tab4_export.py`, commit
+`635fcde`), pas une réinterprétation.
+
+**Livré** :
+- `frontend/src/screens/pipeline/Tab1ColonnesMaitres.tsx`,
+  `Tab2ImportMapping.tsx`, `Tab3FiltrageDedup.tsx`, `Tab4Export.tsx` --
+  4 composants distincts, `PipelineScreen.tsx` réécrit comme simple
+  conteneur (état partagé : session pipeline, filtre multi-critères,
+  recherche/filtres colonne, ordre/sélection export -- équivalent
+  `st.session_state`).
+- `frontend/src/lib/api.ts` : ajout des types/fonctions manquants côté
+  contrat API déjà en place (`groups` sur `/rows` et `/export`,
+  `getPipelineDuplicates`, `applyPipelineDedupe`, champs IBAN sur le
+  résultat de mapping).
+- `frontend/src/screens/MasterColumnsPanel.tsx` : ajout d'un callback
+  optionnel `onColumnsChange` (DatabaseScreen ne le passe pas, aucun
+  changement de comportement pour cet écran) pour que le Trieur de
+  Data reste à jour sans revenir sur l'onglet 1.
+
+**Écarts volontaires par rapport au Python** (documentés en commentaire
+dans le code) :
+- Dédoublonnage (onglet 3) **définitif** côté API (staging Postgres),
+  contrairement à l'ancien `st.session_state` annulable -- confirmation
+  explicite ajoutée avant toute suppression, avec avertissement
+  "non annulable".
+- Un seul fichier par session (pas de multi-fichiers ni Google Sheets),
+  mapping global à la session (pas par onglet source) -- limite déjà du
+  contrat API backend (`api/main.py`), pas ajoutée ici.
+- Pas de filtres/presets d'export nommés et persistés côté pipeline
+  (aucun endpoint pour ça, contrairement aux colonnes maîtres) --
+  Streamlit les proposait via `saved_filters.json`/`export_presets.json`.
+- Pas de sélection de valeurs par menu déroulant (colonnes <1000
+  valeurs distinctes) : toujours un champ texte séparé par `;` -- aucun
+  endpoint ne renvoie les valeurs distinctes d'une colonne pour tout le
+  staging (seulement la page affichée).
+- Pas de section "Enregistrer dans la base de données (CRM)" en fin
+  d'export -- écran Base de données explicitement hors périmètre de ce
+  chantier.
+
+**Vérifié** :
+- `npm run build` (tsc -b && vite build) : exit 0.
+- `npm run lint` (oxlint) : exit 0, seulement des warnings déjà
+  présents ailleurs dans le repo (même style, aucune nouvelle erreur).
+- Vérification visuelle : pas d'infra de test frontend existante:
+  harness temporaire (`mock.html`/`mock-main.tsx`, jamais commité,
+  supprimé après coup) monté avec Playwright/Chromium pour capturer
+  chaque onglet (import/mapping/IBAN, filtre multi-critères, export)
+  avec des props simulées -- layout mobile confirmé, états vide/erreur
+  confirmés propres (pas de crash sans session Supabase réelle). Pas de
+  vérification avec un vrai backend/Supabase (identifiants non
+  disponibles dans cette session) : à refaire par Raphaël en local ou
+  sur l'environnement de dev avant mise en prod si un doute subsiste.
+
+**Reste à faire / suivi** :
+- [ ] Tester le flux complet avec un vrai fichier + vraies colonnes
+  maîtres, en particulier la revue manuelle de doublons (aperçu par
+  groupe) et l'export avec ordre de colonnes personnalisé.
+- [ ] Décider si les filtres/presets d'export nommés du pipeline
+  valent la peine d'un nouvel endpoint (actuellement non portés, voir
+  écarts ci-dessus).

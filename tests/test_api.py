@@ -4,6 +4,7 @@ app.dependency_overrides plutôt qu'en remplaçant trieur.db lui-même :
 les endpoints appellent les VRAIES fonctions de trieur/db.py, avec un
 faux client Supabase en entrée."""
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -159,6 +160,71 @@ class _FakePostgrest:
 
     def table(self, name):
         return _FakeTable(self.tables.setdefault(name, []), name=name)
+
+    def rpc(self, name, params):
+        # Reproduit trieur_data.adjust_pipeline_row_count (migration 0012) :
+        # UPDATE atomique de row_count -- voir trieur/db.py:delete_pipeline_rows.
+        # `rpc()` renvoie un objet chaînable avec `.execute()`, comme postgrest-py.
+        if name == "adjust_pipeline_row_count":
+            def _execute():
+                session = next(
+                    (r for r in self.tables.get("pipeline_sessions", []) if r["id"] == params["p_session_id"]), None,
+                )
+                if session is not None:
+                    session["row_count"] = max(0, session["row_count"] + params["p_delta"])
+                return SimpleNamespace(data=[{"adjust_pipeline_row_count": session["row_count"]}] if session else [])
+
+            return SimpleNamespace(execute=_execute)
+        # Reproduit trieur_data.try_lock_pipeline_dedupe / unlock_pipeline_dedupe
+        # (migrations 0013/0014) : verrou court par UPDATE ... WHERE atomique,
+        # avec propriétaire (p_owner) pour qu'une requête qui a dépassé sa TTL
+        # et perdu le verrou ne libère jamais celui d'un appelant plus récent
+        # -- voir trieur/db.py:try_lock_pipeline_dedupe. Pas de vraie
+        # concurrence dans ce faux client synchrone : le verrou est simulé
+        # fidèlement (un verrou déjà posé et non expiré bloque un 2e claim,
+        # unlock ne fait rien si le propriétaire ne correspond plus) pour que
+        # les tests puissent vérifier le comportement, mais aucun test
+        # n'exécute deux requêtes en parallèle ici.
+        if name == "try_lock_pipeline_dedupe":
+            def _execute():
+                session = next(
+                    (r for r in self.tables.get("pipeline_sessions", []) if r["id"] == params["p_session_id"]), None,
+                )
+                if session is None:
+                    return SimpleNamespace(data=False)
+                lock_at = session.get("dedupe_lock_at")
+                ttl = params.get("p_ttl_seconds", 30)
+                if lock_at is not None and (datetime.now(timezone.utc) - lock_at).total_seconds() < ttl:
+                    return SimpleNamespace(data=False)
+                session["dedupe_lock_at"] = datetime.now(timezone.utc)
+                session["dedupe_lock_owner"] = params["p_owner"]
+                return SimpleNamespace(data=True)
+
+            return SimpleNamespace(execute=_execute)
+        if name == "unlock_pipeline_dedupe":
+            def _execute():
+                session = next(
+                    (r for r in self.tables.get("pipeline_sessions", []) if r["id"] == params["p_session_id"]), None,
+                )
+                if session is not None and session.get("dedupe_lock_owner") == params["p_owner"]:
+                    session["dedupe_lock_at"] = None
+                    session["dedupe_lock_owner"] = None
+                return SimpleNamespace(data=None)
+
+            return SimpleNamespace(execute=_execute)
+        # Reproduit trieur_data.is_pipeline_dedupe_lock_owner (migration
+        # 0015) : revérification juste avant le DELETE que l'appelant est
+        # toujours propriétaire du verrou, voir trieur/db.py:is_pipeline_dedupe_lock_owner.
+        if name == "is_pipeline_dedupe_lock_owner":
+            def _execute():
+                session = next(
+                    (r for r in self.tables.get("pipeline_sessions", []) if r["id"] == params["p_session_id"]), None,
+                )
+                is_owner = session is not None and session.get("dedupe_lock_owner") == params["p_owner"]
+                return SimpleNamespace(data=is_owner)
+
+            return SimpleNamespace(execute=_execute)
+        raise NotImplementedError(f"RPC non simulé dans ce faux client : {name}")
 
     def auth(self, _token):
         return self
@@ -1640,6 +1706,619 @@ def test_pipeline_export_wrong_org_is_404(client_factory):
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 404
+
+
+# ---------------------------------------------------------------
+# Pipeline : mapping fidèle (première valeur non vide, Source Data,
+# IBAN) -- voir api/pipeline_mapping.py, règles portées de
+# views/tab2_import_mapping.py.
+# ---------------------------------------------------------------
+
+def test_pipeline_mapping_first_non_empty_value_wins_on_collision(client_factory):
+    """Deux colonnes source vers la même colonne maître : la PREMIÈRE
+    valeur non vide gagne (jamais "la dernière écrase") -- même règle
+    que views/tab2_import_mapping.py, cf api/pipeline_mapping.py."""
+    fake = _make_client(
+        organizations=[{"id": "org-1", "slug": "leads", "name": "Leads", "master_columns": ["NOM", "TELEPHONE MOBILE"]}],
+    )
+    tc = client_factory(fake)
+    session_id = _upload_csv(tc, "org-1", b"nom,tel1,tel2\nDupont,,0601020304\n").json()["session_id"]
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {"nom": "NOM", "tel1": "TELEPHONE MOBILE", "tel2": "TELEPHONE MOBILE"}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    rows = fake.postgrest.tables["pipeline_rows"]
+    assert rows[0]["data"] == {"NOM": "Dupont", "TELEPHONE MOBILE": "0601020304"}
+
+
+def test_pipeline_mapping_sets_source_data_automatically(client_factory):
+    fake = _make_client(
+        organizations=[{"id": "org-1", "slug": "leads", "name": "Leads", "master_columns": ["NOM", "Source Data"]}],
+    )
+    tc = client_factory(fake)
+    session_id = _upload_csv(tc, "org-1", b"nom\nDupont\n", filename="clients.csv").json()["session_id"]
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {"nom": "NOM"}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    rows = fake.postgrest.tables["pipeline_rows"]
+    assert rows[0]["data"]["Source Data"] == "clients.csv (clients)"
+
+
+def test_pipeline_mapping_cleans_iban_spaces_and_reports_invalid_checksum(client_factory):
+    fake = _make_client()  # master_columns = ["NOM", "IBAN"]
+    tc = client_factory(fake)
+    session_id = _upload_csv(
+        tc, "org-1", b"NOM,IBAN\nDupont,FR76 3000 6000 0112 3456 7890 189\nMartin,FR0000000000000000000000000\n",
+    ).json()["session_id"]
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {"NOM": "NOM", "IBAN": "IBAN"}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["iban_columns_detected"] == ["IBAN"]
+    assert len(body["iban_warnings"]) == 1
+    assert body["iban_warnings"][0]["column"] == "IBAN"
+    assert body["iban_warnings"][0]["n_invalid"] == 1
+    assert len(body["iban_warnings"][0]["sample_row_ids"]) == 1
+
+    rows = {r["data"]["NOM"]: r["data"]["IBAN"] for r in fake.postgrest.tables["pipeline_rows"]}
+    # Espaces internes retirés, checksum FR7630006000011234567890189 valide.
+    assert rows["Dupont"] == "FR7630006000011234567890189"
+    assert rows["Martin"] == "FR0000000000000000000000000"
+
+
+def test_pipeline_mapping_detects_iban_column_with_generic_name_beyond_preview_size(client_factory):
+    """Trouvaille Copilot PR #25 (#3, sévérité moyenne) : la détection
+    IBAN par CONTENU ne scannait avant que PIPELINE_PREVIEW_SIZE (10)
+    lignes -- une colonne au nom générique ("Compte") dont les vraies
+    valeurs IBAN commencent après la ligne 10 n'était jamais détectée.
+    Ici : 10 lignes de "bruit" (pas des IBAN) suivies de 45 lignes IBAN
+    valides (espaces internes) -- 45/55 = 81,8% de la session ressemble à
+    un IBAN, largement au-dessus du seuil de detect_iban_column (80%),
+    mais 0% des 10 premières lignes. Doit quand même être détectée et
+    nettoyée sur TOUTE la session, pas seulement l'aperçu."""
+    fake = _make_client(
+        organizations=[{"id": "org-1", "slug": "leads", "name": "Leads", "master_columns": ["NOM", "Compte"]}],
+    )
+    tc = client_factory(fake)
+
+    lines = ["NOM,Compte"]
+    for i in range(10):
+        lines.append(f"Bruit{i},valeur-non-iban-{i}")
+    for i in range(45):
+        lines.append(f"Client{i},FR76 3000 6000 0112 3456 7890 189")
+    content = ("\n".join(lines) + "\n").encode()
+
+    session_id = _upload_csv(tc, "org-1", content).json()["session_id"]
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {"NOM": "NOM", "Compte": "Compte"}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["iban_columns_detected"] == ["Compte"]
+
+    rows = {r["data"]["NOM"]: r["data"]["Compte"] for r in fake.postgrest.tables["pipeline_rows"]}
+    # Espaces internes retirés sur une ligne bien après la 10e -- preuve
+    # que le nettoyage/la détection a bien porté sur toute la session.
+    assert rows["Client44"] == "FR7630006000011234567890189"
+
+
+# ---------------------------------------------------------------
+# Pipeline : filtre multi-critères groupes OU / critères ET (`groups`,
+# format EXACT de trieur/filters.py:apply_filter_groups) -- le "cœur
+# métier" de l'onglet 3, absent de l'API avant ce portage.
+# ---------------------------------------------------------------
+
+def test_pipeline_rows_groups_filter_departements_and_or(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1",
+        b"NOM,CP,VILLE\nA,34000,Montpellier\nB,71000,Lyon\nC,71000,Macon\nD,75001,Paris\n",
+    )
+    groups = [
+        [{"column": "CP", "kind": "departements", "values": ["34"]}],
+        [
+            {"column": "CP", "kind": "departements", "values": ["71"]},
+            {"column": "VILLE", "kind": "valeurs", "values": ["Lyon"]},
+        ],
+    ]
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"groups": json.dumps(groups)},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert {r["NOM"] for r in body["rows"]} == {"A", "B"}
+    assert body["count"] == 2
+
+
+def test_pipeline_rows_invalid_groups_json_is_400(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(tc, "org-1", b"NOM\nDupont\n")
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"groups": "not-json"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_pipeline_rows_malformed_groups_structure_is_400_not_500(client_factory):
+    """Trouvaille Copilot PR #25 (#1, sévérité haute) : un `groups` dont
+    la structure ne respecte pas le format attendu (ex: un GROUPE envoyé
+    comme un objet au lieu d'une liste de critères) atteignait
+    apply_filter_groups (trieur/filters.py) et y faisait planter
+    `c.get(...)` (AttributeError sur un str) -- 500 au lieu d'une 400
+    propre. Le cas ["column":"CP"] à la place de [[{"column":"CP",...}]]."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(tc, "org-1", b"NOM,CP\nA,34000\n")
+
+    # Un groupe qui est un objet (dict) au lieu d'une liste de critères.
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"groups": json.dumps([{"column": "CP"}])},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+    # Un critère qui n'est pas un objet.
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"groups": json.dumps([["CP"]])},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+    # `values` d'un mauvais type (pas une liste).
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"groups": json.dumps([[{"column": "CP", "kind": "departements", "values": "34"}]])},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+    # `kind` hors des valeurs attendues.
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"groups": json.dumps([[{"column": "CP", "kind": "n_importe_quoi", "values": ["34"]}]])},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_pipeline_rows_incomplete_group_is_still_ignored_gracefully(client_factory):
+    """Un groupe/critère juste INCOMPLET (colonne ou valeurs pas encore
+    choisies côté écran, ex: `values: []`) n'est PAS une erreur -- même
+    comportement documenté par trieur/filters.py:apply_filter_groups
+    (ignoré, pas de filtre actif), la validation ne doit pas le rejeter."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(tc, "org-1", b"NOM,CP\nA,34000\nB,75001\n")
+
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"groups": json.dumps([[{"column": "CP", "kind": "departements", "values": []}]])},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.json()["count"] == 2
+
+
+def test_pipeline_dedupe_malformed_groups_body_is_400(client_factory):
+    """Même validation côté POST .../dedupe (body.groups, pas la query
+    string `groups` des GET) -- même structure malformée, même 400."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\n")
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "rule", "keep": "first", "groups": [{"column": "CP"}]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_pipeline_export_groups_filter(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(tc, "org-1", b"NOM,CP\nA,34000\nB,75001\n")
+    groups = [[{"column": "CP", "kind": "departements", "values": ["34"]}]]
+
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/export",
+        params={"format": "csv", "groups": json.dumps(groups)},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    content = res.content.decode("utf-8-sig")
+    assert "A" in content
+    assert "B" not in content
+
+
+# ---------------------------------------------------------------
+# Pipeline : détection et suppression de doublons (onglet 3, le "cœur
+# métier" -- trieur/filters.py, porté via api/pipeline_engine.py).
+# ---------------------------------------------------------------
+
+def test_pipeline_duplicates_detects_groups_and_suggests_most_complete(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\n,x@y.com\nMartin,z@y.com\n",
+    )
+
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/duplicates",
+        params={"column": "EMAIL"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["group_count"] == 1
+    assert body["duplicate_row_count"] == 2
+    assert body["group_threshold"] == 50
+    group = body["groups"][0]
+    assert group["value"] == "x@y.com"
+    assert len(group["row_ids"]) == 2
+    assert group["suggested_keep_id"] in group["row_ids"]
+
+
+def test_pipeline_duplicates_no_duplicates_is_empty(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\nMartin,z@y.com\n")
+
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/duplicates",
+        params={"column": "EMAIL"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.json()["groups"] == []
+
+
+def test_pipeline_dedupe_rule_first_removes_all_but_the_first_per_value(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\nDupont2,x@y.com\nMartin,z@y.com\n",
+    )
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "rule", "keep": "first"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["n_removed"] == 1
+    assert body["row_count"] == 2
+
+    remaining = fake.postgrest.tables["pipeline_rows"]
+    assert len(remaining) == 2
+    assert [r["data"]["NOM"] for r in remaining] == ["Dupont", "Martin"]
+
+
+def test_pipeline_dedupe_concurrent_call_on_same_session_is_409_not_a_race(client_factory):
+    """Migration 0013 (revue Copilot, PR #25) : un dédoublonnage déjà en
+    cours sur une session doit rejeter un 2e appel plutôt que de laisser
+    deux requêtes analyser le même groupe et supprimer chacune la ligne
+    que l'autre voulait garder. Simule la concurrence en posant le verrou
+    manuellement avant l'appel HTTP, comme le ferait une 1re requête
+    encore en cours."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\nDupont2,x@y.com\nMartin,z@y.com\n",
+    )
+    session = next(r for r in fake.postgrest.tables["pipeline_sessions"] if r["id"] == session_id)
+    session["dedupe_lock_at"] = datetime.now(timezone.utc)
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "rule", "keep": "first"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 409
+    remaining = fake.postgrest.tables["pipeline_rows"]
+    assert len(remaining) == 3, "rien ne doit être supprimé quand le verrou est déjà pris"
+
+
+def test_pipeline_dedupe_releases_lock_after_success_so_a_later_call_works(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\nDupont2,x@y.com\nMartin,z@y.com\n",
+    )
+    first = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "rule", "keep": "first"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert first.status_code == 200
+
+    second = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "NOM", "mode": "rule", "keep": "first"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert second.status_code == 200, "le verrou doit être libéré après un appel réussi"
+
+
+def test_pipeline_dedupe_expired_owner_cannot_unlock_a_newer_owner(client_factory):
+    """Migration 0014 (revue Copilot sur la migration 0013 elle-même) :
+    sans jeton propriétaire, une requête qui dépasse la TTL et perd la
+    propriété du verrou pourrait, dans son `finally`, libérer sans le
+    savoir le verrou posé entre-temps par une requête plus récente."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\nMartin,z@y.com\n",
+    )
+    session = next(r for r in fake.postgrest.tables["pipeline_sessions"] if r["id"] == session_id)
+
+    # Simule une 1re requête dont le verrou vient d'expirer (owner "stale"),
+    # et une 2e requête qui vient de réclamer le verrou juste après.
+    session["dedupe_lock_at"] = datetime.now(timezone.utc)
+    session["dedupe_lock_owner"] = "owner-recent"
+
+    # La 1re requête (propriétaire périmé) tente de libérer son propre jeton,
+    # qui n'est plus celui posé en base : ça ne doit RIEN changer.
+    fake.postgrest.rpc(
+        "unlock_pipeline_dedupe", {"p_session_id": session_id, "p_owner": "owner-stale"},
+    ).execute()
+
+    assert session["dedupe_lock_owner"] == "owner-recent", (
+        "un propriétaire périmé ne doit jamais pouvoir libérer le verrou d'un propriétaire plus récent"
+    )
+
+    # Un 3e appel HTTP doit donc toujours recevoir 409 : le verrou tenu par
+    # "owner-recent" est toujours actif.
+    third = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "rule", "keep": "first"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert third.status_code == 409
+
+
+def test_pipeline_dedupe_lock_stolen_mid_operation_deletes_nothing(client_factory, monkeypatch):
+    """Migration 0015 (revue Copilot sur la migration 0014 elle-même) :
+    le jeton propriétaire empêche une requête périmée de libérer le
+    verrou d'une requête plus récente, mais ne protège pas à lui seul
+    l'opération entière. Simule un calcul de dédoublonnage si long qu'un
+    autre appel reprend le verrou (TTL dépassée) AVANT le DELETE :
+    l'appel en cours doit détecter qu'il n'est plus propriétaire à la
+    revérification et abandonner sans rien supprimer."""
+    from api import main as api_main
+
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\nDupont2,x@y.com\nMartin,z@y.com\n",
+    )
+
+    real_dedupe_rule = api_main.pipeline_engine.dedupe_rule
+
+    def _steal_lock_then_dedupe(*args, **kwargs):
+        # Simule une autre requête qui réclame le verrou pendant que
+        # celle-ci calcule encore -- la TTL a expiré entretemps côté réel,
+        # ici on le simule directement en changeant le propriétaire.
+        session = next(
+            r for r in fake.postgrest.tables["pipeline_sessions"] if r["id"] == session_id
+        )
+        session["dedupe_lock_owner"] = "owner-du-nouvel-appel"
+        return real_dedupe_rule(*args, **kwargs)
+
+    monkeypatch.setattr(api_main.pipeline_engine, "dedupe_rule", _steal_lock_then_dedupe)
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "rule", "keep": "first"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 409
+    remaining = fake.postgrest.tables["pipeline_rows"]
+    assert len(remaining) == 3, "rien ne doit être supprimé si le verrou a changé de propriétaire entretemps"
+
+
+def test_pipeline_dedupe_rule_complete_keeps_fullest_row(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,EMAIL,VILLE\nDupont,x@y.com,\nDupontComplet,x@y.com,Paris\n",
+    )
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "rule", "keep": "complete"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    remaining = fake.postgrest.tables["pipeline_rows"]
+    assert [r["data"]["NOM"] for r in remaining] == ["DupontComplet"]
+
+
+def test_pipeline_dedupe_manual_keeps_chosen_row_per_group(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\nDupont2,x@y.com\n",
+    )
+    analysis = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/duplicates",
+        params={"column": "EMAIL"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    ).json()
+    keep_id = analysis["groups"][0]["row_ids"][1]
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "manual", "keep_ids": [keep_id]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.json()["n_removed"] == 1
+    remaining = fake.postgrest.tables["pipeline_rows"]
+    assert len(remaining) == 1
+    assert remaining[0]["id"] == keep_id
+
+
+def test_pipeline_dedupe_manual_without_keep_ids_is_400(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\nDupont2,x@y.com\n")
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "manual", "keep_ids": []},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_pipeline_dedupe_manual_group_uncovered_by_keep_ids_is_400_and_deletes_nothing(client_factory):
+    """Trouvaille Copilot PR #25 (#2, sévérité haute) : si un groupe de
+    doublons de l'analyse filtrée actuelle n'a AUCUN id dans `keep_ids`
+    (analyse périmée, sélection incomplète côté écran), l'ancien code
+    laissait dedupe_dataframe_manual ne garder AUCUNE ligne de ce groupe
+    -- perte de données. Ici, 2 groupes de doublons (EMAIL) mais
+    `keep_ids` ne couvre que le 1er : la requête doit être rejetée en
+    400 et RIEN ne doit être supprimé (les 4 lignes doivent toutes
+    encore être là après)."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1",
+        b"NOM,EMAIL\nDupont,x@y.com\nDupont2,x@y.com\nMartin,z@y.com\nMartin2,z@y.com\n",
+    )
+    analysis = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/duplicates",
+        params={"column": "EMAIL"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    ).json()
+    assert analysis["group_count"] == 2
+    # Ne couvre que le groupe x@y.com, pas z@y.com.
+    covered_group = next(g for g in analysis["groups"] if g["value"] == "x@y.com")
+    keep_id = covered_group["row_ids"][0]
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "manual", "keep_ids": [keep_id]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+    remaining = fake.postgrest.tables["pipeline_rows"]
+    assert len(remaining) == 4  # rien supprimé
+
+
+def test_pipeline_dedupe_manual_keep_id_from_wrong_group_is_400(client_factory):
+    """`keep_ids` contient un id qui n'appartient à AUCUN groupe de
+    doublons (ex: id d'une ligne unique, ou d'une autre session) : rejeté
+    aussi, plutôt que silencieusement ignoré."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\nDupont2,x@y.com\nSeul,unique@y.com\n",
+    )
+    rows = fake.postgrest.tables["pipeline_rows"]
+    unique_row_id = next(r["id"] for r in rows if r["data"]["EMAIL"] == "unique@y.com")
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "manual", "keep_ids": [unique_row_id]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+    assert len(fake.postgrest.tables["pipeline_rows"]) == 3
+
+
+def test_pipeline_dedupe_invalid_mode_is_400(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\n")
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "n_importe_quoi"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_pipeline_dedupe_respects_active_filter_scope(client_factory):
+    """Comme l'onglet 3 (dedup appliqué sur `filtered_df`, jamais sur les
+    lignes déjà exclues par le filtre) : une ligne hors du filtre actif
+    n'est jamais supprimée, même si elle ferait doublon."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(
+        tc, "org-1", b"NOM,EMAIL,VILLE\nA,x@y.com,Paris\nB,x@y.com,Lyon\n",
+    )
+    groups = [[{"column": "VILLE", "kind": "valeurs", "values": ["Paris"]}]]
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "EMAIL", "mode": "rule", "keep": "first", "groups": groups},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.json()["n_removed"] == 0
+    assert len(fake.postgrest.tables["pipeline_rows"]) == 2
+
+
+def test_pipeline_duplicates_wrong_org_is_404(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_pipeline_rows(tc, "org-1", b"NOM,EMAIL\nDupont,x@y.com\n")
+    fake.postgrest.tables["pipeline_sessions"][0]["org_id"] = "org-2"
+
+    res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/duplicates",
+        params={"column": "EMAIL"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 404
+
+
+# ---------------------------------------------------------------
+# Pipeline : import PDF (relevés SEPA, trieur/io_pdf.py) -- routage
+# vérifié via monkeypatch (pas de vrai PDF de test disponible, voir
+# tests/test_sepa.py pour la logique d'extraction elle-même).
+# ---------------------------------------------------------------
+
+def test_parse_pipeline_file_routes_pdf_to_sepa_reader(monkeypatch):
+    import pandas as pd
+
+    from api import main as api_main
+
+    called = {}
+
+    def _fake_read_pdf_sepa(file_obj, filename):
+        called["filename"] = filename
+        return {"PDF": pd.DataFrame([{"Montant": 41.66}])}, []
+
+    monkeypatch.setattr(api_main, "read_pdf_sepa", _fake_read_pdf_sepa)
+    sheets = api_main._parse_pipeline_file("releve.pdf", b"contenu-pdf-quelconque")
+
+    assert called["filename"] == "releve.pdf"
+    assert list(sheets.keys()) == ["PDF"]
 
 
 # ---------------------------------------------------------------

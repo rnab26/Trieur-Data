@@ -30,7 +30,9 @@ type Ecran = 'database' | 'pipeline' | 'cockpit'
 function AppContent() {
   const { session, loading } = useAuth()
   const { isAdmin } = useIsAdmin(!loading && Boolean(session))
-  const [ecran, setEcran] = useState<Ecran>('database')
+  // Trieur de Data par défaut (usage quotidien) -- Base de données et
+  // Cockpit restent accessibles via les onglets du haut.
+  const [ecran, setEcran] = useState<Ecran>('pipeline')
 
   if (loading) {
     return (

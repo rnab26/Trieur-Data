@@ -41,6 +41,25 @@ function handleUnauthorized() {
   void supabase.auth.signOut()
 }
 
+// `fetch` lui-même peut échouer sans jamais renvoyer de Response --
+// connexion coupée en cours d'envoi (page mise en arrière-plan sur
+// mobile : le navigateur suspend/tue la requête), page/appli quittée,
+// ou coupure réseau. Sans ce wrapper, l'erreur brute du navigateur
+// (souvent "Failed to fetch"/"Load failed", jamais une ApiError) tombe
+// dans le `catch` générique de chaque écran et s'affiche comme
+// "Erreur inconnue" -- aucune info exploitable pour l'utilisateur.
+async function safeFetch(url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init)
+  } catch {
+    throw new ApiError(
+      0,
+      "Connexion interrompue pendant l'envoi -- vérifie ta connexion et ne quitte pas cette page "
+      + '(ni un autre onglet/appli) tant que l\'import est en cours, puis réessaie.',
+    )
+  }
+}
+
 async function throwForErrorResponse(res: Response): Promise<never> {
   let detail = res.statusText
   try {
@@ -57,7 +76,7 @@ async function throwForErrorResponse(res: Response): Promise<never> {
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = await authHeader()
-  const res = await fetch(`${API_URL}${path}`, {
+  const res = await safeFetch(`${API_URL}${path}`, {
     ...init,
     headers: {
       ...headers,
@@ -221,7 +240,7 @@ async function importRequest<T>(
   if (opts.ibanCol) form.set('iban_col', opts.ibanCol)
   form.set('add_unknown_columns', String(opts.addUnknownColumns ?? false))
   form.set('dry_run', String(opts.dryRun ?? false))
-  const res = await fetch(`${API_URL}/orgs/${orgId}/import`, {
+  const res = await safeFetch(`${API_URL}/orgs/${orgId}/import`, {
     method: 'POST',
     headers,
     body: form,
@@ -339,7 +358,7 @@ export async function exportRecords(
   if (opts.visibleCols) params.set('visible_cols', opts.visibleCols.join(','))
   if (opts.knownCols) params.set('known_cols', opts.knownCols.join(','))
 
-  const res = await fetch(`${API_URL}/orgs/${orgId}/records/export?${params.toString()}`, { headers })
+  const res = await safeFetch(`${API_URL}/orgs/${orgId}/records/export?${params.toString()}`, { headers })
   if (!res.ok) {
     return throwForErrorResponse(res)
   }
@@ -539,7 +558,7 @@ async function uploadPipelineFiles<T>(orgId: string, files: File[]): Promise<T> 
   const headers = await authHeader()
   const form = new FormData()
   for (const file of files) form.append('files', file)
-  const res = await fetch(`${API_URL}/orgs/${orgId}/pipeline/sessions`, {
+  const res = await safeFetch(`${API_URL}/orgs/${orgId}/pipeline/sessions`, {
     method: 'POST',
     headers,
     body: form,
@@ -710,7 +729,7 @@ export async function exportPipelineSessionRows(
   // = toutes les colonnes, ordre d'apparition (comportement précédent).
   if (opts.columns) params.set('columns', opts.columns.join(','))
 
-  const res = await fetch(
+  const res = await safeFetch(
     `${API_URL}/orgs/${orgId}/pipeline/sessions/${sessionId}/export?${params.toString()}`,
     { headers },
   )

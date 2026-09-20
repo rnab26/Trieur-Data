@@ -319,10 +319,16 @@ export function Tab2ImportMapping({
                 </div>
               ))}
               {uploading && (
-                <p className="flex items-center gap-2 text-xs text-[var(--muted)]">
-                  Import en cours… ({uploadElapsedSec}s)
-                  {uploadElapsedSec >= 8 && ' -- un gros fichier peut prendre encore quelques instants.'}
-                </p>
+                <>
+                  <p className="flex items-center gap-2 text-xs text-[var(--muted)]">
+                    Import en cours… ({uploadElapsedSec}s)
+                    {uploadElapsedSec >= 8 && ' -- un gros fichier peut prendre encore quelques instants.'}
+                  </p>
+                  <p className="text-xs font-medium text-[var(--danger)]">
+                    ⚠️ Ne quitte pas cette page (ni une autre appli/onglet) tant que l'import est en
+                    cours -- ça coupe l'envoi et il faudra recommencer.
+                  </p>
+                </>
               )}
             </div>
           )}

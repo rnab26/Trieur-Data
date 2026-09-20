@@ -1230,6 +1230,24 @@ def test_pipeline_session_create_stages_rows_and_detects_columns(client_factory)
     assert all(r["session_id"] == session_id for r in rows)
 
 
+def test_pipeline_session_create_returns_per_sheet_summaries(client_factory):
+    """[7] de la référence Streamlit : chaque onglet reçoit son propre
+    résumé (colonnes, lignes, doublons, aperçu) pour construire une carte
+    par onglet côté écran, sans re-télécharger les fichiers."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    content = b"NOM,EMAIL\nDupont,d@x.com\nDupont,d@x.com\nMartin,m@x.com\n"
+
+    body = _upload_csv(tc, "org-1", content).json()
+    assert len(body["sheets"]) == 1
+    sheet = body["sheets"][0]
+    assert sheet["sheet_key"] == "clients"
+    assert sheet["columns"] == ["NOM", "EMAIL"]
+    assert sheet["row_count"] == 3
+    assert sheet["n_duplicates"] == 1
+    assert sheet["preview_rows"][0] == {"NOM": "Dupont", "EMAIL": "d@x.com"}
+
+
 def test_pipeline_session_create_merges_multiple_files_into_one_session(client_factory):
     """Restaure le multi-fichiers de l'original Streamlit
     (st.file_uploader(accept_multiple_files=True), views/tab2_import_mapping.py) --
@@ -1461,7 +1479,10 @@ def test_pipeline_mapping_dry_run_suggests_without_writing(client_factory):
     )
     assert res.status_code == 200
     body = res.json()
-    assert body["suggested_mapping"] == {"NOM": "NOM", "IBAN": "IBAN"}
+    # La suggestion est PAR ONGLET (sheet_key -> {source: maître}) -- un
+    # seul CSV = un seul onglet, nommé d'après le fichier ("clients.csv"
+    # sans l'extension, voir trieur/io_excel.py:read_csv_file).
+    assert body["suggested_mapping"] == {"clients": {"NOM": "NOM", "IBAN": "IBAN"}}
 
     # dry_run : rien n'est modifié en base.
     session = tc.get(f"/orgs/org-1/pipeline/sessions/{session_id}", headers={"Authorization": f"Bearer {TOKEN}"}).json()
@@ -1475,13 +1496,15 @@ def test_pipeline_mapping_apply_rekeys_rows_and_marks_mapped(client_factory):
 
     res = tc.post(
         f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
-        json={"mapping": {"nom_client": "NOM", "iban_ref": "IBAN"}},
+        json={"mapping": {"clients": {"nom_client": "NOM", "iban_ref": "IBAN"}}},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 200
     body = res.json()
     assert body["status"] == "mapped"
     assert body["n_rows_updated"] == 1
+    assert body["n_rows_excluded"] == 0
+    assert body["mapping"] == {"clients": {"nom_client": "NOM", "iban_ref": "IBAN"}}
 
     rows = fake.postgrest.tables["pipeline_rows"]
     assert rows[0]["data"] == {"NOM": "Dupont", "IBAN": "FR7630006000011234567890189"}
@@ -1505,7 +1528,7 @@ def test_pipeline_mapping_applies_suggestion_when_no_mapping_given(client_factor
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 200
-    assert res.json()["mapping"] == {"NOM": "NOM", "IBAN": "IBAN"}
+    assert res.json()["mapping"] == {"clients": {"NOM": "NOM", "IBAN": "IBAN"}}
     rows = fake.postgrest.tables["pipeline_rows"]
     assert rows[0]["data"] == {"NOM": "Dupont", "IBAN": "FR7630006000011234567890189"}
 
@@ -1517,10 +1540,115 @@ def test_pipeline_mapping_all_unassigned_is_400(client_factory):
 
     res = tc.post(
         f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
-        json={"mapping": {"colonneinconnue": "(non assigne)"}},
+        json={"mapping": {"clients": {"colonneinconnue": "(non assigne)"}}},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 400
+
+
+def test_pipeline_mapping_sheet_absent_from_mapping_is_excluded(client_factory):
+    """Un onglet ABSENT du mapping fourni (décoché côté écran, cf. [3] de
+    la référence Streamlit) est exclu de la base fusionnée -- ses lignes
+    de staging sont retirées, pas laissées à moitié mappées."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_csv(tc, "org-1", b"NOM,IBAN\nDupont,FR7630006000011234567890189\n").json()["session_id"]
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400  # aucune colonne assignée nulle part
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {"clients": {"NOM": "NOM"}}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["n_rows_updated"] == 1
+    assert body["mapping"] == {"clients": {"NOM": "NOM"}}
+    # "IBAN" n'a jamais été assigné (mapping ne le mentionne pas) : ne
+    # doit pas apparaître dans la ligne finale.
+    rows = fake.postgrest.tables["pipeline_rows"]
+    assert rows[0]["data"] == {"NOM": "Dupont"}
+
+
+def test_pipeline_mapping_two_sheets_have_independent_mappings(client_factory):
+    """Deux onglets peuvent mapper des colonnes sources DIFFÉRENTES sur la
+    MÊME colonne maître (ex. onglet A "Tél" -> TELEPHONE MOBILE, onglet B
+    "Portable" -> TELEPHONE MOBILE) -- chaque onglet garde SON PROPRE
+    mapping, jamais un mapping global fusionné pour toute la session."""
+    fake = _make_client()
+    tc = client_factory(fake)
+
+    res = tc.post(
+        "/orgs/org-1/pipeline/sessions",
+        files=[
+            ("files", ("a.csv", b"Tel\n0601020304\n", "text/csv")),
+            ("files", ("b.csv", b"Portable\n0708091011\n", "text/csv")),
+        ],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    sheet_keys = [s["sheet_key"] for s in body["sheets"]]
+    assert len(sheet_keys) == 2
+    session_id = body["session_id"]
+
+    key_a = next(k for k in sheet_keys if k.startswith("a.csv"))
+    key_b = next(k for k in sheet_keys if k.startswith("b.csv"))
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {
+            key_a: {"Tel": "TELEPHONE MOBILE"},
+            key_b: {"Portable": "TELEPHONE MOBILE"},
+        }},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.json()["n_rows_updated"] == 2
+
+    rows = fake.postgrest.tables["pipeline_rows"]
+    values = {r["data"]["TELEPHONE MOBILE"] for r in rows}
+    assert values == {"0601020304", "0708091011"}
+
+
+def test_pipeline_mapping_cleans_iban_per_sheet(client_factory):
+    """Nettoyage IBAN (espaces internes retirés) appliqué à CHAQUE onglet
+    indépendamment, quel que soit son propre mapping."""
+    fake = _make_client()
+    tc = client_factory(fake)
+
+    res = tc.post(
+        "/orgs/org-1/pipeline/sessions",
+        files=[
+            ("files", ("a.csv", b"Ref\nFR76 3000 6000 0112 3456 7890 189\n", "text/csv")),
+            ("files", ("b.csv", b"Compte\nFR76 3000 6000 0112 3456 7890 189\n", "text/csv")),
+        ],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    body = res.json()
+    sheet_keys = [s["sheet_key"] for s in body["sheets"]]
+    key_a = next(k for k in sheet_keys if k.startswith("a.csv"))
+    key_b = next(k for k in sheet_keys if k.startswith("b.csv"))
+    session_id = body["session_id"]
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {
+            key_a: {"Ref": "IBAN"},
+            key_b: {"Compte": "IBAN"},
+        }},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    rows = fake.postgrest.tables["pipeline_rows"]
+    for r in rows:
+        assert r["data"]["IBAN"] == "FR7630006000011234567890189"
 
 
 def test_pipeline_mapping_unknown_session_is_404(client_factory):
@@ -1828,7 +1956,7 @@ def test_pipeline_mapping_first_non_empty_value_wins_on_collision(client_factory
 
     res = tc.post(
         f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
-        json={"mapping": {"nom": "NOM", "tel1": "TELEPHONE MOBILE", "tel2": "TELEPHONE MOBILE"}},
+        json={"mapping": {"clients": {"nom": "NOM", "tel1": "TELEPHONE MOBILE", "tel2": "TELEPHONE MOBILE"}}},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 200
@@ -1845,7 +1973,7 @@ def test_pipeline_mapping_sets_source_data_automatically(client_factory):
 
     res = tc.post(
         f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
-        json={"mapping": {"nom": "NOM"}},
+        json={"mapping": {"clients": {"nom": "NOM"}}},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 200
@@ -1862,7 +1990,7 @@ def test_pipeline_mapping_cleans_iban_spaces_and_reports_invalid_checksum(client
 
     res = tc.post(
         f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
-        json={"mapping": {"NOM": "NOM", "IBAN": "IBAN"}},
+        json={"mapping": {"clients": {"NOM": "NOM", "IBAN": "IBAN"}}},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 200
@@ -1904,7 +2032,7 @@ def test_pipeline_mapping_detects_iban_column_with_generic_name_beyond_preview_s
     session_id = _upload_csv(tc, "org-1", content).json()["session_id"]
     res = tc.post(
         f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
-        json={"mapping": {"NOM": "NOM", "Compte": "Compte"}},
+        json={"mapping": {"clients": {"NOM": "NOM", "Compte": "Compte"}}},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 200

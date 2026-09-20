@@ -694,13 +694,15 @@ async def import_records(
 # volontairement PAS une deuxième liste -- voir la note au-dessus de
 # get_master_columns.
 #
-# Limite connue, volontaire pour ce premier incrément : un fichier PDF
-# (relevés SEPA, trieur/io_pdf.py) n'est pas encore couvert par cette
-# route -- seuls Excel/CSV (trieur/io_excel.py) le sont ici. Un fichier
-# multi-onglets est fusionné en une seule session (onglet d'origine gardé
-# sous la clé "_sheet" de chaque ligne, jamais proposée au mapping) : le
-# mapping par onglet séparé de views/tab2_import_mapping.py n'est pas
-# reproduit, ce n'est pas nécessaire pour le flux de données.
+# Un fichier peut avoir PLUSIEURS onglets (Excel) ; CSV/PDF n'en ont
+# qu'un implicite. Toutes les lignes de TOUS les onglets/fichiers sont
+# fusionnées dans le MÊME staging (trieur_data.pipeline_rows), chaque
+# ligne gardant son onglet d'origine sous la clé technique "_sheet"
+# (jamais proposée au mapping ni comptée dans les colonnes détectées --
+# voir _without_sheet_key/_detected_columns). Le MAPPING, lui, est PAR
+# ONGLET (voir PipelineMapping/apply_pipeline_mapping ci-dessous) :
+# fidèle à views/tab2_import_mapping.py, une carte par onglet côté écran,
+# chacune avec son propre mapping colonnes source -> colonnes maîtres.
 # ---------------------------------------------------------------
 
 PIPELINE_PREVIEW_SIZE = 10
@@ -793,6 +795,40 @@ def _without_sheet_key(data: dict) -> dict:
     return {k: v for k, v in data.items() if k != "_sheet"}
 
 
+def _nan_to_none(row: dict) -> dict:
+    """Même conversion que `_merge_pipeline_sheets` : une cellule vide
+    devient NaN côté pandas, non sérialisable en JSON/jsonb."""
+    return {str(k): (None if isinstance(v, float) and v != v else v) for k, v in row.items()}
+
+
+def _sheet_summary_from_df(sheet_key: str, df: pd.DataFrame) -> dict:
+    """Résumé d'UN onglet tel que lu à l'import (avant staging) : colonnes,
+    lignes, doublons (df.duplicated(), même calcul que
+    views/tab2_import_mapping.py) et un aperçu (6 premières lignes) --
+    de quoi construire côté écran UNE carte par onglet (structure [7] de
+    la référence Streamlit) sans tout re-télécharger."""
+    preview_rows = [_nan_to_none(row) for row in df.head(6).to_dict(orient="records")]
+    return {
+        "sheet_key": sheet_key,
+        "columns": [str(c) for c in df.columns],
+        "row_count": len(df),
+        "n_duplicates": int(df.duplicated().sum()),
+        "preview_rows": preview_rows,
+    }
+
+
+def _sheet_data_by_key(all_rows: list[dict]) -> dict[str, list[dict]]:
+    """Regroupe les lignes de staging déjà chargées ({id, row_index, data})
+    par onglet d'origine (`_sheet`) -- ordre de première apparition
+    conservé. Sert de base à la suggestion/application du mapping PAR
+    ONGLET (apply_pipeline_mapping ci-dessous)."""
+    by_sheet: dict[str, list[dict]] = {}
+    for r in all_rows:
+        sheet_key = r["data"].get("_sheet") or ""
+        by_sheet.setdefault(sheet_key, []).append(r)
+    return by_sheet
+
+
 def _get_pipeline_session_or_404(ctx: AuthCtx, org_id: str, session_id: str) -> dict:
     """Une session appartenant à un AUTRE environnement, ou expirée/déjà
     nettoyée par cleanup_expired_pipeline_sessions(), est traitée comme
@@ -830,6 +866,11 @@ async def create_pipeline_session_endpoint(
     rows, columns = _merge_pipeline_sheets(sheets)
     if not rows:
         raise HTTPException(status_code=400, detail="Fichier(s) vide(s) ou sans ligne exploitable.")
+
+    # [7] Un résumé PAR ONGLET (avant toute écriture en staging) -- permet à
+    # l'écran de construire une carte par onglet (menus + aperçu alignés)
+    # sans re-télécharger les fichiers.
+    sheet_summaries = [_sheet_summary_from_df(key, df) for key, df in sheets.items()]
 
     # Nettoyage opportuniste des sessions expirées de CET org avant d'en
     # ouvrir une nouvelle (revue PR #24, point #8 -- voir docstring de
@@ -889,6 +930,7 @@ async def create_pipeline_session_endpoint(
         "columns": columns,
         "unknown_columns": unknown_columns(columns, master_cols),
         "preview_rows": [_without_sheet_key(r) for r in rows[:PIPELINE_PREVIEW_SIZE]],
+        "sheets": sheet_summaries,
     }
 
 
@@ -907,11 +949,15 @@ def get_pipeline_session_endpoint(org_id: str, session_id: str, ctx: AuthCtx = D
 
 
 class PipelineMapping(BaseModel):
-    # `None` : pas de mapping fourni -> la suggestion d'auto-assignation
-    # est appliquée telle quelle. Fournir un dict explicite, même partiel,
-    # remplace entièrement la suggestion (l'appelant doit envoyer le
-    # mapping COMPLET qu'il veut appliquer, pas un patch).
-    mapping: Optional[dict[str, str]] = None
+    # sheet_key -> {colonne source: colonne maître}. `None` : pas de
+    # mapping fourni -> la suggestion d'auto-assignation (par onglet) est
+    # appliquée telle quelle. Fournir un dict explicite, même partiel,
+    # remplace entièrement la suggestion pour CHAQUE onglet qu'il
+    # contient (l'appelant envoie le mapping COMPLET qu'il veut appliquer
+    # pour cet onglet, pas un patch). Un onglet du staging ABSENT de ce
+    # dict (décoché par l'utilisateur, cf. [3] de la référence Streamlit)
+    # est traité comme sans assignation : voir apply_pipeline_mapping.
+    mapping: Optional[dict[str, dict[str, str]]] = None
     # true : renvoie la suggestion sans rien écrire (aperçu avant
     # confirmation côté frontend, même principe que dry_run sur /import).
     dry_run: bool = False
@@ -1099,79 +1145,109 @@ def apply_pipeline_mapping(
     org_id: str, session_id: str, body: PipelineMapping, ctx: AuthCtx = Depends(require_org_access),
 ):
     """Propose (dry_run) ou applique le mapping colonnes source -> colonnes
-    maîtres. La suggestion réutilise trieur/matching.py:auto_assign_columns_fast
-    -- même logique que le bouton "Auto" de views/tab2_import_mapping.py,
-    jamais réimplémentée ici (échantillon = le même aperçu que le GET
-    ci-dessus, pas tout le fichier : suffisant pour la détection par
-    contenu -- téléphone/IBAN -- sans charger des millions de lignes).
+    maîtres, PAR ONGLET (structure [7] de views/tab2_import_mapping.py --
+    voir la note au-dessus de PipelineMapping). La suggestion réutilise
+    trieur/matching.py:auto_assign_columns_fast pour CHAQUE onglet -- même
+    logique que le bouton "Auto" local ou "Auto-assigner TOUS les
+    onglets" de la référence Streamlit, jamais réimplémentée ici.
 
-    En dehors d'un dry_run, applique le mapping (fourni, ou la suggestion
-    si omis) : chaque ligne de la session est réécrite avec les clés
-    COLONNES MAÎTRES (une colonne source sur "(non assigne)" disparaît de
-    la ligne), puis la session passe au statut 'mapped'. Même règles que
-    le bouton "Construire la base de travail fusionnée" de
-    views/tab2_import_mapping.py (voir api/pipeline_mapping.py) :
-      - si deux colonnes source pointent vers la MÊME colonne maître, la
-        PREMIÈRE valeur non vide gagne (pas "la dernière écrase") ;
+    En dehors d'un dry_run, applique le mapping (fourni par onglet, ou la
+    suggestion par onglet si omis) : chaque ligne de la session est
+    réécrite avec les clés COLONNES MAÎTRES SELON LE MAPPING DE SON PROPRE
+    ONGLET (`_sheet`) -- une même colonne maître peut ainsi recevoir des
+    colonnes sources différentes selon l'onglet. Puis la session passe au
+    statut 'mapped'. Mêmes règles que le bouton "Construire la base de
+    travail fusionnée" de views/tab2_import_mapping.py (voir
+    api/pipeline_mapping.py) :
+      - un onglet ABSENT du mapping fourni, ou sans aucune colonne
+        assignée, est exclu de la base fusionnée -- ses lignes sont
+        retirées du staging (équivalent d'un onglet décoché à l'étape [3]
+        ou "Aucune colonne assignée, ignoré") ;
+      - si deux colonnes source du MÊME onglet pointent vers la MÊME
+        colonne maître, la PREMIÈRE valeur non vide gagne (pas "la
+        dernière écrase") ;
       - "Source Data" (si présente dans les colonnes maîtres) est
         toujours renseignée automatiquement (fichier + onglet d'origine),
         jamais depuis une colonne source ;
-      - les colonnes IBAN détectées (nom ou contenu) ont leurs espaces
-        internes retirés (clean_iban) ; leur checksum (mod 97) est
-        vérifié et les lignes invalides remontées dans `iban_warnings`
-        (rien n'est bloqué ni supprimé automatiquement -- même choix que
-        Streamlit, à vérifier avant l'export)."""
+      - les colonnes IBAN détectées (nom ou contenu, sur un échantillon
+        mêlant tous les onglets mappés) ont leurs espaces internes
+        retirés (clean_iban) ; leur checksum (mod 97) est vérifié et les
+        lignes invalides remontées dans `iban_warnings` (rien n'est
+        bloqué ni supprimé automatiquement -- même choix que Streamlit, à
+        vérifier avant l'export)."""
     session = _get_pipeline_session_or_404(ctx, org_id, session_id)
     master_cols = get_org_master_columns(ctx.client, org_id)
 
-    sample = list_pipeline_rows(ctx.client, session_id, limit=PIPELINE_PREVIEW_SIZE)
-    real_columns = _detected_columns([r["data"] for r in sample])
-    sample_df = pd.DataFrame([_without_sheet_key(r["data"]) for r in sample]) if sample else None
-    suggestion = auto_assign_columns_fast(real_columns, master_cols, sheet_df=sample_df)
+    # Toute la session est chargée (comme /rows et /export ci-dessus) :
+    # le mapping doit voir chaque onglet en entier, pas juste les 10
+    # premières lignes globales -- une session à plusieurs onglets aurait
+    # sinon ses onglets suivants complètement invisibles à la suggestion.
+    all_rows = _all_pipeline_rows(ctx.client, session_id)
+    sheets_data = _sheet_data_by_key(all_rows)
+
+    suggestion: dict[str, dict[str, str]] = {}
+    for sheet_key, sheet_rows in sheets_data.items():
+        real_columns = _detected_columns([r["data"] for r in sheet_rows])
+        sample_df = (
+            pd.DataFrame([_without_sheet_key(r["data"]) for r in sheet_rows[:PIPELINE_PREVIEW_SIZE]])
+            if sheet_rows else None
+        )
+        suggestion[sheet_key] = auto_assign_columns_fast(real_columns, master_cols, sheet_df=sample_df)
 
     if body.dry_run:
-        return {"session_id": session_id, "suggested_mapping": suggestion, "columns": real_columns}
+        return {"session_id": session_id, "suggested_mapping": suggestion}
 
-    mapping = body.mapping if body.mapping is not None else suggestion
-    if not any(m and m != "(non assigne)" for m in mapping.values()):
+    mapping_by_sheet = body.mapping if body.mapping is not None else suggestion
+    if not any(
+        m and m != "(non assigne)"
+        for sheet_map in mapping_by_sheet.values()
+        for m in sheet_map.values()
+    ):
         raise HTTPException(status_code=400, detail="Aucune colonne assignée dans ce mapping.")
 
-    # Colonnes IBAN (nom OU contenu) détectées sur un échantillon dédié
-    # (IBAN_DETECTION_SAMPLE_SIZE, pas le petit `sample` de prévisualisation
-    # ci-dessus) -- une seule détection pour toute la session (comme
-    # views/tab2_import_mapping.py sur la base fusionnée), pas relancée
-    # à chaque ligne. Un échantillon trop petit raterait une colonne au nom
-    # générique dont les vraies valeurs IBAN n'apparaissent que plus loin
-    # dans le fichier.
-    iban_sample = (
-        sample
-        if len(sample) >= IBAN_DETECTION_SAMPLE_SIZE
-        else list_pipeline_rows(ctx.client, session_id, limit=IBAN_DETECTION_SAMPLE_SIZE)
-    )
-    mapped_iban_sample = [
-        merge_mapped_row(_without_sheet_key(r["data"]), mapping, master_cols, None, set())
-        for r in iban_sample
-    ]
-    iban_masters = detect_iban_master_columns(mapped_iban_sample, master_cols)
+    # Colonnes IBAN (nom OU contenu) détectées sur un échantillon MÊLANT
+    # TOUS les onglets réellement mappés (pas seulement le premier) --
+    # plafonné par onglet (IBAN_DETECTION_SAMPLE_SIZE réparti) pour rester
+    # borné en mémoire même avec beaucoup d'onglets.
+    per_sheet_cap = max(50, IBAN_DETECTION_SAMPLE_SIZE // max(len(sheets_data), 1))
+    iban_sample_rows = []
+    for sheet_key, sheet_map in mapping_by_sheet.items():
+        sheet_rows = sheets_data.get(sheet_key, [])
+        if not sheet_rows or not any(m and m != "(non assigne)" for m in sheet_map.values()):
+            continue
+        iban_sample_rows.extend(
+            merge_mapped_row(_without_sheet_key(r["data"]), sheet_map, master_cols, None, set())
+            for r in sheet_rows[:per_sheet_cap]
+        )
+    iban_masters = detect_iban_master_columns(iban_sample_rows, master_cols)
 
     n_updated = 0
+    n_excluded = 0
     iban_invalid_counts: dict[str, int] = {}
     iban_invalid_samples: dict[str, list[str]] = {}
-    offset = 0
-    while True:
-        page = list_pipeline_rows(ctx.client, session_id, limit=LIST_PAGE_SIZE, offset=offset)
-        if not page:
-            break
-        for row in page:
-            src_data = row["data"]
-            sheet = src_data.get("_sheet")
-            source_label = None
-            if "Source Data" in master_cols:
-                base = session.get("source_filename") or "import"
-                source_label = f"{base} ({sheet})" if sheet else base
+    applied_mapping: dict[str, dict[str, str]] = {}
 
+    for sheet_key, sheet_rows in sheets_data.items():
+        sheet_map = mapping_by_sheet.get(sheet_key, {})
+        has_assignment = any(m and m != "(non assigne)" for m in sheet_map.values())
+        if not has_assignment:
+            # Onglet décoché par l'utilisateur (absent de `mapping`) ou
+            # sans aucune assignation : exclu de la base fusionnée, comme
+            # "Aucune colonne assignée, ignoré" / l'étape [3] de la
+            # référence -- ses lignes de staging sont retirées plutôt que
+            # de rester à moitié mappées.
+            n_excluded += delete_pipeline_rows(ctx.client, session_id, [r["id"] for r in sheet_rows])
+            continue
+
+        applied_mapping[sheet_key] = sheet_map
+        source_label = None
+        if "Source Data" in master_cols:
+            base = session.get("source_filename") or "import"
+            source_label = f"{base} ({sheet_key})" if sheet_key else base
+
+        for row in sheet_rows:
             new_data = merge_mapped_row(
-                _without_sheet_key(src_data), mapping, master_cols, source_label, iban_masters,
+                _without_sheet_key(row["data"]), sheet_map, master_cols, source_label, iban_masters,
             )
 
             for col in iban_masters:
@@ -1183,14 +1259,14 @@ def apply_pipeline_mapping(
 
             update_pipeline_row_data(ctx.client, row["id"], new_data)
             n_updated += 1
-        offset += len(page)
 
     update_pipeline_session_status(ctx.client, session_id, "mapped")
     return {
         "session_id": session_id,
         "status": "mapped",
-        "mapping": mapping,
+        "mapping": applied_mapping,
         "n_rows_updated": n_updated,
+        "n_rows_excluded": n_excluded,
         "iban_columns_detected": sorted(iban_masters),
         "iban_warnings": [
             {"column": col, "n_invalid": iban_invalid_counts[col], "sample_row_ids": iban_invalid_samples[col]}

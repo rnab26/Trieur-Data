@@ -2533,3 +2533,69 @@ dans le code) :
 - [ ] Décider si les filtres/presets d'export nommés du pipeline
   valent la peine d'un nouvel endpoint (actuellement non portés, voir
   écarts ci-dessus).
+
+### Merge PR #25 (2026-09-20) -- chantier terminé
+
+PR ouverte sur `main` avec le backend + frontend ci-dessus, revue
+GitHub Copilot passée en boucle jusqu'à stabilisation (6 rounds), tous
+les vrais bugs corrigés et testés avant merge :
+
+1. `groups` (filtre multi-critères) non validé -> 500 au lieu de 400 sur
+   une structure malformée. Corrigé (`_validate_filter_groups`).
+2. Dédoublonnage manuel : un groupe de doublons non couvert par
+   `keep_ids` perdait TOUTES ses lignes au lieu d'être rejeté. Corrigé
+   (vérification stricte avant tout DELETE).
+3. Détection IBAN par contenu limitée aux 10 premières lignes
+   (`PIPELINE_PREVIEW_SIZE`) -> une colonne au nom générique avec des
+   IBAN plus loin dans le fichier n'était jamais détectée. Étendu à un
+   échantillon de 1000 lignes.
+4. `PipelineScreen.tsx` : changement d'org rapide pouvait laisser le
+   1er critère de filtre sur une colonne de l'ancienne org (closure
+   périmée). Corrigé.
+5. `Tab4Export.tsx` : ordre des colonnes à l'export déduit d'une seule
+   ligne échantillon -> une colonne absente de cette ligne (mais
+   présente sur d'autres) était silencieusement exclue de l'export.
+   Corrigé (union des colonnes maîtres du mapping).
+6. `row_count` non atomique côté suppression ET côté import par lots
+   (même patron read-modify-write) -> deux appels concurrents
+   pouvaient corrompre le compteur. Corrigé par RPC SQL atomique
+   (migrations 0012, 0013).
+7. Dédoublonnage : analyse et suppression non atomiques -> deux appels
+   concurrents sur la même session pouvaient chacun garder une ligne
+   différente du même groupe puis supprimer celle que l'autre voulait
+   garder. Corrigé par un verrou court par session avec jeton
+   propriétaire (migrations 0013/0014) + revérification juste avant le
+   DELETE (migration 0015, réduit la fenêtre de course résiduelle à
+   l'instant entre la revérification et le DELETE). Accepté comme
+   suffisant pour un outil interne mono-poste -- un verrou tenu par une
+   vraie transaction SQL de bout en bout serait disproportionné ici.
+8. Deux races React pré-existantes (colonnes maîtres périmées lors
+   d'un changement d'org, champ de filtre affichant une valeur périmée
+   après changement de colonne) trouvées et corrigées au passage.
+
+**Faux positif vérifié, pas corrigé** : Copilot a signalé que `.delete()`
+côté `trieur/db.py` pourrait toujours renvoyer `res.data` vide donc
+`n_deleted=0` -- vérifié dans le code source de `postgrest-py` (version
+réellement installée, `2.31.0`) : `returning=ReturnMethod.representation`
+est la valeur PAR DÉFAUT de `.delete()`, `res.data` contient bien les
+lignes supprimées. Pas un bug.
+
+294 tests backend au départ du chantier -> 307 à la fin (13 nouveaux,
+tous les correctifs ci-dessus couverts). Build frontend vert. Mergé
+sur `main` (commit `849e94a`).
+
+**Point trouvé en vérifiant la base réelle, non traité (hors périmètre)** :
+deux migrations Supabase (`0012_pipeline_parity`,
+`pipeline_saved_filters`, appliquées le 2026-09-18) existent sur le
+projet réel (`jarvis-assistant`) mais leurs fichiers `.sql` sont absents
+de ce dépôt -- drift pré-existant à ce chantier (une autre session a dû
+appliquer du SQL directement sans committer le fichier correspondant).
+À régulariser séparément : soit retrouver/recréer les fichiers
+manquants depuis le schéma réel, soit confirmer qu'ils viennent d'un
+autre repo/chantier.
+
+**Reste à faire côté Raphaël** :
+- [ ] Vérifier le flux complet en conditions réelles (vraies données,
+  vrai compte) -- non testable dans le sandbox de dev (pas
+  d'identifiants Supabase réels).
+- [ ] Régulariser le drift de migrations ci-dessus.

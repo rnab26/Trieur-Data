@@ -2,7 +2,12 @@
 -- Régularisation du dépôt (drift trouvé le 2026-09-20) : appliquée à la
 -- base réelle le 2026-09-18 (version `20260918144819`, voir
 -- `list_migrations`) par la même session/branche que 0016 -- voir sa
--- note pour le contexte. Contenu copié tel quel, NE PAS rejouer.
+-- note pour le contexte. Contenu copié tel quel.
+--
+-- Déjà appliquée sur la base de PRODUCTION actuelle -- ne l'exécute pas
+-- à la main dessus (le `create table` échouerait, la table existe
+-- déjà). Reste une migration normale et rejouable dans la séquence
+-- complète (0001 à N) pour initialiser une base neuve.
 --
 -- Filtres multi-critères pré-enregistrés (onglet 3 Streamlit,
 -- views/tab3_filtrage_dedup.py -- trieur/filters.py:apply_filter_groups) --

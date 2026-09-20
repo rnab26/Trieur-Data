@@ -5,8 +5,13 @@
 -- sur la branche `fix/pipeline-full-parity` -- jamais mergée sur `main`,
 -- son fichier n'existait donc pas ici alors que le schéma, lui, était
 -- déjà en place. Contenu copié tel quel depuis cette branche (aucune
--- ligne changée) pour que `main` reflète enfin le schéma réel -- NE PAS
--- rejouer, déjà appliqué.
+-- ligne changée) pour que `main` reflète enfin le schéma réel.
+--
+-- Déjà appliquée sur la base de PRODUCTION actuelle -- ne l'exécute pas
+-- à la main dessus (les `create table` échoueraient, les objets
+-- existent déjà). Reste une migration normale et rejouable dans la
+-- séquence complète (0001 à N) pour initialiser une base neuve (reset
+-- local, nouveau projet Supabase).
 --
 -- Crée trois éléments non utilisés par l'API actuelle de `main` (le
 -- portage fidèle du 2026-09-20 a documenté leur absence comme un écart
@@ -82,4 +87,4 @@ alter table trieur_data.pipeline_sessions
     add column dedup_config jsonb;
 
 comment on column trieur_data.pipeline_sessions.dedup_config is
-    'Dédoublonnage actif sur cette session ({"column": ..., "keep": "first"|"complete"}), ou NULL si aucun -- réappliqué à chaque lecture (/rows, /export) jusqu''à annulation explicite (voir api/main.py, onglet 3 Streamlit tab3_filtrage_dedup.py).';
+    'Colonne créée par la branche fix/pipeline-full-parity pour un dédoublonnage actif réappliqué à chaque lecture ({"column": ..., "keep": "first"|"complete"}, voir tab3_filtrage_dedup.py) -- INERTE sur main : aucun code de api/main.py ne la lit ni ne l''écrit aujourd''hui (main supprime les doublons directement, voir POST .../dedupe). À câbler ou à abandonner selon ce qui est décidé.';

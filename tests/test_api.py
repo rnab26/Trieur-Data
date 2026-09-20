@@ -635,6 +635,35 @@ def test_master_columns_write_allowed_for_admin(client_factory):
 _CSV_CONTENT = b"NOM,VILLE\nDupont,Paris\nMartin,Lyon\n"
 
 
+def test_import_rejects_oversized_upload_before_reading(client_factory, monkeypatch):
+    """Trouvaille Copilot, PR #28 : le plafond de taille (voir POST
+    .../pipeline/sessions) ne couvrait QUE l'import du Trieur de Data --
+    ce parcours-ci (Base de données > Importer) lisait encore tout le
+    fichier (await file.read()) puis pd.read_excel sans limite, même
+    risque d'OOM sur un gros .xlsx. Corrigé avec le même plafond
+    (PIPELINE_MAX_UPLOAD_BYTES). Vérifie aussi que le rejet a lieu AVANT
+    la lecture -- pas juste le code retour."""
+    from api import main as api_main
+
+    monkeypatch.setattr(api_main, "PIPELINE_MAX_UPLOAD_BYTES", 10)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("pd.read_csv ne doit jamais être atteint après le rejet 413")
+
+    monkeypatch.setattr(api_main.pd, "read_csv", _boom)
+
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/import",
+        files={"file": ("clients.csv", _CSV_CONTENT, "text/csv")},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 413
+    assert "volumineux" in res.json()["detail"]
+    assert fake.postgrest.tables["records"] == []
+
+
 def test_import_dry_run_previews_without_writing(client_factory):
     fake = _make_client()
     tc = client_factory(fake)
@@ -1223,10 +1252,21 @@ def test_pipeline_session_create_rejects_oversized_upload_before_parsing(client_
     pandas/openpyxl et déclenché un OOM-kill en cours de requête --
     l'utilisateur ne voyait qu'une connexion coupée, rien côté serveur.
     Rejeté maintenant AVANT tout parsing (413), plafond réduit ici pour
-    ne pas générer un vrai gros fichier de test."""
+    ne pas générer un vrai gros fichier de test.
+
+    Trouvaille Copilot, PR #28 : un test qui ne vérifie QUE le code 413
+    passerait encore si le contrôle de taille arrivait APRÈS un
+    f.read()/parsing -- ne verrouille pas la propriété qui protège
+    l'OOM. On fait donc explicitement planter le parsing s'il est
+    jamais atteint, pour prouver que le rejet a bien lieu avant."""
     from api import main as api_main
 
     monkeypatch.setattr(api_main, "PIPELINE_MAX_UPLOAD_BYTES", 10)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("le parsing ne doit jamais être atteint après le rejet 413")
+
+    monkeypatch.setattr(api_main, "_parse_and_merge_pipeline_files", _boom)
 
     fake = _make_client()
     tc = client_factory(fake)

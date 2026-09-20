@@ -640,7 +640,22 @@ async def import_records(
     permet au frontend d'afficher un aperçu et de choisir la colonne
     IBAN avant de confirmer, comme le fait `st.dataframe(df.head(10))`
     côté Streamlit (views/tab_database.py:_render_import), sans dupliquer
-    la lecture CSV/Excel (pandas) côté navigateur."""
+    la lecture CSV/Excel (pandas) côté navigateur.
+
+    Même plafond que l'import du Trieur de Data (PIPELINE_MAX_UPLOAD_BYTES,
+    voir POST .../pipeline/sessions) -- ce parcours-ci (import direct côté
+    Base de données) lit aussi tout le fichier en DataFrame pandas d'un
+    coup, exactement le même risque d'OOM mesuré en conditions réelles
+    sur un gros .xlsx (revue Copilot, PR #28)."""
+    if (file.size or 0) > PIPELINE_MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Fichier trop volumineux ({(file.size or 0) / 1_048_576:.1f} Mo, max "
+                f"{PIPELINE_MAX_UPLOAD_BYTES / 1_048_576:.0f} Mo) -- utilisez le format CSV "
+                "(bien plus léger que .xlsx pour le même volume) ou importez en plusieurs fois."
+            ),
+        )
     content = await file.read()
     filename = file.filename or "import"
     try:

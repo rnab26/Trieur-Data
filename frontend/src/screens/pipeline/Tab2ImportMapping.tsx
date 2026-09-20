@@ -449,7 +449,7 @@ export function Tab2ImportMapping({
                     session &&
                     void loadSuggestion(session.session_id, sheet.sheet_key, session.sheets.map((s) => s.sheet_key))
                   }
-                  autoLoading={suggestLoading === sheet.sheet_key}
+                  autoLoading={suggestLoading === sheet.sheet_key || suggestLoading === 'all'}
                 />
               ))}
             </div>
@@ -580,7 +580,8 @@ function SheetMappingCard({
                 <select
                   value={isInvalid ? PIPELINE_UNASSIGNED : current}
                   onChange={(e) => onColumnChange(col, e.target.value)}
-                  className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-1 text-xs"
+                  disabled={autoLoading}
+                  className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-1 text-xs disabled:opacity-60"
                 >
                   {options.map((opt) => (
                     <option key={opt} value={opt}>

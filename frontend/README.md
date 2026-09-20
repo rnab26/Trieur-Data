@@ -19,12 +19,39 @@ Stack : Vite + React + TypeScript + Tailwind CSS + composants shadcn/ui
   affichées personnalisables, vues enregistrées, import CSV/Excel,
   colonnes maîtres, modification d'un client (`RecordEditDialog.tsx`),
   modification/suppression en masse (`BulkActions.tsx`), export CSV/Excel.
-- **Trieur de Data** (`src/screens/PipelineScreen.tsx`) : import
-  CSV/Excel en staging temporaire (24h), suggestion + mapping des
-  colonnes vers les colonnes maîtres, puis recherche/filtres/export sur
-  les lignes mappées -- mirroir simplifié des onglets 1-4 Streamlit.
-  Le dédoublonnage/import définitif (écriture dans la base permanente)
-  n'est pas encore porté ici.
+- **Trieur de Data** (`src/screens/PipelineScreen.tsx`, 4 onglets dans
+  `src/screens/pipeline/`) : mirroir fidèle des 4 onglets Streamlit
+  d'origine (`views/tab1_colonnes_maitres.py` à `tab4_export.py`), sur
+  le staging temporaire (24h) du pipeline plutôt que sur la base
+  permanente :
+  - `Tab1ColonnesMaitres.tsx` -- réutilise `MasterColumnsPanel`
+    (colonnes maîtres de l'environnement + jeux personnels liés au
+    compte, cf `PersonalColumnSets.tsx`) : une seule notion de
+    "colonnes maîtres" pour tout le Trieur de Data, jamais une
+    deuxième liste.
+  - `Tab2ImportMapping.tsx` -- import d'UN fichier Excel/CSV/PDF (pas
+    de multi-fichiers ni Google Sheets, limite du contrat API actuel),
+    aperçu, auto-assignation + mapping manuel, construction de la
+    base, avertissement IBAN (checksum mod 97) après construction.
+  - `Tab3FiltrageDedup.tsx` -- filtre multi-critères (groupes OU /
+    critères ET, y compris département par code postal), plus
+    recherche libre/filtres par colonne (ajout gardé de l'existant),
+    analyse des doublons par colonne (revue groupe par groupe avec
+    aperçu réel, ou règle globale au-delà de 50 groupes), suppression
+    avec confirmation explicite -- **définitive** côté API
+    (contrairement à Streamlit, voir docstring
+    `api/main.py:apply_pipeline_dedupe`).
+  - `Tab4Export.tsx` -- ordre/sélection des colonnes à l'export
+    (flèches, pas de glisser-déposer tactile), nom de fichier
+    personnalisable, export CSV/Excel (avec le même seuil Excel
+    ~1,05M lignes que Streamlit).
+
+  Écarts volontaires documentés en commentaire dans le code : pas de
+  filtres/presets d'export *nommés et persistés* côté pipeline (aucun
+  endpoint pour ça dans le contrat API actuel, à la différence des
+  colonnes maîtres), pas de section "Enregistrer dans la base de
+  données" (hors périmètre, écran Base de données exclu de ce
+  chantier).
 - **Cockpit** (`src/screens/CockpitScreen.tsx`, réservé aux
   administrateurs) : suivi des chantiers du logiciel lui-même (créer,
   organiser par section, changer de statut, rechercher/filtrer,

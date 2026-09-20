@@ -1067,7 +1067,17 @@ async def create_pipeline_session_endpoint(
     maxUploadSize=500) -- le chemin classique ci-dessous (tout le fichier
     en DataFrame pandas) ferait planter le serveur en mémoire bien avant
     ça (mesuré : ~45x la taille du fichier en RAM)."""
-    total_bytes = sum((f.size or 0) for f in files)
+    if any(f.size is None for f in files):
+        # Starlette initialise toujours UploadFile.size dès la lecture du
+        # multipart (vérifié sur MultiPartParser) -- si jamais absent, on
+        # refuse plutôt que de compter silencieusement 0 octet : un total
+        # sous-estimé pourrait contourner le hard cap ET le seuil de
+        # streaming, et retomber sur le chemin classique (risque OOM).
+        raise HTTPException(
+            status_code=413,
+            detail="Taille de fichier indéterminable -- réessayez l'import.",
+        )
+    total_bytes = sum(f.size for f in files)
     if total_bytes > PIPELINE_MAX_UPLOAD_BYTES:
         raise HTTPException(
             status_code=413,

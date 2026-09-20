@@ -1235,6 +1235,38 @@ def test_pipeline_session_create_rejects_upload_above_hard_cap(client_factory, m
     assert not fake.postgrest.tables["pipeline_sessions"]
 
 
+def test_pipeline_session_create_rejects_upload_with_unknown_size():
+    """Trouvaille Copilot (PR streaming) : sum((f.size or 0) ...) comptait
+    silencieusement 0 octet si UploadFile.size était indisponible,
+    contournant à la fois le plafond absolu et le seuil de streaming
+    (retour au chemin classique = risque OOM). En pratique, Starlette
+    initialise toujours .size dès la lecture du multipart (vérifié sur
+    MultiPartParser) -- ce test fige quand même le refus explicite en
+    défense en profondeur, en appelant l'endpoint directement avec un
+    fichier dont .size est None (impossible à simuler via TestClient, qui
+    calcule toujours une vraie taille pendant le parsing multipart)."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from api import main as api_main
+
+    fake = _make_client()
+    ctx = api_main.get_current_ctx(authorization=f"Bearer {TOKEN}", client=fake)
+    ctx = api_main.require_org_access("org-1", ctx)
+
+    fake_upload = SimpleNamespace(size=None, filename="clients.csv")
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            api_main.create_pipeline_session_endpoint(org_id="org-1", files=[fake_upload], ctx=ctx)
+        )
+
+    assert exc_info.value.status_code == 413
+    assert "indéterminable" in exc_info.value.detail
+    assert not fake.postgrest.tables["pipeline_sessions"]
+
+
 def test_pipeline_session_create_streams_above_threshold(client_factory, monkeypatch):
     """Au-delà de PIPELINE_STREAM_THRESHOLD_BYTES (mais sous le plafond
     absolu), bascule en mode flux (_stream_import_pipeline_files) -- même

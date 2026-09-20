@@ -183,22 +183,29 @@ export function PipelineScreen() {
       )}
 
       {orgs && orgs.length > 0 && (
-        <div className="mb-4 flex flex-wrap items-center gap-3">
-          <label htmlFor="pipeline-org-switcher" className="text-sm text-[var(--muted)]">
-            Environnement
-          </label>
-          <select
-            id="pipeline-org-switcher"
-            className="rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm"
-            value={orgId ?? ''}
-            onChange={(e) => handleOrgChange(e.target.value)}
-          >
-            {orgs.map((org) => (
-              <option key={org.id} value={org.id}>
-                {org.name}
-              </option>
-            ))}
-          </select>
+        <div className="mb-4 flex flex-col gap-1">
+          <div className="flex flex-wrap items-center gap-3">
+            <label htmlFor="pipeline-org-switcher" className="text-sm text-[var(--muted)]">
+              Environnement
+            </label>
+            <select
+              id="pipeline-org-switcher"
+              className="rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm"
+              value={orgId ?? ''}
+              onChange={(e) => handleOrgChange(e.target.value)}
+            >
+              {orgs.map((org) => (
+                <option key={org.id} value={org.id}>
+                  {org.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <p className="text-xs text-[var(--muted)]">
+            Un environnement (ex. « Prélèvement », « Énergie ») a ses propres colonnes maîtres et
+            ses propres imports -- change-le ici pour cloisonner un autre type de données, sans
+            mélanger les fichiers ou les colonnes entre les deux.
+          </p>
         </div>
       )}
 

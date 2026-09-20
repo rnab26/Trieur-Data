@@ -92,8 +92,13 @@ export function Tab4Export({
         if (cancelled) return
         setRowCount(data.count)
         const assigned = new Set<string>()
-        for (const master of Object.values(mappingResult?.mapping ?? {})) {
-          if (master && master !== '(non assigne)') assigned.add(master)
+        // `mapping` est PAR ONGLET (sheet_key -> {source: maître}) --
+        // colonnes maîtres CIBLÉES par au moins un onglet, tous onglets
+        // confondus (voir api/main.py:apply_pipeline_mapping).
+        for (const sheetMapping of Object.values(mappingResult?.mapping ?? {})) {
+          for (const master of Object.values(sheetMapping)) {
+            if (master && master !== '(non assigne)') assigned.add(master)
+          }
         }
         if (masterColumns?.includes('Source Data')) assigned.add('Source Data')
         for (const row of data.rows) {

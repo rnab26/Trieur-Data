@@ -189,7 +189,14 @@ export function MasterColumnsPanel({
       {saveError && <p className="text-sm text-[var(--danger)]">Erreur : {saveError}</p>}
       {saving && <p className="text-sm text-[var(--muted)]">Enregistrement…</p>}
 
-      <PersonalColumnSets />
+      <PersonalColumnSets onApply={isAdmin ? persist : undefined} />
+      {!isAdmin && (
+        <p className="text-xs text-[var(--muted)]">
+          Appliquer un jeu personnel modifie les colonnes maîtres de cet environnement --
+          réservé aux administrateurs. Tu peux quand même créer/gérer tes jeux personnels
+          ci-dessus, l'application se fera depuis un compte admin.
+        </p>
+      )}
     </div>
   )
 }

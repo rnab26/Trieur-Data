@@ -8,12 +8,14 @@ from datetime import datetime, timedelta, timezone
 
 from trieur.db import (
     append_pipeline_rows,
+    claim_pipeline_session_for_mapping,
     create_pipeline_session,
     delete_expired_pipeline_sessions_for_org,
     delete_pipeline_rows,
     delete_pipeline_session,
     get_pipeline_session,
     list_pipeline_rows,
+    list_pipeline_rows_for_sheet,
     update_pipeline_session_status,
 )
 
@@ -86,10 +88,19 @@ class _FakeTable:
         return self
 
     def _matched(self):
+        def _field(r, k):
+            # Reproduit juste assez de l'opérateur jsonb `->>` de
+            # PostgREST (ex. "data->>_sheet") pour tester
+            # list_pipeline_rows_for_sheet sans réseau.
+            if "->>" in k:
+                col, key = k.split("->>", 1)
+                return (r.get(col) or {}).get(key)
+            return r.get(k)
+
         def _match_one(r, k, v):
             if isinstance(v, tuple) and v[0] == "in":
-                return r.get(k) in v[1]
-            return r.get(k) == v
+                return _field(r, k) in v[1]
+            return _field(r, k) == v
 
         return [
             r
@@ -364,3 +375,47 @@ def test_delete_pipeline_session_removes_its_rows_too():
     delete_pipeline_session(client, session["id"])
 
     assert get_pipeline_session(client, session["id"]) is None
+
+
+def test_claim_pipeline_session_for_mapping_is_exclusive():
+    """Revue Copilot, PR #27 : la réservation avant mapping doit être
+    UPDATE ... WHERE status='importing' en un seul aller-retour, pas un
+    lire-puis-écrire séparé -- sinon deux requêtes concurrentes liraient
+    toutes les deux 'importing' avant qu'aucune n'écrive 'mapped', et
+    muteraient chacune les lignes de l'autre. Ici on simule ce
+    scénario : la 2e tentative doit échouer même si elle "lit" un
+    statut encore 'importing' au moment de son propre appel."""
+    client = _FakeClient()
+    session = create_pipeline_session(client, "org-1", "user-1")
+
+    first = claim_pipeline_session_for_mapping(client, session["id"])
+    second = claim_pipeline_session_for_mapping(client, session["id"])
+
+    assert first is True
+    assert second is False
+    assert get_pipeline_session(client, session["id"])["status"] == "mapped"
+
+
+def test_claim_pipeline_session_for_mapping_fails_on_unknown_session():
+    client = _FakeClient()
+    assert claim_pipeline_session_for_mapping(client, "does-not-exist") is False
+
+
+def test_list_pipeline_rows_for_sheet_filters_by_sheet_and_bounds_by_limit():
+    """Revue Copilot, PR #27 : la suggestion d'auto-assignation (dry_run)
+    doit pouvoir échantillonner UN SEUL onglet à la fois -- sinon un
+    onglet à lui seul plus gros que le plafond global masque tous les
+    onglets suivants."""
+    client = _FakeClient()
+    session = create_pipeline_session(client, "org-1", "user-1")
+    append_pipeline_rows(client, session["id"], [
+        {"NOM": f"A{i}", "_sheet": "a"} for i in range(5)
+    ])
+    append_pipeline_rows(client, session["id"], [{"NOM": "Garde", "_sheet": "b"}], start_index=5)
+
+    only_a = list_pipeline_rows_for_sheet(client, session["id"], "a", limit=2)
+    only_b = list_pipeline_rows_for_sheet(client, session["id"], "b", limit=10)
+
+    assert len(only_a) == 2  # borné par limit, même si l'onglet "a" en a 5
+    assert all(r["data"]["_sheet"] == "a" for r in only_a)
+    assert [r["data"]["NOM"] for r in only_b] == ["Garde"]

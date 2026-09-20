@@ -679,6 +679,30 @@ def update_pipeline_session_status(client: Client, session_id: str, status: str)
     _td(client, "pipeline_sessions").update({"status": status}).eq("id", session_id).execute()
 
 
+def claim_pipeline_session_for_mapping(client: Client, session_id: str) -> bool:
+    """Réserve ATOMIQUEMENT une session pour l'application du mapping :
+    UPDATE ... WHERE status = 'importing' en un seul aller-retour SQL,
+    qui bascule directement sur 'mapped'. True si cette requête a bien
+    posé la réservation (statut passé de importing -> mapped), False si
+    une autre requête l'a déjà fait avant elle.
+
+    Sans ça, un lire-puis-écrire séparé (lire le statut, décider, écrire
+    à la fin) laisse une fenêtre où deux requêtes concurrentes (double
+    clic, deux onglets navigateur) peuvent toutes deux lire 'importing',
+    passer le garde, puis chacune réécrire/supprimer des lignes de
+    l'autre avant que l'une ou l'autre ne marque la session 'mapped' --
+    revue Copilot, PR #27. La contrainte `check` de la migration 0010
+    reste la seule source de vérité sur les valeurs de statut valides."""
+    res = (
+        _td(client, "pipeline_sessions")
+        .update({"status": "mapped"})
+        .eq("id", session_id)
+        .eq("status", "importing")
+        .execute()
+    )
+    return bool(res.data)
+
+
 def append_pipeline_rows(client: Client, session_id: str, rows: list[dict], start_index: int = 0) -> int:
     """Ajoute des lignes à une session de pipeline, à partir de
     `start_index` (0-based, voir `pipeline_rows.row_index`) -- permet un
@@ -707,6 +731,36 @@ def append_pipeline_rows(client: Client, session_id: str, rows: list[dict], star
     return len(rows)
 
 
+def insert_pipeline_rows_only(client: Client, session_id: str, rows: list[dict], start_index: int = 0) -> int:
+    """Même INSERT que `append_pipeline_rows`, mais SANS mettre à jour
+    `row_count` -- réservé au chemin rapide de l'import initial
+    (POST .../pipeline/sessions), qui insère plusieurs lots EN PARALLÈLE
+    (voir api/main.py) et fait un seul `adjust_pipeline_row_count` final
+    pour la totalité, au lieu d'un aller-retour RPC par lot. N'appelle
+    JAMAIS ça pour un ajout isolé (la session resterait avec un
+    row_count incohérent) -- utilise `append_pipeline_rows` dans ce cas."""
+    if not rows:
+        return 0
+    payload = [
+        {"session_id": session_id, "row_index": start_index + i, "data": row}
+        for i, row in enumerate(rows)
+    ]
+    _td(client, "pipeline_rows").insert(payload).execute()
+    return len(rows)
+
+
+def adjust_pipeline_row_count(client: Client, session_id: str, delta: int) -> None:
+    """Appelle le RPC atomique `adjust_pipeline_row_count` (migration
+    0012) directement -- utilisé après `insert_pipeline_rows_only` pour
+    régler `row_count` en UN seul appel une fois tous les lots insérés,
+    au lieu d'un aller-retour par lot comme le fait `append_pipeline_rows`."""
+    if delta == 0:
+        return
+    client.postgrest.schema("trieur_data").rpc(
+        "adjust_pipeline_row_count", {"p_session_id": session_id, "p_delta": delta}
+    ).execute()
+
+
 def list_pipeline_rows(client: Client, session_id: str, limit: int = LIST_PAGE_SIZE, offset: int = 0) -> list[dict]:
     """Lignes d'une session de pipeline, dans l'ordre du fichier importé
     d'origine (`row_index`, pas l'ordre d'insertion Postgres) -- même
@@ -719,6 +773,29 @@ def list_pipeline_rows(client: Client, session_id: str, limit: int = LIST_PAGE_S
         .order("row_index")
         .limit(limit)
         .offset(offset)
+        .execute()
+    )
+    return res.data or []
+
+
+def list_pipeline_rows_for_sheet(client: Client, session_id: str, sheet_key: str, limit: int) -> list[dict]:
+    """Comme `list_pipeline_rows`, mais bornée à UN SEUL onglet (`_sheet`,
+    filtré côté SQL via l'opérateur jsonb `->>` de PostgREST -- pas un
+    filtre Python après coup). Réservée à la suggestion d'auto-assignation
+    (dry_run de apply_pipeline_mapping) : un simple LIMIT global, sans
+    filtrer par onglet, renvoie les toutes premières lignes de la session
+    dans l'ordre du fichier -- si le 1er onglet à lui seul dépasse la
+    limite, les onglets suivants n'apparaissent JAMAIS dans l'échantillon,
+    et la suggestion les laisse sans aucune colonne assignée (donc exclus
+    de la base fusionnée à l'application réelle, silencieusement) -- revue
+    Copilot, PR #27."""
+    res = (
+        _td(client, "pipeline_rows")
+        .select("id, row_index, data")
+        .eq("session_id", session_id)
+        .eq("data->>_sheet", sheet_key)
+        .order("row_index")
+        .limit(limit)
         .execute()
     )
     return res.data or []

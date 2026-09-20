@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
@@ -31,13 +32,16 @@ from trieur.db import (
     add_chantier_message,
     add_chantier_todo,
     add_org_master_columns,
+    adjust_pipeline_row_count,
     append_pipeline_rows,
+    claim_pipeline_session_for_mapping,
     count_records,
     create_chantier,
     create_pipeline_session,
     create_section,
     delete_expired_pipeline_sessions_for_org,
     delete_pipeline_rows,
+    delete_pipeline_session,
     delete_record,
     delete_saved_view,
     delete_user_column_set,
@@ -48,6 +52,7 @@ from trieur.db import (
     get_pipeline_session,
     get_record,
     import_dataframe,
+    insert_pipeline_rows_only,
     is_pipeline_dedupe_lock_owner,
     list_all_records,
     list_chantier_messages,
@@ -55,6 +60,7 @@ from trieur.db import (
     list_chantiers,
     list_dedup_alerts,
     list_pipeline_rows,
+    list_pipeline_rows_for_sheet,
     list_records,
     list_saved_views,
     list_sections,
@@ -69,7 +75,6 @@ from trieur.db import (
     unlock_pipeline_dedupe,
     update_chantier_status,
     update_pipeline_row_data,
-    update_pipeline_session_status,
     update_record,
 )
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
@@ -690,13 +695,15 @@ async def import_records(
 # volontairement PAS une deuxième liste -- voir la note au-dessus de
 # get_master_columns.
 #
-# Limite connue, volontaire pour ce premier incrément : un fichier PDF
-# (relevés SEPA, trieur/io_pdf.py) n'est pas encore couvert par cette
-# route -- seuls Excel/CSV (trieur/io_excel.py) le sont ici. Un fichier
-# multi-onglets est fusionné en une seule session (onglet d'origine gardé
-# sous la clé "_sheet" de chaque ligne, jamais proposée au mapping) : le
-# mapping par onglet séparé de views/tab2_import_mapping.py n'est pas
-# reproduit, ce n'est pas nécessaire pour le flux de données.
+# Un fichier peut avoir PLUSIEURS onglets (Excel) ; CSV/PDF n'en ont
+# qu'un implicite. Toutes les lignes de TOUS les onglets/fichiers sont
+# fusionnées dans le MÊME staging (trieur_data.pipeline_rows), chaque
+# ligne gardant son onglet d'origine sous la clé technique "_sheet"
+# (jamais proposée au mapping ni comptée dans les colonnes détectées --
+# voir _without_sheet_key/_detected_columns). Le MAPPING, lui, est PAR
+# ONGLET (voir PipelineMapping/apply_pipeline_mapping ci-dessous) :
+# fidèle à views/tab2_import_mapping.py, une carte par onglet côté écran,
+# chacune avec son propre mapping colonnes source -> colonnes maîtres.
 # ---------------------------------------------------------------
 
 PIPELINE_PREVIEW_SIZE = 10
@@ -713,6 +720,18 @@ IBAN_DETECTION_SAMPLE_SIZE = 1000
 # un unique insert de plusieurs centaines de milliers de lignes à
 # PostgREST en un seul appel HTTP.
 PIPELINE_APPEND_BATCH = 500
+# Plafond de lignes chargées pour calculer une SUGGESTION de mapping
+# (dry_run, ou repli quand aucun mapping explicite n'est fourni) --
+# distinct du chargement complet nécessaire pour APPLIQUER un mapping
+# (qui doit forcément réécrire chaque ligne). Sans ce plafond, un simple
+# dry_run (appelé automatiquement par le frontend juste après chaque
+# import, avant même que l'utilisateur ait pu regarder quoi que ce soit)
+# matérialisait toute la session en mémoire -- risque réel d'épuisement
+# mémoire sur les gros volumes documentés (>600 000 lignes). Un onglet
+# entièrement au-delà de ce plafond n'aura simplement pas de suggestion
+# automatique (l'utilisateur mappe à la main) -- dégradation, jamais une
+# perte de données.
+PIPELINE_SUGGESTION_ROW_CAP = 3000
 
 
 def _parse_pipeline_file(filename: str, content: bytes) -> dict[str, pd.DataFrame]:
@@ -735,6 +754,32 @@ def _parse_pipeline_file(filename: str, content: bytes) -> dict[str, pd.DataFram
     if not sheets:
         raise HTTPException(status_code=400, detail=f"Impossible de lire le fichier : {filename}")
     return sheets
+
+
+def _parse_and_merge_pipeline_files(files: list[tuple[str, bytes]]) -> dict[str, pd.DataFrame]:
+    """Lit PLUSIEURS fichiers et fusionne tous leurs onglets en un seul
+    dict -- équivalent de la boucle `for f in files` de
+    views/tab2_import_mapping.py::render (st.file_uploader(...,
+    accept_multiple_files=True)), un seul fichier restant le cas
+    particulier à 1 élément. Les clés (`_sheet` posé ensuite par
+    `_merge_pipeline_sheets`) sont préfixées par le nom de fichier dès
+    qu'il y en a plus d'un, pour ne jamais faire collision entre deux
+    fichiers Excel qui auraient chacun un onglet nommé pareil (ex.
+    "Feuil1") -- même souci que le "[FIX doublons de nom]" de l'original,
+    réglé ici en dédupliquant la clé finale plutôt que le nom affiché."""
+    combined: dict[str, pd.DataFrame] = {}
+    used_keys: set[str] = set()
+    multi = len(files) > 1
+    for filename, content in files:
+        for sheet_name, df in _parse_pipeline_file(filename, content).items():
+            key = f"{filename} :: {sheet_name}" if multi else sheet_name
+            base_key, n = key, 2
+            while key in used_keys:
+                key = f"{base_key} ({n})"
+                n += 1
+            used_keys.add(key)
+            combined[key] = df
+    return combined
 
 
 def _merge_pipeline_sheets(sheets: dict[str, pd.DataFrame]) -> tuple[list[dict], list[str]]:
@@ -763,6 +808,40 @@ def _without_sheet_key(data: dict) -> dict:
     return {k: v for k, v in data.items() if k != "_sheet"}
 
 
+def _nan_to_none(row: dict) -> dict:
+    """Même conversion que `_merge_pipeline_sheets` : une cellule vide
+    devient NaN côté pandas, non sérialisable en JSON/jsonb."""
+    return {str(k): (None if isinstance(v, float) and v != v else v) for k, v in row.items()}
+
+
+def _sheet_summary_from_df(sheet_key: str, df: pd.DataFrame) -> dict:
+    """Résumé d'UN onglet tel que lu à l'import (avant staging) : colonnes,
+    lignes, doublons (df.duplicated(), même calcul que
+    views/tab2_import_mapping.py) et un aperçu (6 premières lignes) --
+    de quoi construire côté écran UNE carte par onglet (structure [7] de
+    la référence Streamlit) sans tout re-télécharger."""
+    preview_rows = [_nan_to_none(row) for row in df.head(6).to_dict(orient="records")]
+    return {
+        "sheet_key": sheet_key,
+        "columns": [str(c) for c in df.columns],
+        "row_count": len(df),
+        "n_duplicates": int(df.duplicated().sum()),
+        "preview_rows": preview_rows,
+    }
+
+
+def _sheet_data_by_key(all_rows: list[dict]) -> dict[str, list[dict]]:
+    """Regroupe les lignes de staging déjà chargées ({id, row_index, data})
+    par onglet d'origine (`_sheet`) -- ordre de première apparition
+    conservé. Sert de base à la suggestion/application du mapping PAR
+    ONGLET (apply_pipeline_mapping ci-dessous)."""
+    by_sheet: dict[str, list[dict]] = {}
+    for r in all_rows:
+        sheet_key = r["data"].get("_sheet") or ""
+        by_sheet.setdefault(sheet_key, []).append(r)
+    return by_sheet
+
+
 def _get_pipeline_session_or_404(ctx: AuthCtx, org_id: str, session_id: str) -> dict:
     """Une session appartenant à un AUTRE environnement, ou expirée/déjà
     nettoyée par cleanup_expired_pipeline_sessions(), est traitée comme
@@ -785,20 +864,26 @@ def _detected_columns(rows: list[dict]) -> list[str]:
 @app.post("/orgs/{org_id}/pipeline/sessions")
 async def create_pipeline_session_endpoint(
     org_id: str,
-    file: UploadFile = File(...),
+    files: list[UploadFile] = File(...),
     ctx: AuthCtx = Depends(require_org_access),
 ):
-    """Ouvre une session de pipeline : lit le fichier, met les lignes en
-    staging (trieur_data.pipeline_rows, TTL 24h), et renvoie un aperçu +
-    les colonnes détectées pour l'étape de mapping suivante. N'écrit
-    jamais dans trieur_data.records (donnée permanente) -- ça reste la
-    validation finale du pipeline, pas encore portée ici."""
-    content = await file.read()
-    filename = file.filename or "import"
-    sheets = _parse_pipeline_file(filename, content)
+    """Ouvre une session de pipeline : lit UN OU PLUSIEURS fichiers (comme
+    st.file_uploader(accept_multiple_files=True) de l'onglet 2 d'origine,
+    voir views/tab2_import_mapping.py), fusionne tous leurs onglets en une
+    seule session de staging (trieur_data.pipeline_rows, TTL 24h), et
+    renvoie un aperçu + les colonnes détectées pour l'étape de mapping
+    suivante. N'écrit jamais dans trieur_data.records (donnée permanente)
+    -- ça reste la validation finale du pipeline, pas encore portée ici."""
+    parsed = [(f.filename or "import", await f.read()) for f in files]
+    sheets = _parse_and_merge_pipeline_files(parsed)
     rows, columns = _merge_pipeline_sheets(sheets)
     if not rows:
-        raise HTTPException(status_code=400, detail="Fichier vide ou sans ligne exploitable.")
+        raise HTTPException(status_code=400, detail="Fichier(s) vide(s) ou sans ligne exploitable.")
+
+    # [7] Un résumé PAR ONGLET (avant toute écriture en staging) -- permet à
+    # l'écran de construire une carte par onglet (menus + aperçu alignés)
+    # sans re-télécharger les fichiers.
+    sheet_summaries = [_sheet_summary_from_df(key, df) for key, df in sheets.items()]
 
     # Nettoyage opportuniste des sessions expirées de CET org avant d'en
     # ouvrir une nouvelle (revue PR #24, point #8 -- voir docstring de
@@ -810,11 +895,61 @@ async def create_pipeline_session_endpoint(
     except Exception:
         pass
 
-    session = create_pipeline_session(ctx.client, org_id, ctx.user.id, source_filename=filename)
-    for start in range(0, len(rows), PIPELINE_APPEND_BATCH):
-        append_pipeline_rows(
-            ctx.client, session["id"], rows[start:start + PIPELINE_APPEND_BATCH], start_index=start,
-        )
+    source_label = (
+        parsed[0][0] if len(parsed) == 1 else f"{len(parsed)} fichiers ({', '.join(f for f, _ in parsed[:3])}{'…' if len(parsed) > 3 else ''})"
+    )
+    session = create_pipeline_session(ctx.client, org_id, ctx.user.id, source_filename=source_label)
+
+    # Import rapide : tous les lots insérés EN PARALLÈLE (asyncio.gather +
+    # to_thread, le client Supabase est synchrone) au lieu d'un aller-retour
+    # séquentiel par lot -- puis UN SEUL appel RPC pour tout le compteur à
+    # la fin, au lieu d'un par lot (voir insert_pipeline_rows_only). Pour un
+    # fichier de plusieurs milliers de lignes, ça change l'import de
+    # plusieurs dizaines d'allers-retours réseau séquentiels à une poignée
+    # en parallèle -- cause réelle de lenteur signalée par l'utilisateur,
+    # mesurée avant ce correctif (revue PR #26 après merge).
+    batches = [
+        (start, rows[start:start + PIPELINE_APPEND_BATCH])
+        for start in range(0, len(rows), PIPELINE_APPEND_BATCH)
+    ]
+    # `return_exceptions=True` : ATTEND que tous les lots terminent, même si
+    # l'un d'eux plante -- sans ça, la 1re exception fait sortir `gather`
+    # immédiatement pendant que les autres `to_thread` déjà lancés
+    # continuent d'insérer EN ARRIÈRE-PLAN après la réponse HTTP (des
+    # threads qu'on ne peut pas annuler une fois démarrés), sur une session
+    # qu'on est par ailleurs en train de supprimer juste en dessous --
+    # course entre l'écriture et la suppression (revue Copilot, PR #27).
+    results = await asyncio.gather(*(
+        asyncio.to_thread(insert_pipeline_rows_only, ctx.client, session["id"], batch, start)
+        for start, batch in batches
+    ), return_exceptions=True)
+    failures = [r for r in results if isinstance(r, BaseException)]
+    if failures:
+        try:
+            delete_pipeline_session(ctx.client, session["id"])
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=500,
+            detail="Échec de l'import (un ou plusieurs lots n'ont pas pu être enregistrés). Réessayez.",
+        ) from failures[0]
+    try:
+        adjust_pipeline_row_count(ctx.client, session["id"], len(rows))
+    except Exception as exc:
+        # Même raison que le nettoyage ci-dessus (revue Copilot, PR #27) :
+        # si CE dernier appel échoue après que toutes les lignes ont bien
+        # été insérées, la session resterait sinon en base avec toutes ses
+        # lignes mais row_count à 0 et le statut "importing" -- invisible
+        # comme "en cours d'import" jusqu'au TTL (24h) au lieu d'échouer
+        # proprement maintenant.
+        try:
+            delete_pipeline_session(ctx.client, session["id"])
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=500,
+            detail="Échec de l'import (mise à jour du compteur). Réessayez.",
+        ) from exc
 
     master_cols = get_org_master_columns(ctx.client, org_id)
     return {
@@ -824,6 +959,7 @@ async def create_pipeline_session_endpoint(
         "columns": columns,
         "unknown_columns": unknown_columns(columns, master_cols),
         "preview_rows": [_without_sheet_key(r) for r in rows[:PIPELINE_PREVIEW_SIZE]],
+        "sheets": sheet_summaries,
     }
 
 
@@ -842,14 +978,28 @@ def get_pipeline_session_endpoint(org_id: str, session_id: str, ctx: AuthCtx = D
 
 
 class PipelineMapping(BaseModel):
-    # `None` : pas de mapping fourni -> la suggestion d'auto-assignation
-    # est appliquée telle quelle. Fournir un dict explicite, même partiel,
-    # remplace entièrement la suggestion (l'appelant doit envoyer le
-    # mapping COMPLET qu'il veut appliquer, pas un patch).
-    mapping: Optional[dict[str, str]] = None
+    # sheet_key -> {colonne source: colonne maître}. `None` : pas de
+    # mapping fourni -> la suggestion d'auto-assignation (par onglet) est
+    # appliquée telle quelle. Fournir un dict explicite, même partiel,
+    # remplace entièrement la suggestion pour CHAQUE onglet qu'il
+    # contient (l'appelant envoie le mapping COMPLET qu'il veut appliquer
+    # pour cet onglet, pas un patch). Un onglet du staging ABSENT de ce
+    # dict (décoché par l'utilisateur, cf. [3] de la référence Streamlit)
+    # est traité comme sans assignation : voir apply_pipeline_mapping.
+    mapping: Optional[dict[str, dict[str, str]]] = None
     # true : renvoie la suggestion sans rien écrire (aperçu avant
     # confirmation côté frontend, même principe que dry_run sur /import).
     dry_run: bool = False
+    # Onglets réels de cette session, tels que renvoyés par
+    # POST .../pipeline/sessions (`sheets[].sheet_key`) -- utilisé
+    # UNIQUEMENT par dry_run, pour échantillonner un nombre borné de
+    # lignes PAR ONGLET (voir list_pipeline_rows_for_sheet) plutôt qu'un
+    # LIMIT global sur toute la session : sans ça, un onglet à lui seul
+    # plus gros que PIPELINE_SUGGESTION_ROW_CAP masque tous les onglets
+    # suivants de la suggestion -- revue Copilot, PR #27. Si omis
+    # (anciens appelants), on retombe sur l'ancien échantillon global,
+    # moins précis mais toujours borné en mémoire.
+    sheet_keys: Optional[list[str]] = None
 
 
 def _all_pipeline_rows(client, session_id: str) -> list[dict]:
@@ -1034,98 +1184,235 @@ def apply_pipeline_mapping(
     org_id: str, session_id: str, body: PipelineMapping, ctx: AuthCtx = Depends(require_org_access),
 ):
     """Propose (dry_run) ou applique le mapping colonnes source -> colonnes
-    maîtres. La suggestion réutilise trieur/matching.py:auto_assign_columns_fast
-    -- même logique que le bouton "Auto" de views/tab2_import_mapping.py,
-    jamais réimplémentée ici (échantillon = le même aperçu que le GET
-    ci-dessus, pas tout le fichier : suffisant pour la détection par
-    contenu -- téléphone/IBAN -- sans charger des millions de lignes).
+    maîtres, PAR ONGLET (structure [7] de views/tab2_import_mapping.py --
+    voir la note au-dessus de PipelineMapping). La suggestion réutilise
+    trieur/matching.py:auto_assign_columns_fast pour CHAQUE onglet -- même
+    logique que le bouton "Auto" local ou "Auto-assigner TOUS les
+    onglets" de la référence Streamlit, jamais réimplémentée ici.
 
-    En dehors d'un dry_run, applique le mapping (fourni, ou la suggestion
-    si omis) : chaque ligne de la session est réécrite avec les clés
-    COLONNES MAÎTRES (une colonne source sur "(non assigne)" disparaît de
-    la ligne), puis la session passe au statut 'mapped'. Même règles que
-    le bouton "Construire la base de travail fusionnée" de
-    views/tab2_import_mapping.py (voir api/pipeline_mapping.py) :
-      - si deux colonnes source pointent vers la MÊME colonne maître, la
-        PREMIÈRE valeur non vide gagne (pas "la dernière écrase") ;
+    En dehors d'un dry_run, applique le mapping (fourni par onglet, ou la
+    suggestion par onglet si omis) : chaque ligne de la session est
+    réécrite avec les clés COLONNES MAÎTRES SELON LE MAPPING DE SON PROPRE
+    ONGLET (`_sheet`) -- une même colonne maître peut ainsi recevoir des
+    colonnes sources différentes selon l'onglet. Puis la session passe au
+    statut 'mapped'. Mêmes règles que le bouton "Construire la base de
+    travail fusionnée" de views/tab2_import_mapping.py (voir
+    api/pipeline_mapping.py) :
+      - un onglet ABSENT du mapping fourni, ou sans aucune colonne
+        assignée, est exclu de la base fusionnée -- ses lignes sont
+        retirées du staging (équivalent d'un onglet décoché à l'étape [3]
+        ou "Aucune colonne assignée, ignoré") ;
+      - si deux colonnes source du MÊME onglet pointent vers la MÊME
+        colonne maître, la PREMIÈRE valeur non vide gagne (pas "la
+        dernière écrase") ;
       - "Source Data" (si présente dans les colonnes maîtres) est
         toujours renseignée automatiquement (fichier + onglet d'origine),
         jamais depuis une colonne source ;
-      - les colonnes IBAN détectées (nom ou contenu) ont leurs espaces
-        internes retirés (clean_iban) ; leur checksum (mod 97) est
-        vérifié et les lignes invalides remontées dans `iban_warnings`
-        (rien n'est bloqué ni supprimé automatiquement -- même choix que
-        Streamlit, à vérifier avant l'export)."""
+      - les colonnes IBAN détectées (nom ou contenu, sur un échantillon
+        mêlant tous les onglets mappés) ont leurs espaces internes
+        retirés (clean_iban) ; leur checksum (mod 97) est vérifié et les
+        lignes invalides remontées dans `iban_warnings` (rien n'est
+        bloqué ni supprimé automatiquement -- même choix que Streamlit, à
+        vérifier avant l'export)."""
     session = _get_pipeline_session_or_404(ctx, org_id, session_id)
     master_cols = get_org_master_columns(ctx.client, org_id)
 
-    sample = list_pipeline_rows(ctx.client, session_id, limit=PIPELINE_PREVIEW_SIZE)
-    real_columns = _detected_columns([r["data"] for r in sample])
-    sample_df = pd.DataFrame([_without_sheet_key(r["data"]) for r in sample]) if sample else None
-    suggestion = auto_assign_columns_fast(real_columns, master_cols, sheet_df=sample_df)
+    # Rejet rapide et lisible dans le cas courant (session déjà mappée,
+    # page pas rechargée) -- PAS la seule garde : c'est un simple test du
+    # statut déjà lu ci-dessus, donc pas fiable seul contre deux requêtes
+    # concurrentes (voir la réservation ATOMIQUE juste avant les
+    # mutations, plus bas -- claim_pipeline_session_for_mapping, revue
+    # Copilot PR #27).
+    if not body.dry_run and session["status"] != "importing":
+        raise HTTPException(
+            status_code=409,
+            detail="Cette session a déjà été mappée (ou n'est plus au statut 'importing') -- rechargez la page.",
+        )
+
+    def _sheet_suggestion(sheet_rows: list[dict]) -> dict[str, str]:
+        sample_df = (
+            pd.DataFrame([_without_sheet_key(r["data"]) for r in sheet_rows[:PIPELINE_PREVIEW_SIZE]])
+            if sheet_rows else None
+        )
+        return auto_assign_columns_fast(_detected_columns([r["data"] for r in sheet_rows]), master_cols, sheet_df=sample_df)
 
     if body.dry_run:
-        return {"session_id": session_id, "suggested_mapping": suggestion, "columns": real_columns}
+        # Suggestion seule : PAS besoin de charger toute la session (voir
+        # PIPELINE_SUGGESTION_ROW_CAP) -- ce endpoint est appelé
+        # automatiquement par le frontend juste après CHAQUE import, avant
+        # même que l'utilisateur ait pu regarder quoi que ce soit. Charger
+        # l'intégralité ici matérialisait toute la session en mémoire pour
+        # une simple suggestion, risque réel sur les gros volumes
+        # documentés (>600 000 lignes) -- revue Copilot, PR #27.
+        if body.sheet_keys:
+            # Échantillon PAR ONGLET (filtré côté SQL, voir
+            # list_pipeline_rows_for_sheet) : chaque onglet reçoit ses
+            # PROPRES lignes, quelle que soit la taille des onglets
+            # précédents -- corrige le cas où un LIMIT global (ci-dessous)
+            # masquait entièrement les onglets suivants (revue Copilot,
+            # PR #27). PIPELINE_PREVIEW_SIZE suffit : _sheet_suggestion ne
+            # regarde de toute façon jamais plus que ça pour construire
+            # son échantillon de détection.
+            suggestion = {
+                sheet_key: _sheet_suggestion(
+                    list_pipeline_rows_for_sheet(ctx.client, session_id, sheet_key, limit=PIPELINE_PREVIEW_SIZE)
+                )
+                for sheet_key in body.sheet_keys
+            }
+        else:
+            # Anciens appelants (pas de sheet_keys fourni) : échantillon
+            # global, moins précis sur une session à plusieurs onglets
+            # inégaux, mais toujours borné en mémoire.
+            sample_rows = list_pipeline_rows(ctx.client, session_id, limit=PIPELINE_SUGGESTION_ROW_CAP)
+            sheets_sample = _sheet_data_by_key(sample_rows)
+            suggestion = {sheet_key: _sheet_suggestion(sheet_rows) for sheet_key, sheet_rows in sheets_sample.items()}
+        return {"session_id": session_id, "suggested_mapping": suggestion}
 
-    mapping = body.mapping if body.mapping is not None else suggestion
-    if not any(m and m != "(non assigne)" for m in mapping.values()):
+    # Application réelle : chaque ligne doit être réécrite, la session
+    # entière est donc forcément chargée ici (contrairement au dry_run
+    # ci-dessus) -- le mapping doit voir chaque onglet en entier, pas
+    # juste un échantillon, sinon des lignes resteraient non mappées.
+    all_rows = _all_pipeline_rows(ctx.client, session_id)
+    sheets_data = _sheet_data_by_key(all_rows)
+
+    if body.mapping is not None:
+        # Une clé d'onglet qui ne correspond à AUCUN onglet réel de cette
+        # session (typo cliente, session périmée) laisserait sinon TOUS
+        # les vrais onglets sans assignation (absents du dict fourni) et
+        # donc TOUS supprimés par la boucle d'exclusion plus bas, avec une
+        # réponse "mapped" à zéro ligne -- rejeté avant toute mutation
+        # plutôt que de laisser ça se produire silencieusement (revue
+        # Copilot, PR #27).
+        unknown_keys = sorted(set(body.mapping) - set(sheets_data))
+        if unknown_keys:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Mapping fourni pour des onglets absents de cette session : {unknown_keys}.",
+            )
+        mapping_by_sheet = body.mapping
+    else:
+        mapping_by_sheet = {sheet_key: _sheet_suggestion(sheet_rows) for sheet_key, sheet_rows in sheets_data.items()}
+
+    if not any(
+        m and m != "(non assigne)"
+        for sheet_map in mapping_by_sheet.values()
+        for m in sheet_map.values()
+    ):
         raise HTTPException(status_code=400, detail="Aucune colonne assignée dans ce mapping.")
 
-    # Colonnes IBAN (nom OU contenu) détectées sur un échantillon dédié
-    # (IBAN_DETECTION_SAMPLE_SIZE, pas le petit `sample` de prévisualisation
-    # ci-dessus) -- une seule détection pour toute la session (comme
-    # views/tab2_import_mapping.py sur la base fusionnée), pas relancée
-    # à chaque ligne. Un échantillon trop petit raterait une colonne au nom
-    # générique dont les vraies valeurs IBAN n'apparaissent que plus loin
-    # dans le fichier.
-    iban_sample = (
-        sample
-        if len(sample) >= IBAN_DETECTION_SAMPLE_SIZE
-        else list_pipeline_rows(ctx.client, session_id, limit=IBAN_DETECTION_SAMPLE_SIZE)
-    )
-    mapped_iban_sample = [
-        merge_mapped_row(_without_sheet_key(r["data"]), mapping, master_cols, None, set())
-        for r in iban_sample
-    ]
-    iban_masters = detect_iban_master_columns(mapped_iban_sample, master_cols)
+    # Réservation ATOMIQUE de la session, juste avant toute mutation des
+    # lignes -- UPDATE ... WHERE status='importing' en un seul
+    # aller-retour SQL (voir claim_pipeline_session_for_mapping), pas un
+    # simple test du statut lu plus haut au début de la fonction : sinon
+    # deux requêtes concurrentes (double clic, deux onglets navigateur)
+    # passeraient toutes les deux les validations ci-dessus avant
+    # qu'aucune n'ait écrit 'mapped', et muteraient chacune les lignes de
+    # l'autre -- revue Copilot, PR #27. Placée APRÈS les validations
+    # (400 sur onglet inconnu / mapping vide) pour qu'une requête rejetée
+    # ne consomme jamais la réservation d'une session encore réellement
+    # 'importing'.
+    if not claim_pipeline_session_for_mapping(ctx.client, session_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Cette session a déjà été mappée (ou n'est plus au statut 'importing') -- rechargez la page.",
+        )
 
-    n_updated = 0
-    iban_invalid_counts: dict[str, int] = {}
-    iban_invalid_samples: dict[str, list[str]] = {}
-    offset = 0
-    while True:
-        page = list_pipeline_rows(ctx.client, session_id, limit=LIST_PAGE_SIZE, offset=offset)
-        if not page:
-            break
-        for row in page:
-            src_data = row["data"]
-            sheet = src_data.get("_sheet")
+    # À partir d'ici, la session est réservée ('mapped') mais les lignes
+    # ne sont pas encore réécrites : pas de vraie transaction possible sur
+    # des centaines/milliers d'appels REST individuels. Si CE bloc échoue
+    # en cours de route (panne réseau, timeout), la session resterait
+    # sinon visible comme "mapped" avec un staging à moitié réécrit -- et
+    # tout retry serait rejeté en 409 (déjà réservée) sans espoir de
+    # réparation propre, puisque merge_mapped_row retire `_sheet` des
+    # lignes déjà traitées (un retry regrouperait le reste sous une clé
+    # vide, cf. plus haut). Même choix que create_pipeline_session_endpoint
+    # sur un échec de lot : on supprime la session entière plutôt que de
+    # la laisser dans un état à moitié transformé -- revue Copilot, PR #27.
+    try:
+        # Colonnes IBAN (nom OU contenu) détectées sur un échantillon
+        # MÊLANT TOUS les onglets réellement mappés (pas seulement le
+        # premier) -- plafonné par onglet (IBAN_DETECTION_SAMPLE_SIZE
+        # réparti) pour rester borné en mémoire même avec beaucoup
+        # d'onglets.
+        per_sheet_cap = max(50, IBAN_DETECTION_SAMPLE_SIZE // max(len(sheets_data), 1))
+        iban_sample_rows = []
+        for sheet_key, sheet_map in mapping_by_sheet.items():
+            sheet_rows = sheets_data.get(sheet_key, [])
+            if not sheet_rows or not any(m and m != "(non assigne)" for m in sheet_map.values()):
+                continue
+            iban_sample_rows.extend(
+                merge_mapped_row(_without_sheet_key(r["data"]), sheet_map, master_cols, None, set())
+                for r in sheet_rows[:per_sheet_cap]
+            )
+        iban_masters = detect_iban_master_columns(iban_sample_rows, master_cols)
+
+        n_updated = 0
+        n_excluded = 0
+        iban_invalid_counts: dict[str, int] = {}
+        iban_invalid_samples: dict[str, list[str]] = {}
+        applied_mapping: dict[str, dict[str, str]] = {}
+
+        for sheet_key, sheet_rows in sheets_data.items():
+            sheet_map = mapping_by_sheet.get(sheet_key, {})
+            has_assignment = any(m and m != "(non assigne)" for m in sheet_map.values())
+            if not has_assignment:
+                # Onglet décoché par l'utilisateur (absent de `mapping`) ou
+                # sans aucune assignation : exclu de la base fusionnée,
+                # comme "Aucune colonne assignée, ignoré" / l'étape [3] de
+                # la référence -- ses lignes de staging sont retirées
+                # plutôt que de rester à moitié mappées. Par LOTS bornés
+                # (même taille que l'import, PIPELINE_APPEND_BATCH) : un
+                # seul .in_("id", ...) avec les ids de tout un onglet
+                # dépasserait les limites de taille de requête PostgREST
+                # sur les gros volumes documentés (>600 000 lignes) --
+                # revue Copilot, PR #27.
+                sheet_ids = [r["id"] for r in sheet_rows]
+                for start in range(0, len(sheet_ids), PIPELINE_APPEND_BATCH):
+                    n_excluded += delete_pipeline_rows(
+                        ctx.client, session_id, sheet_ids[start:start + PIPELINE_APPEND_BATCH],
+                    )
+                continue
+
+            applied_mapping[sheet_key] = sheet_map
             source_label = None
             if "Source Data" in master_cols:
                 base = session.get("source_filename") or "import"
-                source_label = f"{base} ({sheet})" if sheet else base
+                source_label = f"{base} ({sheet_key})" if sheet_key else base
 
-            new_data = merge_mapped_row(
-                _without_sheet_key(src_data), mapping, master_cols, source_label, iban_masters,
-            )
+            for row in sheet_rows:
+                new_data = merge_mapped_row(
+                    _without_sheet_key(row["data"]), sheet_map, master_cols, source_label, iban_masters,
+                )
 
-            for col in iban_masters:
-                if col in new_data and iban_is_valid(new_data[col]) is False:
-                    iban_invalid_counts[col] = iban_invalid_counts.get(col, 0) + 1
-                    samples = iban_invalid_samples.setdefault(col, [])
-                    if len(samples) < 20:
-                        samples.append(row["id"])
+                for col in iban_masters:
+                    if col in new_data and iban_is_valid(new_data[col]) is False:
+                        iban_invalid_counts[col] = iban_invalid_counts.get(col, 0) + 1
+                        samples = iban_invalid_samples.setdefault(col, [])
+                        if len(samples) < 20:
+                            samples.append(row["id"])
 
-            update_pipeline_row_data(ctx.client, row["id"], new_data)
-            n_updated += 1
-        offset += len(page)
+                update_pipeline_row_data(ctx.client, row["id"], new_data)
+                n_updated += 1
+    except Exception as exc:
+        try:
+            delete_pipeline_session(ctx.client, session_id)
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=500,
+            detail="Échec de l'application du mapping en cours de route -- la session a été "
+            "supprimée pour éviter un état à moitié transformé. Réimportez vos fichiers.",
+        ) from exc
 
-    update_pipeline_session_status(ctx.client, session_id, "mapped")
+    # Statut déjà passé à 'mapped' par claim_pipeline_session_for_mapping
+    # ci-dessus (réservation atomique en tout début de fonction) -- pas de
+    # deuxième écriture ici.
     return {
         "session_id": session_id,
         "status": "mapped",
-        "mapping": mapping,
+        "mapping": applied_mapping,
         "n_rows_updated": n_updated,
+        "n_rows_excluded": n_excluded,
         "iban_columns_detected": sorted(iban_masters),
         "iban_warnings": [
             {"column": col, "n_invalid": iban_invalid_counts[col], "sample_row_ids": iban_invalid_samples[col]}

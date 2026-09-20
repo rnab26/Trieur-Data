@@ -778,6 +778,29 @@ def list_pipeline_rows(client: Client, session_id: str, limit: int = LIST_PAGE_S
     return res.data or []
 
 
+def list_pipeline_rows_for_sheet(client: Client, session_id: str, sheet_key: str, limit: int) -> list[dict]:
+    """Comme `list_pipeline_rows`, mais bornée à UN SEUL onglet (`_sheet`,
+    filtré côté SQL via l'opérateur jsonb `->>` de PostgREST -- pas un
+    filtre Python après coup). Réservée à la suggestion d'auto-assignation
+    (dry_run de apply_pipeline_mapping) : un simple LIMIT global, sans
+    filtrer par onglet, renvoie les toutes premières lignes de la session
+    dans l'ordre du fichier -- si le 1er onglet à lui seul dépasse la
+    limite, les onglets suivants n'apparaissent JAMAIS dans l'échantillon,
+    et la suggestion les laisse sans aucune colonne assignée (donc exclus
+    de la base fusionnée à l'application réelle, silencieusement) -- revue
+    Copilot, PR #27."""
+    res = (
+        _td(client, "pipeline_rows")
+        .select("id, row_index, data")
+        .eq("session_id", session_id)
+        .eq("data->>_sheet", sheet_key)
+        .order("row_index")
+        .limit(limit)
+        .execute()
+    )
+    return res.data or []
+
+
 def update_pipeline_row_data(client: Client, row_id: str, data: dict) -> None:
     """Remplace entièrement le jsonb d'une ligne de pipeline déjà en
     staging -- utilisé par l'étape de mapping (onglet 2, voir api/main.py)

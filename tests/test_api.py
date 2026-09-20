@@ -91,12 +91,23 @@ class _FakeTable:
         self._op = "delete"
         return self
 
+    def _field_value(self, row, field):
+        # Reproduit juste assez de l'opérateur jsonb `->>` de PostgREST
+        # (ex. "data->>_sheet") pour tester list_pipeline_rows_for_sheet
+        # sans réseau -- extrait la clé du dict jsonb au lieu de chercher
+        # un champ littéral "data->>_sheet" qui n'existe jamais sur une
+        # vraie ligne.
+        if "->>" in field:
+            col, key = field.split("->>", 1)
+            return (row.get(col) or {}).get(key)
+        return row.get(field)
+
     def _matches(self, row):
         for field, value in self._filters:
             if isinstance(value, tuple) and value[0] == "in":
-                if row.get(field) not in value[1]:
+                if self._field_value(row, field) not in value[1]:
                     return False
-            elif row.get(field) != value:
+            elif self._field_value(row, field) != value:
                 return False
         for field, value in self._lt_filters:
             if row.get(field) is None or not (row.get(field) < value):
@@ -1655,6 +1666,46 @@ def test_pipeline_session_create_cleans_up_if_row_count_rpc_fails(client_factory
     ), "la session ne doit pas rester visible avec row_count à 0 jusqu'au TTL"
     # Cascade réelle des lignes vers la session supprimée : garantie par la
     # contrainte FK (migration 0010), pas simulée dans ce faux client.
+
+
+def test_pipeline_mapping_dry_run_samples_every_sheet_even_if_first_is_huge(client_factory, monkeypatch):
+    """Trouvaille Copilot, PR #27 : le dry_run échantillonnait avec un
+    LIMIT global sur toute la session (PIPELINE_SUGGESTION_ROW_CAP), pas
+    par onglet -- si le 1er onglet à lui seul dépasse ce plafond, les
+    onglets suivants n'apparaissaient JAMAIS dans `suggested_mapping`, et
+    "Auto-assigner tous" les laissait sans aucune colonne assignée (donc
+    exclus/supprimés à l'application réelle). Ici le plafond est réduit à
+    3 lignes et le fichier "a" en a 5 -- sans le fix, "b" serait absent."""
+    from api import main as api_main
+
+    monkeypatch.setattr(api_main, "PIPELINE_SUGGESTION_ROW_CAP", 3)
+
+    fake = _make_client()
+    tc = client_factory(fake)
+    content_a = b"NOM\n" + b"\n".join(f"A{i}".encode() for i in range(5)) + b"\n"
+    content_b = b"NOM\nGarde\n"
+    upload = tc.post(
+        "/orgs/org-1/pipeline/sessions",
+        files=[
+            ("files", ("a.csv", content_a, "text/csv")),
+            ("files", ("b.csv", content_b, "text/csv")),
+        ],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    ).json()
+    session_id = upload["session_id"]
+    sheet_keys = [s["sheet_key"] for s in upload["sheets"]]
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"dry_run": True, "sheet_keys": sheet_keys},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    suggestion = res.json()["suggested_mapping"]
+    assert set(suggestion.keys()) == set(sheet_keys)
+    # Chaque onglet a bien reçu SA PROPRE colonne "NOM" -> "NOM".
+    for sheet_key in sheet_keys:
+        assert suggestion[sheet_key].get("NOM") == "NOM"
 
 
 def get_pipeline_session_via_api(tc, session_id):

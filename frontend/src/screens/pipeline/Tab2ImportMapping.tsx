@@ -114,7 +114,7 @@ export function Tab2ImportMapping({
       setPendingFiles([])
       // [5] Auto-assignation de TOUS les onglets dès l'import, pour
       // qu'aucun onglet ne reste vide sans avoir à cliquer.
-      await loadSuggestion(data.session_id, 'all')
+      await loadSuggestion(data.session_id, 'all', data.sheets.map((s) => s.sheet_key))
     } catch (err) {
       setUploadError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
     } finally {
@@ -141,11 +141,11 @@ export function Tab2ImportMapping({
   // rien n'est écrit côté serveur), puis ne remplace que les onglets
   // demandés (`only` : une clé précise pour le bouton "Auto" local, "all"
   // pour "Auto-assigner TOUS les onglets" -- limité aux onglets ACTIFS).
-  async function loadSuggestion(sessionId: string, only: string | 'all') {
+  async function loadSuggestion(sessionId: string, only: string | 'all', sheetKeys: string[]) {
     setSuggestLoading(only)
     setSuggestError(null)
     try {
-      const data = await suggestPipelineMapping(orgId, sessionId)
+      const data = await suggestPipelineMapping(orgId, sessionId, sheetKeys)
       setMapping((prev) => {
         const next = { ...prev }
         if (only === 'all') {
@@ -406,7 +406,9 @@ export function Tab2ImportMapping({
               <h3 className="text-base font-semibold">Assignation des colonnes</h3>
               <Button
                 variant="secondary"
-                onClick={() => session && void loadSuggestion(session.session_id, 'all')}
+                onClick={() =>
+                  session && void loadSuggestion(session.session_id, 'all', session.sheets.map((s) => s.sheet_key))
+                }
                 disabled={suggestLoading !== null || activeSheets.length === 0}
               >
                 🚀 Auto-assigner TOUS les onglets
@@ -443,7 +445,10 @@ export function Tab2ImportMapping({
                   masterColumns={masterColumns ?? []}
                   mapping={mapping[sheet.sheet_key] ?? {}}
                   onColumnChange={(src, master) => setSheetColumnMapping(sheet.sheet_key, src, master)}
-                  onAuto={() => session && void loadSuggestion(session.session_id, sheet.sheet_key)}
+                  onAuto={() =>
+                    session &&
+                    void loadSuggestion(session.session_id, sheet.sheet_key, session.sheets.map((s) => s.sheet_key))
+                  }
                   autoLoading={suggestLoading === sheet.sheet_key}
                 />
               ))}

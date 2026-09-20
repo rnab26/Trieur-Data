@@ -564,11 +564,16 @@ export type PipelineMappingSuggestion = {
 }
 
 // dry_run=true : suggestion d'auto-assignation PAR ONGLET, rien n'est
-// écrit -- voir api/main.py:apply_pipeline_mapping.
-export function suggestPipelineMapping(orgId: string, sessionId: string) {
+// écrit -- voir api/main.py:apply_pipeline_mapping. `sheetKeys` (tous les
+// onglets de la session, cf. `sheets[].sheet_key` renvoyé par
+// createPipelineSession) permet au serveur d'échantillonner CHAQUE onglet
+// individuellement plutôt qu'un LIMIT global -- sans ça, un onglet à lui
+// seul plus gros que la limite masquait tous les onglets suivants de la
+// suggestion (revue Copilot, PR #27).
+export function suggestPipelineMapping(orgId: string, sessionId: string, sheetKeys: string[]) {
   return request<PipelineMappingSuggestion>(
     `/orgs/${orgId}/pipeline/sessions/${sessionId}/mapping`,
-    { method: 'POST', body: JSON.stringify({ dry_run: true }) },
+    { method: 'POST', body: JSON.stringify({ dry_run: true, sheet_keys: sheetKeys }) },
   )
 }
 

@@ -60,6 +60,7 @@ from trieur.db import (
     list_chantiers,
     list_dedup_alerts,
     list_pipeline_rows,
+    list_pipeline_rows_for_sheet,
     list_records,
     list_saved_views,
     list_sections,
@@ -989,6 +990,16 @@ class PipelineMapping(BaseModel):
     # true : renvoie la suggestion sans rien écrire (aperçu avant
     # confirmation côté frontend, même principe que dry_run sur /import).
     dry_run: bool = False
+    # Onglets réels de cette session, tels que renvoyés par
+    # POST .../pipeline/sessions (`sheets[].sheet_key`) -- utilisé
+    # UNIQUEMENT par dry_run, pour échantillonner un nombre borné de
+    # lignes PAR ONGLET (voir list_pipeline_rows_for_sheet) plutôt qu'un
+    # LIMIT global sur toute la session : sans ça, un onglet à lui seul
+    # plus gros que PIPELINE_SUGGESTION_ROW_CAP masque tous les onglets
+    # suivants de la suggestion -- revue Copilot, PR #27. Si omis
+    # (anciens appelants), on retombe sur l'ancien échantillon global,
+    # moins précis mais toujours borné en mémoire.
+    sheet_keys: Optional[list[str]] = None
 
 
 def _all_pipeline_rows(client, session_id: str) -> list[dict]:
@@ -1233,9 +1244,28 @@ def apply_pipeline_mapping(
         # l'intégralité ici matérialisait toute la session en mémoire pour
         # une simple suggestion, risque réel sur les gros volumes
         # documentés (>600 000 lignes) -- revue Copilot, PR #27.
-        sample_rows = list_pipeline_rows(ctx.client, session_id, limit=PIPELINE_SUGGESTION_ROW_CAP)
-        sheets_sample = _sheet_data_by_key(sample_rows)
-        suggestion = {sheet_key: _sheet_suggestion(sheet_rows) for sheet_key, sheet_rows in sheets_sample.items()}
+        if body.sheet_keys:
+            # Échantillon PAR ONGLET (filtré côté SQL, voir
+            # list_pipeline_rows_for_sheet) : chaque onglet reçoit ses
+            # PROPRES lignes, quelle que soit la taille des onglets
+            # précédents -- corrige le cas où un LIMIT global (ci-dessous)
+            # masquait entièrement les onglets suivants (revue Copilot,
+            # PR #27). PIPELINE_PREVIEW_SIZE suffit : _sheet_suggestion ne
+            # regarde de toute façon jamais plus que ça pour construire
+            # son échantillon de détection.
+            suggestion = {
+                sheet_key: _sheet_suggestion(
+                    list_pipeline_rows_for_sheet(ctx.client, session_id, sheet_key, limit=PIPELINE_PREVIEW_SIZE)
+                )
+                for sheet_key in body.sheet_keys
+            }
+        else:
+            # Anciens appelants (pas de sheet_keys fourni) : échantillon
+            # global, moins précis sur une session à plusieurs onglets
+            # inégaux, mais toujours borné en mémoire.
+            sample_rows = list_pipeline_rows(ctx.client, session_id, limit=PIPELINE_SUGGESTION_ROW_CAP)
+            sheets_sample = _sheet_data_by_key(sample_rows)
+            suggestion = {sheet_key: _sheet_suggestion(sheet_rows) for sheet_key, sheet_rows in sheets_sample.items()}
         return {"session_id": session_id, "suggested_mapping": suggestion}
 
     # Application réelle : chaque ligne doit être réécrite, la session

@@ -732,6 +732,17 @@ PIPELINE_APPEND_BATCH = 500
 # automatique (l'utilisateur mappe à la main) -- dégradation, jamais une
 # perte de données.
 PIPELINE_SUGGESTION_ROW_CAP = 3000
+# Plafond en octets sur la somme des fichiers d'UN import -- mesuré en
+# conditions réelles (Render, plan 512 Mo) : un .xlsx de 8,5 Mo a fait
+# grimper le process à ~490 Mo de RAM (parsing pandas/openpyxl, qui
+# charge tout en mémoire, PAS un lecteur en flux), déclenchant un
+# OOM-kill du serveur en cours de requête -- l'utilisateur ne voit
+# qu'une connexion coupée ("Erreur inconnue" côté navigateur), rien côté
+# serveur (le process meurt avant de répondre). Un CSV du même volume de
+# données pèse nettement moins en mémoire ; ce plafond vaut donc pour
+# TOUS les formats par simplicité et sécurité, avec un message qui
+# oriente vers le CSV pour les gros volumes.
+PIPELINE_MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 
 
 def _parse_pipeline_file(filename: str, content: bytes) -> dict[str, pd.DataFrame]:
@@ -875,6 +886,21 @@ async def create_pipeline_session_endpoint(
     suivante. N'écrit jamais dans trieur_data.records (donnée permanente)
     -- ça reste la validation finale du pipeline, pas encore portée ici."""
     parsed = [(f.filename or "import", await f.read()) for f in files]
+    total_bytes = sum(len(content) for _, content in parsed)
+    if total_bytes > PIPELINE_MAX_UPLOAD_BYTES:
+        # Rejeté AVANT le parsing pandas/openpyxl (voir
+        # PIPELINE_MAX_UPLOAD_BYTES) : un fichier trop volumineux fait
+        # planter le process (OOM) plutôt que de répondre proprement --
+        # un 413 explicite vaut mieux qu'une connexion coupée sans
+        # explication.
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Fichier(s) trop volumineux ({total_bytes / 1_048_576:.1f} Mo, max "
+                f"{PIPELINE_MAX_UPLOAD_BYTES / 1_048_576:.0f} Mo par import) -- utilisez le format "
+                "CSV (bien plus léger que .xlsx pour le même volume) ou importez en plusieurs fois."
+            ),
+        )
     sheets = _parse_and_merge_pipeline_files(parsed)
     rows, columns = _merge_pipeline_sheets(sheets)
     if not rows:

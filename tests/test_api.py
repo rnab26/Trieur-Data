@@ -1217,6 +1217,26 @@ def _upload_csv(tc, org_id, content: bytes, filename="clients.csv"):
     )
 
 
+def test_pipeline_session_create_rejects_oversized_upload_before_parsing(client_factory, monkeypatch):
+    """Un .xlsx de 8,5 Mo mesuré en conditions réelles (Render, plan
+    512 Mo) a fait grimper le process à ~490 Mo de RAM au parsing
+    pandas/openpyxl et déclenché un OOM-kill en cours de requête --
+    l'utilisateur ne voyait qu'une connexion coupée, rien côté serveur.
+    Rejeté maintenant AVANT tout parsing (413), plafond réduit ici pour
+    ne pas générer un vrai gros fichier de test."""
+    from api import main as api_main
+
+    monkeypatch.setattr(api_main, "PIPELINE_MAX_UPLOAD_BYTES", 10)
+
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = _upload_csv(tc, "org-1", b"NOM,EMAIL\nDupont,d@x.com\n")
+
+    assert res.status_code == 413
+    assert "CSV" in res.json()["detail"]
+    assert not fake.postgrest.tables["pipeline_sessions"]
+
+
 def test_pipeline_session_create_stages_rows_and_detects_columns(client_factory):
     fake = _make_client()
     tc = client_factory(fake)

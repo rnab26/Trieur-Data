@@ -1317,68 +1317,92 @@ def apply_pipeline_mapping(
             detail="Cette session a déjà été mappée (ou n'est plus au statut 'importing') -- rechargez la page.",
         )
 
-    # Colonnes IBAN (nom OU contenu) détectées sur un échantillon MÊLANT
-    # TOUS les onglets réellement mappés (pas seulement le premier) --
-    # plafonné par onglet (IBAN_DETECTION_SAMPLE_SIZE réparti) pour rester
-    # borné en mémoire même avec beaucoup d'onglets.
-    per_sheet_cap = max(50, IBAN_DETECTION_SAMPLE_SIZE // max(len(sheets_data), 1))
-    iban_sample_rows = []
-    for sheet_key, sheet_map in mapping_by_sheet.items():
-        sheet_rows = sheets_data.get(sheet_key, [])
-        if not sheet_rows or not any(m and m != "(non assigne)" for m in sheet_map.values()):
-            continue
-        iban_sample_rows.extend(
-            merge_mapped_row(_without_sheet_key(r["data"]), sheet_map, master_cols, None, set())
-            for r in sheet_rows[:per_sheet_cap]
-        )
-    iban_masters = detect_iban_master_columns(iban_sample_rows, master_cols)
-
-    n_updated = 0
-    n_excluded = 0
-    iban_invalid_counts: dict[str, int] = {}
-    iban_invalid_samples: dict[str, list[str]] = {}
-    applied_mapping: dict[str, dict[str, str]] = {}
-
-    for sheet_key, sheet_rows in sheets_data.items():
-        sheet_map = mapping_by_sheet.get(sheet_key, {})
-        has_assignment = any(m and m != "(non assigne)" for m in sheet_map.values())
-        if not has_assignment:
-            # Onglet décoché par l'utilisateur (absent de `mapping`) ou
-            # sans aucune assignation : exclu de la base fusionnée, comme
-            # "Aucune colonne assignée, ignoré" / l'étape [3] de la
-            # référence -- ses lignes de staging sont retirées plutôt que
-            # de rester à moitié mappées. Par LOTS bornés (même taille que
-            # l'import, PIPELINE_APPEND_BATCH) : un seul .in_("id", ...)
-            # avec les ids de tout un onglet dépasserait les limites de
-            # taille de requête PostgREST sur les gros volumes documentés
-            # (>600 000 lignes) -- revue Copilot, PR #27.
-            sheet_ids = [r["id"] for r in sheet_rows]
-            for start in range(0, len(sheet_ids), PIPELINE_APPEND_BATCH):
-                n_excluded += delete_pipeline_rows(
-                    ctx.client, session_id, sheet_ids[start:start + PIPELINE_APPEND_BATCH],
-                )
-            continue
-
-        applied_mapping[sheet_key] = sheet_map
-        source_label = None
-        if "Source Data" in master_cols:
-            base = session.get("source_filename") or "import"
-            source_label = f"{base} ({sheet_key})" if sheet_key else base
-
-        for row in sheet_rows:
-            new_data = merge_mapped_row(
-                _without_sheet_key(row["data"]), sheet_map, master_cols, source_label, iban_masters,
+    # À partir d'ici, la session est réservée ('mapped') mais les lignes
+    # ne sont pas encore réécrites : pas de vraie transaction possible sur
+    # des centaines/milliers d'appels REST individuels. Si CE bloc échoue
+    # en cours de route (panne réseau, timeout), la session resterait
+    # sinon visible comme "mapped" avec un staging à moitié réécrit -- et
+    # tout retry serait rejeté en 409 (déjà réservée) sans espoir de
+    # réparation propre, puisque merge_mapped_row retire `_sheet` des
+    # lignes déjà traitées (un retry regrouperait le reste sous une clé
+    # vide, cf. plus haut). Même choix que create_pipeline_session_endpoint
+    # sur un échec de lot : on supprime la session entière plutôt que de
+    # la laisser dans un état à moitié transformé -- revue Copilot, PR #27.
+    try:
+        # Colonnes IBAN (nom OU contenu) détectées sur un échantillon
+        # MÊLANT TOUS les onglets réellement mappés (pas seulement le
+        # premier) -- plafonné par onglet (IBAN_DETECTION_SAMPLE_SIZE
+        # réparti) pour rester borné en mémoire même avec beaucoup
+        # d'onglets.
+        per_sheet_cap = max(50, IBAN_DETECTION_SAMPLE_SIZE // max(len(sheets_data), 1))
+        iban_sample_rows = []
+        for sheet_key, sheet_map in mapping_by_sheet.items():
+            sheet_rows = sheets_data.get(sheet_key, [])
+            if not sheet_rows or not any(m and m != "(non assigne)" for m in sheet_map.values()):
+                continue
+            iban_sample_rows.extend(
+                merge_mapped_row(_without_sheet_key(r["data"]), sheet_map, master_cols, None, set())
+                for r in sheet_rows[:per_sheet_cap]
             )
+        iban_masters = detect_iban_master_columns(iban_sample_rows, master_cols)
 
-            for col in iban_masters:
-                if col in new_data and iban_is_valid(new_data[col]) is False:
-                    iban_invalid_counts[col] = iban_invalid_counts.get(col, 0) + 1
-                    samples = iban_invalid_samples.setdefault(col, [])
-                    if len(samples) < 20:
-                        samples.append(row["id"])
+        n_updated = 0
+        n_excluded = 0
+        iban_invalid_counts: dict[str, int] = {}
+        iban_invalid_samples: dict[str, list[str]] = {}
+        applied_mapping: dict[str, dict[str, str]] = {}
 
-            update_pipeline_row_data(ctx.client, row["id"], new_data)
-            n_updated += 1
+        for sheet_key, sheet_rows in sheets_data.items():
+            sheet_map = mapping_by_sheet.get(sheet_key, {})
+            has_assignment = any(m and m != "(non assigne)" for m in sheet_map.values())
+            if not has_assignment:
+                # Onglet décoché par l'utilisateur (absent de `mapping`) ou
+                # sans aucune assignation : exclu de la base fusionnée,
+                # comme "Aucune colonne assignée, ignoré" / l'étape [3] de
+                # la référence -- ses lignes de staging sont retirées
+                # plutôt que de rester à moitié mappées. Par LOTS bornés
+                # (même taille que l'import, PIPELINE_APPEND_BATCH) : un
+                # seul .in_("id", ...) avec les ids de tout un onglet
+                # dépasserait les limites de taille de requête PostgREST
+                # sur les gros volumes documentés (>600 000 lignes) --
+                # revue Copilot, PR #27.
+                sheet_ids = [r["id"] for r in sheet_rows]
+                for start in range(0, len(sheet_ids), PIPELINE_APPEND_BATCH):
+                    n_excluded += delete_pipeline_rows(
+                        ctx.client, session_id, sheet_ids[start:start + PIPELINE_APPEND_BATCH],
+                    )
+                continue
+
+            applied_mapping[sheet_key] = sheet_map
+            source_label = None
+            if "Source Data" in master_cols:
+                base = session.get("source_filename") or "import"
+                source_label = f"{base} ({sheet_key})" if sheet_key else base
+
+            for row in sheet_rows:
+                new_data = merge_mapped_row(
+                    _without_sheet_key(row["data"]), sheet_map, master_cols, source_label, iban_masters,
+                )
+
+                for col in iban_masters:
+                    if col in new_data and iban_is_valid(new_data[col]) is False:
+                        iban_invalid_counts[col] = iban_invalid_counts.get(col, 0) + 1
+                        samples = iban_invalid_samples.setdefault(col, [])
+                        if len(samples) < 20:
+                            samples.append(row["id"])
+
+                update_pipeline_row_data(ctx.client, row["id"], new_data)
+                n_updated += 1
+    except Exception as exc:
+        try:
+            delete_pipeline_session(ctx.client, session_id)
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=500,
+            detail="Échec de l'application du mapping en cours de route -- la session a été "
+            "supprimée pour éviter un état à moitié transformé. Réimportez vos fichiers.",
+        ) from exc
 
     # Statut déjà passé à 'mapped' par claim_pipeline_session_for_mapping
     # ci-dessus (réservation atomique en tout début de fonction) -- pas de

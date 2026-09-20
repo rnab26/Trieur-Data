@@ -1708,6 +1708,37 @@ def test_pipeline_mapping_dry_run_samples_every_sheet_even_if_first_is_huge(clie
         assert suggestion[sheet_key].get("NOM") == "NOM"
 
 
+def test_pipeline_mapping_deletes_session_if_row_rewrite_fails_midway(client_factory, monkeypatch):
+    """Trouvaille Copilot, PR #27 : la réservation atomique écrit déjà le
+    statut 'mapped' AVANT de réécrire les lignes une par une. Si cette
+    réécriture échoue en cours de route (panne réseau), la session
+    restait sinon visible comme 'mapped' avec un staging à moitié
+    transformé, et tout retry était rejeté en 409 sans espoir de
+    réparation (merge_mapped_row retire `_sheet` des lignes déjà
+    traitées). Elle doit être supprimée entièrement plutôt que laissée
+    dans cet état."""
+    from api import main as api_main
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("panne réseau simulée en cours de réécriture")
+
+    monkeypatch.setattr(api_main, "update_pipeline_row_data", _boom)
+
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_csv(tc, "org-1", b"NOM\nDupont\n").json()["session_id"]
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {"clients": {"NOM": "NOM"}}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 500
+    assert not any(
+        r["id"] == session_id for r in fake.postgrest.tables["pipeline_sessions"]
+    ), "la session ne doit pas rester visible comme 'mapped' avec un staging à moitié réécrit"
+
+
 def get_pipeline_session_via_api(tc, session_id):
     return tc.get(f"/orgs/org-1/pipeline/sessions/{session_id}", headers={"Authorization": f"Bearer {TOKEN}"}).json()
 

@@ -6,6 +6,7 @@ jamais diverger silencieusement entre les deux modes ; (2) mémoire
 réellement bornée sur un fichier significatif -- pas supposé, mesuré."""
 import datetime
 import io
+import multiprocessing
 import resource
 
 import pandas as pd
@@ -128,21 +129,23 @@ def test_stream_excel_sheets_duplicates_comptes_sur_echantillon():
     assert n_dup == 1
 
 
-def test_stream_excel_sheets_memoire_bornee_sur_un_fichier_significatif():
-    """Mesure réelle (pas supposée) : un fichier de ~50 000 lignes ne doit
-    pas faire grimper le pic mémoire au-delà de quelques dizaines de Mo au
-    DELTA (contre ~45x la taille du fichier mesuré sur le chemin
-    classique en conditions réelles Render) -- consommé en flux, jamais
-    matérialisé entièrement."""
-    n = 50_000
+def _measure_stream_excel_sheets_memory(n, result_queue):
+    """Fonction top-niveau (picklable, requis par multiprocessing en mode
+    spawn) exécutée dans un SOUS-PROCESS dédié : ru_maxrss est un maximum
+    non décroissant sur toute la durée de vie du process -- mesurer dans
+    le process de test aurait fait "monter le plancher" avec le pic
+    mémoire de la génération du fichier (df.to_excel), masquant ensuite
+    une éventuelle régression du streaming (revue Copilot, PR #29)."""
+    import gc
+
     df = pd.DataFrame({
         "NOM": [f"NOM{i}" for i in range(n)],
         "EMAIL": [f"user{i}@example.com" for i in range(n)],
         "TELEPHONE": [f"06{i:08d}" for i in range(n)],
     })
     data = _xlsx_bytes(df)
+    del df
 
-    import gc
     gc.collect()
     before_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 
@@ -152,10 +155,26 @@ def test_stream_excel_sheets_memoire_bornee_sur_un_fichier_significatif():
             total_rows += 1
 
     after_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    delta_mb = (after_kb - before_kb) / 1024
+    result_queue.put((total_rows, (after_kb - before_kb) / 1024))
 
-    assert total_rows == n
-    # Généreux (le process porte déjà pandas/openpyxl importés) : le vrai
-    # test est que ça reste très en-dessous du ratio ~45x mesuré côté
+
+def test_stream_excel_sheets_memoire_bornee_sur_un_fichier_significatif():
+    """Mesure réelle (pas supposée) : un fichier de ~50 000 lignes ne doit
+    pas faire grimper le pic mémoire au-delà de quelques dizaines de Mo au
+    DELTA (contre ~45x la taille du fichier mesuré sur le chemin
+    classique en conditions réelles Render) -- consommé en flux, jamais
+    matérialisé entièrement. Mesuré dans un sous-process "spawn" dédié
+    (voir _measure_stream_excel_sheets_memory) pour que le résultat ne
+    dépende pas de ce que le process de test a déjà fait tourner avant."""
+    ctx = multiprocessing.get_context("spawn")
+    result_queue = ctx.Queue()
+    process = ctx.Process(target=_measure_stream_excel_sheets_memory, args=(50_000, result_queue))
+    process.start()
+    total_rows, delta_mb = result_queue.get(timeout=120)
+    process.join(timeout=30)
+
+    assert total_rows == 50_000
+    # Généreux (le sous-process porte déjà pandas/openpyxl importés) : le
+    # vrai test est que ça reste très en-dessous du ratio ~45x mesuré côté
     # chemin classique (qui aurait donné plusieurs centaines de Mo ici).
-    assert delta_mb < 150, f"delta mémoire trop élevé : {delta_mb:.1f} Mo pour {n} lignes"
+    assert delta_mb < 150, f"delta mémoire trop élevé : {delta_mb:.1f} Mo pour 50 000 lignes"

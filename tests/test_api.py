@@ -1813,6 +1813,61 @@ def test_pipeline_mapping_streaming_apply_rejects_unknown_sheet_key(client_facto
     assert len(rows) == 1  # rien touché
 
 
+def test_pipeline_mapping_streaming_apply_rejects_incomplete_sheet_keys(client_factory, monkeypatch):
+    """Trouvaille Copilot (PR #29) : known_sheet_keys = body.sheet_keys
+    (mode flux) -- si le client fournit une liste incomplète (onglet
+    ajouté entre l'aperçu et l'application, appel manuel de l'API...),
+    les lignes du sheet_key MANQUANT n'étaient ni mises à jour ni
+    exclues, mais la session passait quand même à 'mapped' : staging à
+    moitié transformé et invisible. Garde ajoutée : n_updated +
+    n_excluded comparé à session['row_count'], échec explicite (même
+    filet que les autres échecs en cours de route -- session supprimée)
+    si ça ne correspond pas."""
+    import io as _io
+
+    import pandas as pd
+
+    from api import main as api_main
+
+    monkeypatch.setattr(api_main, "PIPELINE_STREAM_THRESHOLD_BYTES", 10)
+
+    buf = _io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        pd.DataFrame({"NOM": ["Dupont"]}).to_excel(w, index=False, sheet_name="Contacts")
+        pd.DataFrame({"VILLE": ["Paris"]}).to_excel(w, index=False, sheet_name="Villes")
+
+    fake = _make_client()
+    tc = client_factory(fake)
+    upload = tc.post(
+        "/orgs/org-1/pipeline/sessions",
+        files=[("files", ("deux_onglets.xlsx", buf.getvalue(),
+                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert upload.status_code == 200
+    upload_body = upload.json()
+    session_id = upload_body["session_id"]
+    all_sheet_keys = [s["sheet_key"] for s in upload_body["sheets"]]
+    assert len(all_sheet_keys) == 2
+    contacts_key = next(k for k in all_sheet_keys if "Contacts" in k)
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={
+            "mapping": {contacts_key: {"NOM": "NOM"}},
+            # "Villes" manque volontairement : la session le connaît (2
+            # onglets réellement importés) mais le client n'en informe
+            # que la moitié.
+            "sheet_keys": [contacts_key],
+        },
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+
+    assert res.status_code == 500
+    assert "supprimée" in res.json()["detail"]
+    assert not fake.postgrest.tables["pipeline_sessions"]
+
+
 def test_pipeline_full_flow_end_to_end_via_streaming_paths(client_factory, monkeypatch):
     """Parcours COMPLET (import -> suggestion -> application -> vérif des
     données finales) sur un fichier assez gros pour forcer PLUSIEURS

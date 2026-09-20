@@ -1484,6 +1484,12 @@ def apply_pipeline_mapping(
         bloqué ni supprimé automatiquement -- même choix que Streamlit, à
         vérifier avant l'export)."""
     session = _get_pipeline_session_or_404(ctx, org_id, session_id)
+    # Copié à part MAINTENANT (avant toute mutation) : delete_pipeline_rows
+    # (appelé plus bas pour les onglets exclus) décrémente row_count sur
+    # CE MÊME dict `session` en place côté client Postgrest -- relire
+    # session["row_count"] après coup donnerait un total déjà partiellement
+    # décompté, faussant la garde de traitement complet ci-dessous.
+    expected_row_count = session["row_count"]
     master_cols = get_org_master_columns(ctx.client, org_id)
 
     # Rejet rapide et lisible dans le cas courant (session déjà mappée,
@@ -1686,6 +1692,20 @@ def apply_pipeline_mapping(
                 for row_id in samples:
                     if len(bucket) < 20:
                         bucket.append(row_id)
+
+        if streaming_apply and n_updated + n_excluded != expected_row_count:
+            # sheet_keys vient du client (session.sheets côté frontend) --
+            # normalement exhaustif, mais un état désynchronisé (onglet
+            # ajouté entre l'aperçu et l'application, appel manuel de
+            # l'API...) laisserait sinon des lignes avec `_sheet` encore
+            # présent, jamais traitées, alors que la session serait quand
+            # même marquée 'mapped' : un staging à moitié transformé,
+            # invisible pour l'utilisateur. Même filet de sécurité que
+            # l'échec en cours de route ci-dessous (revue Copilot, PR #29).
+            raise RuntimeError(
+                f"Traitement partiel : {n_updated + n_excluded} ligne(s) traitée(s) sur "
+                f"{expected_row_count} attendue(s) -- sheet_keys incomplet ou désynchronisé."
+            )
     except Exception as exc:
         try:
             delete_pipeline_session(ctx.client, session_id)

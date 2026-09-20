@@ -106,7 +106,7 @@ def stream_excel_sheets(file_obj, header_sample_size=1000):
 
     Générateur de (nom_onglet, colonnes, n_duplicates_sample,
     itérateur_de_dicts) -- l'appelant consomme l'itérateur lui-même en flux
-    (jamais convertit en liste) pour garder la mémoire bornée jusqu'au bout
+    (jamais converti en liste) pour garder la mémoire bornée jusqu'au bout
     de la chaîne.
     """
     import openpyxl

@@ -7,11 +7,10 @@
 -- déjà en place. Contenu copié tel quel depuis cette branche (aucune
 -- ligne changée) pour que `main` reflète enfin le schéma réel.
 --
--- Déjà appliquée sur la base de PRODUCTION actuelle -- ne l'exécute pas
--- à la main dessus (les `create table` échoueraient, les objets
--- existent déjà). Reste une migration normale et rejouable dans la
--- séquence complète (0001 à N) pour initialiser une base neuve (reset
--- local, nouveau projet Supabase).
+-- Déjà appliquée sur la base de PRODUCTION actuelle. Idempotente (`if
+-- not exists` + policy recréée) : rejouable sans risque dans la
+-- séquence complète (0001 à N), sur la prod actuelle comme sur une base
+-- neuve (reset local, nouveau projet Supabase).
 --
 -- Crée trois éléments non utilisés par l'API actuelle de `main` (le
 -- portage fidèle du 2026-09-20 a documenté leur absence comme un écart
@@ -39,7 +38,7 @@
 --    session à la fois).
 -- =============================================================
 
-create table trieur_data.pipeline_remembered_mappings (
+create table if not exists trieur_data.pipeline_remembered_mappings (
     id uuid primary key default gen_random_uuid(),
     org_id uuid not null references trieur_data.organizations (id) on delete cascade,
     fingerprint text not null,
@@ -51,16 +50,20 @@ create table trieur_data.pipeline_remembered_mappings (
 comment on table trieur_data.pipeline_remembered_mappings is
     'Mapping colonnes source -> colonnes maîtres CONFIRMÉ, mémorisé par empreinte de forme de fichier (trieur/matching.py:column_fingerprint) -- rejoué automatiquement au prochain import de même forme (trieur/matching.py:auto_assign_with_memory), remplace remembered_mappings.json.';
 
-create index pipeline_remembered_mappings_org_idx on trieur_data.pipeline_remembered_mappings (org_id);
+create index if not exists pipeline_remembered_mappings_org_idx on trieur_data.pipeline_remembered_mappings (org_id);
 
 alter table trieur_data.pipeline_remembered_mappings enable row level security;
 
+-- `drop policy if exists` + `create` plutôt que `create policy if not
+-- exists` (qui n'existe pas en SQL Postgres) -- rend la migration
+-- rejouable sur une base où l'objet existe déjà (revue Copilot, PR #26).
+drop policy if exists pipeline_remembered_mappings_rw on trieur_data.pipeline_remembered_mappings;
 create policy pipeline_remembered_mappings_rw on trieur_data.pipeline_remembered_mappings
     for all using (trieur_data.is_org_member(org_id))
     with check (trieur_data.is_org_member(org_id));
 
 
-create table trieur_data.pipeline_export_presets (
+create table if not exists trieur_data.pipeline_export_presets (
     id uuid primary key default gen_random_uuid(),
     user_id uuid not null references auth.users (id) on delete cascade,
     org_id uuid not null references trieur_data.organizations (id) on delete cascade,
@@ -74,17 +77,18 @@ create table trieur_data.pipeline_export_presets (
 comment on table trieur_data.pipeline_export_presets is
     'Presets d''export nommés (ordre + sélection des colonnes, onglet 4 Trieur de Data) -- remplace export_presets.json, même patron que db_saved_views (par compte + organisation).';
 
-create index pipeline_export_presets_user_org_idx on trieur_data.pipeline_export_presets (user_id, org_id);
+create index if not exists pipeline_export_presets_user_org_idx on trieur_data.pipeline_export_presets (user_id, org_id);
 
 alter table trieur_data.pipeline_export_presets enable row level security;
 
+drop policy if exists pipeline_export_presets_own on trieur_data.pipeline_export_presets;
 create policy pipeline_export_presets_own on trieur_data.pipeline_export_presets
     for all using (user_id = auth.uid() and trieur_data.is_org_member(org_id))
     with check (user_id = auth.uid() and trieur_data.is_org_member(org_id));
 
 
 alter table trieur_data.pipeline_sessions
-    add column dedup_config jsonb;
+    add column if not exists dedup_config jsonb;
 
 comment on column trieur_data.pipeline_sessions.dedup_config is
     'Colonne créée par la branche fix/pipeline-full-parity pour un dédoublonnage actif réappliqué à chaque lecture ({"column": ..., "keep": "first"|"complete"}, voir tab3_filtrage_dedup.py) -- INERTE sur main : aucun code de api/main.py ne la lit ni ne l''écrit aujourd''hui (main supprime les doublons directement, voir POST .../dedupe). À câbler ou à abandonner selon ce qui est décidé.';

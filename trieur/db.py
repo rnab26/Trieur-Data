@@ -679,6 +679,30 @@ def update_pipeline_session_status(client: Client, session_id: str, status: str)
     _td(client, "pipeline_sessions").update({"status": status}).eq("id", session_id).execute()
 
 
+def claim_pipeline_session_for_mapping(client: Client, session_id: str) -> bool:
+    """Réserve ATOMIQUEMENT une session pour l'application du mapping :
+    UPDATE ... WHERE status = 'importing' en un seul aller-retour SQL,
+    qui bascule directement sur 'mapped'. True si cette requête a bien
+    posé la réservation (statut passé de importing -> mapped), False si
+    une autre requête l'a déjà fait avant elle.
+
+    Sans ça, un lire-puis-écrire séparé (lire le statut, décider, écrire
+    à la fin) laisse une fenêtre où deux requêtes concurrentes (double
+    clic, deux onglets navigateur) peuvent toutes deux lire 'importing',
+    passer le garde, puis chacune réécrire/supprimer des lignes de
+    l'autre avant que l'une ou l'autre ne marque la session 'mapped' --
+    revue Copilot, PR #27. La contrainte `check` de la migration 0010
+    reste la seule source de vérité sur les valeurs de statut valides."""
+    res = (
+        _td(client, "pipeline_sessions")
+        .update({"status": "mapped"})
+        .eq("id", session_id)
+        .eq("status", "importing")
+        .execute()
+    )
+    return bool(res.data)
+
+
 def append_pipeline_rows(client: Client, session_id: str, rows: list[dict], start_index: int = 0) -> int:
     """Ajoute des lignes à une session de pipeline, à partir de
     `start_index` (0-based, voir `pipeline_rows.row_index`) -- permet un

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from trieur.db import (
     append_pipeline_rows,
+    claim_pipeline_session_for_mapping,
     create_pipeline_session,
     delete_expired_pipeline_sessions_for_org,
     delete_pipeline_rows,
@@ -364,3 +365,27 @@ def test_delete_pipeline_session_removes_its_rows_too():
     delete_pipeline_session(client, session["id"])
 
     assert get_pipeline_session(client, session["id"]) is None
+
+
+def test_claim_pipeline_session_for_mapping_is_exclusive():
+    """Revue Copilot, PR #27 : la réservation avant mapping doit être
+    UPDATE ... WHERE status='importing' en un seul aller-retour, pas un
+    lire-puis-écrire séparé -- sinon deux requêtes concurrentes liraient
+    toutes les deux 'importing' avant qu'aucune n'écrive 'mapped', et
+    muteraient chacune les lignes de l'autre. Ici on simule ce
+    scénario : la 2e tentative doit échouer même si elle "lit" un
+    statut encore 'importing' au moment de son propre appel."""
+    client = _FakeClient()
+    session = create_pipeline_session(client, "org-1", "user-1")
+
+    first = claim_pipeline_session_for_mapping(client, session["id"])
+    second = claim_pipeline_session_for_mapping(client, session["id"])
+
+    assert first is True
+    assert second is False
+    assert get_pipeline_session(client, session["id"])["status"] == "mapped"
+
+
+def test_claim_pipeline_session_for_mapping_fails_on_unknown_session():
+    client = _FakeClient()
+    assert claim_pipeline_session_for_mapping(client, "does-not-exist") is False

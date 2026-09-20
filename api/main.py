@@ -34,6 +34,7 @@ from trieur.db import (
     add_org_master_columns,
     adjust_pipeline_row_count,
     append_pipeline_rows,
+    claim_pipeline_session_for_mapping,
     count_records,
     create_chantier,
     create_pipeline_session,
@@ -73,7 +74,6 @@ from trieur.db import (
     unlock_pipeline_dedupe,
     update_chantier_status,
     update_pipeline_row_data,
-    update_pipeline_session_status,
     update_record,
 )
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
@@ -1206,13 +1206,12 @@ def apply_pipeline_mapping(
     session = _get_pipeline_session_or_404(ctx, org_id, session_id)
     master_cols = get_org_master_columns(ctx.client, org_id)
 
-    # Une session déjà mappée ne peut plus être re-mappée : merge_mapped_row
-    # retire `_sheet` des données à la 1re application, donc un retry (double
-    # clic, requête rejouée) regrouperait toutes les lignes sous une seule
-    # clé vide "" -- ne correspondant plus à aucun onglet du mapping fourni,
-    # ce qui les ferait TOUTES supprimer par la boucle d'exclusion plus bas
-    # (revue Copilot, PR #27). `dry_run` reste autorisé à tout moment (lecture
-    # seule, jamais d'écriture).
+    # Rejet rapide et lisible dans le cas courant (session déjà mappée,
+    # page pas rechargée) -- PAS la seule garde : c'est un simple test du
+    # statut déjà lu ci-dessus, donc pas fiable seul contre deux requêtes
+    # concurrentes (voir la réservation ATOMIQUE juste avant les
+    # mutations, plus bas -- claim_pipeline_session_for_mapping, revue
+    # Copilot PR #27).
     if not body.dry_run and session["status"] != "importing":
         raise HTTPException(
             status_code=409,
@@ -1270,6 +1269,23 @@ def apply_pipeline_mapping(
         for m in sheet_map.values()
     ):
         raise HTTPException(status_code=400, detail="Aucune colonne assignée dans ce mapping.")
+
+    # Réservation ATOMIQUE de la session, juste avant toute mutation des
+    # lignes -- UPDATE ... WHERE status='importing' en un seul
+    # aller-retour SQL (voir claim_pipeline_session_for_mapping), pas un
+    # simple test du statut lu plus haut au début de la fonction : sinon
+    # deux requêtes concurrentes (double clic, deux onglets navigateur)
+    # passeraient toutes les deux les validations ci-dessus avant
+    # qu'aucune n'ait écrit 'mapped', et muteraient chacune les lignes de
+    # l'autre -- revue Copilot, PR #27. Placée APRÈS les validations
+    # (400 sur onglet inconnu / mapping vide) pour qu'une requête rejetée
+    # ne consomme jamais la réservation d'une session encore réellement
+    # 'importing'.
+    if not claim_pipeline_session_for_mapping(ctx.client, session_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Cette session a déjà été mappée (ou n'est plus au statut 'importing') -- rechargez la page.",
+        )
 
     # Colonnes IBAN (nom OU contenu) détectées sur un échantillon MÊLANT
     # TOUS les onglets réellement mappés (pas seulement le premier) --
@@ -1334,7 +1350,9 @@ def apply_pipeline_mapping(
             update_pipeline_row_data(ctx.client, row["id"], new_data)
             n_updated += 1
 
-    update_pipeline_session_status(ctx.client, session_id, "mapped")
+    # Statut déjà passé à 'mapped' par claim_pipeline_session_for_mapping
+    # ci-dessus (réservation atomique en tout début de fonction) -- pas de
+    # deuxième écriture ici.
     return {
         "session_id": session_id,
         "status": "mapped",

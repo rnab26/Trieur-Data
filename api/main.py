@@ -1086,6 +1086,15 @@ def apply_pipeline_mapping(
 # qui reste identique bit à bit à trieur/filters.py.
 # ---------------------------------------------------------------
 
+# Au-delà de ce nombre de GROUPES de doublons, la revue manuelle
+# groupe-par-groupe devient impraticable côté écran -- même seuil que
+# views/tab3_filtrage_dedup.py:DEDUP_GROUP_THRESHOLD, renvoyé par GET
+# .../duplicates pour que le frontend propose la même bascule
+# automatique vers une règle globale (pas une limite technique imposée
+# ici, une simple UX à reproduire côté React).
+DEDUP_GROUP_THRESHOLD = 50
+
+
 @app.get("/orgs/{org_id}/pipeline/sessions/{session_id}/duplicates")
 def get_pipeline_duplicates(
     org_id: str,
@@ -1118,6 +1127,7 @@ def get_pipeline_duplicates(
         "group_count": len(dup_groups),
         "duplicate_row_count": sum(len(g["row_ids"]) for g in dup_groups),
         "filtered_row_count": len(id_rows),
+        "group_threshold": DEDUP_GROUP_THRESHOLD,
         "groups": dup_groups,
     }
 
@@ -1135,15 +1145,6 @@ class PipelineDedupe(BaseModel):
     search: str = ""
     col_filters: dict = {}
     groups: list = []
-
-
-# Au-delà de ce nombre de GROUPES de doublons, la revue manuelle
-# groupe-par-groupe devient impraticable côté écran -- même seuil que
-# views/tab3_filtrage_dedup.py:DEDUP_GROUP_THRESHOLD, renvoyé au
-# frontend pour qu'il propose la même bascule automatique vers une règle
-# globale (pas une limite technique imposée ici, une simple UX à
-# reproduire côté React).
-DEDUP_GROUP_THRESHOLD = 50
 
 
 @app.post("/orgs/{org_id}/pipeline/sessions/{session_id}/dedupe")

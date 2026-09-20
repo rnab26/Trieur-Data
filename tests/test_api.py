@@ -1792,6 +1792,7 @@ def test_pipeline_duplicates_detects_groups_and_suggests_most_complete(client_fa
     body = res.json()
     assert body["group_count"] == 1
     assert body["duplicate_row_count"] == 2
+    assert body["group_threshold"] == 50
     group = body["groups"][0]
     assert group["value"] == "x@y.com"
     assert len(group["row_ids"]) == 2

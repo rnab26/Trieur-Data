@@ -40,6 +40,7 @@ from trieur.db import (
     create_section,
     delete_expired_pipeline_sessions_for_org,
     delete_pipeline_rows,
+    delete_pipeline_session,
     delete_record,
     delete_saved_view,
     delete_user_column_set,
@@ -857,10 +858,27 @@ async def create_pipeline_session_endpoint(
         (start, rows[start:start + PIPELINE_APPEND_BATCH])
         for start in range(0, len(rows), PIPELINE_APPEND_BATCH)
     ]
-    await asyncio.gather(*(
+    # `return_exceptions=True` : ATTEND que tous les lots terminent, même si
+    # l'un d'eux plante -- sans ça, la 1re exception fait sortir `gather`
+    # immédiatement pendant que les autres `to_thread` déjà lancés
+    # continuent d'insérer EN ARRIÈRE-PLAN après la réponse HTTP (des
+    # threads qu'on ne peut pas annuler une fois démarrés), sur une session
+    # qu'on est par ailleurs en train de supprimer juste en dessous --
+    # course entre l'écriture et la suppression (revue Copilot, PR #27).
+    results = await asyncio.gather(*(
         asyncio.to_thread(insert_pipeline_rows_only, ctx.client, session["id"], batch, start)
         for start, batch in batches
-    ))
+    ), return_exceptions=True)
+    failures = [r for r in results if isinstance(r, BaseException)]
+    if failures:
+        try:
+            delete_pipeline_session(ctx.client, session["id"])
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=500,
+            detail="Échec de l'import (un ou plusieurs lots n'ont pas pu être enregistrés). Réessayez.",
+        ) from failures[0]
     adjust_pipeline_row_count(ctx.client, session["id"], len(rows))
 
     master_cols = get_org_master_columns(ctx.client, org_id)

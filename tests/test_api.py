@@ -1294,6 +1294,44 @@ def test_pipeline_session_create_inserts_all_rows_across_parallel_batches(client
     assert session["row_count"] == n_rows, "un seul appel final au compteur, pas un par lot"
 
 
+def test_pipeline_session_create_cleans_up_session_when_a_batch_fails(client_factory, monkeypatch):
+    """Trouvaille Copilot, PR #27 : avec asyncio.gather par défaut, un lot
+    qui plante faisait sortir l'endpoint immédiatement en 500 sans attendre
+    les autres `to_thread` déjà lancés (qui continuaient d'écrire en
+    arrière-plan après la réponse) ni nettoyer la session à moitié
+    remplie. Simule l'échec du 2e lot sur un import à 3 lots : la réponse
+    doit être 500 ET la session ne doit plus exister."""
+    from api import main as api_main
+
+    fake = _make_client()
+    tc = client_factory(fake)
+    n_rows = 1200  # 3 lots de 500/500/200
+
+    real_insert = api_main.insert_pipeline_rows_only
+    call_count = {"n": 0}
+
+    def _fails_on_second_batch(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise RuntimeError("panne réseau simulée sur le 2e lot")
+        return real_insert(*args, **kwargs)
+
+    monkeypatch.setattr(api_main, "insert_pipeline_rows_only", _fails_on_second_batch)
+
+    content = b"NOM\n" + b"\n".join(f"L{i}".encode() for i in range(n_rows)) + b"\n"
+    res = tc.post(
+        "/orgs/org-1/pipeline/sessions",
+        files=[("files", ("gros_fichier.csv", content, "text/csv"))],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 500
+
+    # La session à moitié remplie ne doit pas rester trainer en base.
+    assert not any(
+        r.get("source_filename") == "gros_fichier.csv" for r in fake.postgrest.tables["pipeline_sessions"]
+    )
+
+
 def test_pipeline_session_create_cleans_up_expired_sessions_of_same_org_first(client_factory):
     """Revue PR #24, point #8 : la création d'une nouvelle session
     nettoie d'abord les sessions EXPIRÉES de cet org (nettoyage

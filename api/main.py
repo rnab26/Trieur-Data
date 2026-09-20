@@ -78,7 +78,7 @@ from trieur.db import (
     update_record,
 )
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
-from trieur.io_excel import read_csv_file, read_excel_all_sheets_from_file
+from trieur.io_excel import read_csv_file, read_excel_all_sheets_from_file, stream_excel_sheets
 from trieur.io_pdf import read_pdf_sepa
 from trieur.matching import apply_header_inference_excel, auto_assign_columns_fast, iban_is_valid
 from views._auth import accessible_organizations
@@ -732,6 +732,27 @@ PIPELINE_APPEND_BATCH = 500
 # automatique (l'utilisateur mappe à la main) -- dégradation, jamais une
 # perte de données.
 PIPELINE_SUGGESTION_ROW_CAP = 3000
+# Seuil (en octets, somme des fichiers d'UN import) qui bascule en mode
+# import EN FLUX (voir _iter_pipeline_sheets/stream_excel_sheets,
+# trieur/io_excel.py) plutôt que le chemin classique (tout le fichier
+# matérialisé en DataFrame pandas). Mesuré en conditions réelles (Render,
+# plan 512 Mo) : un .xlsx de 8,5 Mo a fait grimper le process à ~490 Mo de
+# RAM par le chemin classique, déclenchant un OOM-kill en cours de
+# requête -- l'utilisateur ne voit qu'une connexion coupée côté
+# navigateur, rien côté serveur (le process meurt avant de répondre). En
+# dessous de ce seuil, le chemin classique reste utilisé tel quel (simple,
+# déjà testé, aucune régression pour l'usage courant) -- le mode flux
+# n'apporte rien pour un petit fichier et coûterait juste un peu de
+# complexité pour rien.
+PIPELINE_STREAM_THRESHOLD_BYTES = 8 * 1024 * 1024
+# Plafond ABSOLU (accepté même en mode flux) : protège le disque
+# (spooling des uploads) et le temps de requête, pas la RAM -- le mode
+# flux garde la RAM bornée quelle que soit la taille du fichier, mais un
+# import de plusieurs centaines de Mo prend réellement plusieurs minutes
+# (des milliers d'allers-retours DB) et reste soumis aux éventuels délais
+# d'expiration de la plateforme (proxy Render), non vérifiés au-delà de
+# quelques dizaines de Mo à ce jour.
+PIPELINE_MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 
 
 def _parse_pipeline_file(filename: str, content: bytes) -> dict[str, pd.DataFrame]:
@@ -756,6 +777,25 @@ def _parse_pipeline_file(filename: str, content: bytes) -> dict[str, pd.DataFram
     return sheets
 
 
+def _sheet_key_deduper():
+    """Fabrique une fonction `next_key(base_key) -> clé unique`, en
+    suffixant " (2)", " (3)"... sur collision -- même politique partagée
+    par le chemin classique (_parse_and_merge_pipeline_files) et le
+    chemin en flux (_iter_pipeline_sheets) pour ne jamais diverger sur ce
+    point, quel que soit le mode d'import utilisé."""
+    used_keys: set[str] = set()
+
+    def next_key(base_key: str) -> str:
+        key, n = base_key, 2
+        while key in used_keys:
+            key = f"{base_key} ({n})"
+            n += 1
+        used_keys.add(key)
+        return key
+
+    return next_key
+
+
 def _parse_and_merge_pipeline_files(files: list[tuple[str, bytes]]) -> dict[str, pd.DataFrame]:
     """Lit PLUSIEURS fichiers et fusionne tous leurs onglets en un seul
     dict -- équivalent de la boucle `for f in files` de
@@ -768,18 +808,101 @@ def _parse_and_merge_pipeline_files(files: list[tuple[str, bytes]]) -> dict[str,
     "Feuil1") -- même souci que le "[FIX doublons de nom]" de l'original,
     réglé ici en dédupliquant la clé finale plutôt que le nom affiché."""
     combined: dict[str, pd.DataFrame] = {}
-    used_keys: set[str] = set()
     multi = len(files) > 1
+    next_key = _sheet_key_deduper()
     for filename, content in files:
         for sheet_name, df in _parse_pipeline_file(filename, content).items():
-            key = f"{filename} :: {sheet_name}" if multi else sheet_name
-            base_key, n = key, 2
-            while key in used_keys:
-                key = f"{base_key} ({n})"
-                n += 1
-            used_keys.add(key)
+            key = next_key(f"{filename} :: {sheet_name}" if multi else sheet_name)
             combined[key] = df
     return combined
+
+
+def _iter_pipeline_sheets(files: list[tuple[str, UploadFile]]):
+    """Générateur UNIFIÉ (clé d'onglet déjà dédupliquée, colonnes,
+    n_duplicates_sample, itérateur de lignes) sur TOUS les fichiers d'un
+    import EN MODE FLUX (voir PIPELINE_STREAM_THRESHOLD_BYTES) :
+      - .xlsx/.xls : stream_excel_sheets (trieur/io_excel.py) -- jamais
+        toute une feuille en mémoire, seule voie qui tient sur de gros
+        volumes avec une RAM bornée (mesuré : ~45x la taille du fichier
+        via le chemin classique, quel que soit le moteur).
+      - .csv/.pdf : lecteurs existants (déjà nettement plus légers en
+        mémoire pour un volume de données équivalent, mesuré ~6x contre
+        ~45x pour le xlsx) -- matérialisés normalement puis itérés, une
+        réécriture en flux n'était pas la priorité de ce chantier.
+    Même dédoublonnage de clé que le chemin classique (_sheet_key_deduper,
+    partagé) -- aucune divergence entre les deux modes sur ce point."""
+    multi = len(files) > 1
+    next_key = _sheet_key_deduper()
+    for filename, upload in files:
+        if filename.lower().endswith((".xlsx", ".xls")):
+            for sheet_name, columns, n_dup_sample, row_iter in stream_excel_sheets(upload.file):
+                key = next_key(f"{filename} :: {sheet_name}" if multi else sheet_name)
+                yield key, columns, n_dup_sample, row_iter
+        else:
+            upload.file.seek(0)
+            content = upload.file.read()
+            for sheet_name, df in _parse_pipeline_file(filename, content).items():
+                key = next_key(f"{filename} :: {sheet_name}" if multi else sheet_name)
+                columns = [str(c) for c in df.columns]
+                n_dup_sample = int(df.duplicated().sum())
+                row_iter = (_nan_to_none(row) for row in df.to_dict(orient="records"))
+                yield key, columns, n_dup_sample, row_iter
+
+
+def _stream_import_pipeline_files(client, session_id: str, files: list[tuple[str, UploadFile]]) -> dict:
+    """Insère tous les fichiers d'un import EN MODE FLUX (voir
+    _iter_pipeline_sheets), par lots bornés (PIPELINE_APPEND_BATCH),
+    SANS jamais construire la liste complète des lignes en mémoire comme
+    le fait le chemin classique -- fonction 100% synchrone (le client
+    Supabase l'est déjà), appelée via asyncio.to_thread par l'endpoint.
+    Renvoie le même résumé que le chemin classique (row_count, columns,
+    sheets, preview_rows) pour que la réponse HTTP soit identique quel
+    que soit le mode utilisé."""
+    sheet_summaries: list[dict] = []
+    columns_seen: list[str] = []
+    preview_rows: list[dict] = []
+    row_index = 0
+    total_rows = 0
+
+    for sheet_key, columns, n_dup_sample, row_iter in _iter_pipeline_sheets(files):
+        for c in columns:
+            if c not in columns_seen:
+                columns_seen.append(c)
+        sheet_row_count = 0
+        sheet_preview: list[dict] = []
+        batch: list[dict] = []
+        for row in row_iter:
+            if len(sheet_preview) < 6:
+                sheet_preview.append(dict(row))
+            if len(preview_rows) < PIPELINE_PREVIEW_SIZE:
+                preview_rows.append(dict(row))
+            tagged = dict(row)
+            tagged["_sheet"] = sheet_key
+            batch.append(tagged)
+            sheet_row_count += 1
+            total_rows += 1
+            if len(batch) >= PIPELINE_APPEND_BATCH:
+                insert_pipeline_rows_only(client, session_id, batch, row_index)
+                row_index += len(batch)
+                batch = []
+        if batch:
+            insert_pipeline_rows_only(client, session_id, batch, row_index)
+            row_index += len(batch)
+
+        sheet_summaries.append({
+            "sheet_key": sheet_key,
+            "columns": columns,
+            "row_count": sheet_row_count,
+            "n_duplicates": n_dup_sample,
+            "preview_rows": sheet_preview,
+        })
+
+    return {
+        "row_count": total_rows,
+        "columns": columns_seen,
+        "sheets": sheet_summaries,
+        "preview_rows": preview_rows,
+    }
 
 
 def _merge_pipeline_sheets(sheets: dict[str, pd.DataFrame]) -> tuple[list[dict], list[str]]:
@@ -852,6 +975,63 @@ def _get_pipeline_session_or_404(ctx: AuthCtx, org_id: str, session_id: str) -> 
     return session
 
 
+def _paginate_list(rows: list[dict], page_size: int):
+    """Découpe une liste déjà en mémoire en pages -- pour que le chemin de
+    mutation par onglet (voir apply_pipeline_mapping) puisse traiter
+    indifféremment une liste préchargée (ancien appelant, sans
+    sheet_keys) ou un flux paginé depuis la base (_pages_for_sheet
+    ci-dessous), avec la même fonction de traitement des deux côtés."""
+    for start in range(0, len(rows), page_size):
+        yield rows[start:start + page_size]
+
+
+def _pages_for_sheet(client, session_id: str, sheet_key: str, page_size: int):
+    """Générateur qui page à travers TOUTES les lignes d'un onglet SANS
+    jamais les charger toutes en mémoire -- toujours `limit=page_size,
+    offset=0` (list_pipeline_rows_for_sheet ne prend pas d'offset) : ça
+    marche car chaque page est "consommée" par l'appelant avant que ce
+    générateur ne redemande (update qui retire `_sheet` de `data`, ou
+    delete qui retire la ligne) -- la page suivante devient donc
+    naturellement la nouvelle "première page" de cet onglet. Boucle
+    jusqu'à page vide."""
+    while True:
+        page = list_pipeline_rows_for_sheet(client, session_id, sheet_key, limit=page_size)
+        if not page:
+            return
+        yield page
+
+
+def _delete_sheet_pages(client, session_id: str, pages) -> int:
+    n_excluded = 0
+    for page in pages:
+        ids = [r["id"] for r in page]
+        n_excluded += delete_pipeline_rows(client, session_id, ids)
+    return n_excluded
+
+
+def _update_sheet_pages(
+    client, pages, sheet_map: dict[str, str], master_cols: list[str],
+    source_label: str | None, iban_masters: set[str],
+) -> tuple[int, dict[str, int], dict[str, list[str]]]:
+    n_updated = 0
+    iban_invalid_counts: dict[str, int] = {}
+    iban_invalid_samples: dict[str, list[str]] = {}
+    for page in pages:
+        for row in page:
+            new_data = merge_mapped_row(
+                _without_sheet_key(row["data"]), sheet_map, master_cols, source_label, iban_masters,
+            )
+            for col in iban_masters:
+                if col in new_data and iban_is_valid(new_data[col]) is False:
+                    iban_invalid_counts[col] = iban_invalid_counts.get(col, 0) + 1
+                    samples = iban_invalid_samples.setdefault(col, [])
+                    if len(samples) < 20:
+                        samples.append(row["id"])
+            update_pipeline_row_data(client, row["id"], new_data)
+            n_updated += 1
+    return n_updated, iban_invalid_counts, iban_invalid_samples
+
+
 def _detected_columns(rows: list[dict]) -> list[str]:
     columns: list[str] = []
     for r in rows:
@@ -873,17 +1053,23 @@ async def create_pipeline_session_endpoint(
     seule session de staging (trieur_data.pipeline_rows, TTL 24h), et
     renvoie un aperçu + les colonnes détectées pour l'étape de mapping
     suivante. N'écrit jamais dans trieur_data.records (donnée permanente)
-    -- ça reste la validation finale du pipeline, pas encore portée ici."""
-    parsed = [(f.filename or "import", await f.read()) for f in files]
-    sheets = _parse_and_merge_pipeline_files(parsed)
-    rows, columns = _merge_pipeline_sheets(sheets)
-    if not rows:
-        raise HTTPException(status_code=400, detail="Fichier(s) vide(s) ou sans ligne exploitable.")
+    -- ça reste la validation finale du pipeline, pas encore portée ici.
 
-    # [7] Un résumé PAR ONGLET (avant toute écriture en staging) -- permet à
-    # l'écran de construire une carte par onglet (menus + aperçu alignés)
-    # sans re-télécharger les fichiers.
-    sheet_summaries = [_sheet_summary_from_df(key, df) for key, df in sheets.items()]
+    Au-delà de PIPELINE_STREAM_THRESHOLD_BYTES, bascule en MODE FLUX
+    (_stream_import_pipeline_files) : Raphaël importe régulièrement des
+    .xlsx allant jusqu'à plusieurs centaines de Mo (ancien Streamlit,
+    maxUploadSize=500) -- le chemin classique ci-dessous (tout le fichier
+    en DataFrame pandas) ferait planter le serveur en mémoire bien avant
+    ça (mesuré : ~45x la taille du fichier en RAM)."""
+    total_bytes = sum((f.size or 0) for f in files)
+    if total_bytes > PIPELINE_MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Fichier(s) trop volumineux ({total_bytes / 1_048_576:.1f} Mo, max "
+                f"{PIPELINE_MAX_UPLOAD_BYTES / 1_048_576:.0f} Mo par import) -- importez en plusieurs fois."
+            ),
+        )
 
     # Nettoyage opportuniste des sessions expirées de CET org avant d'en
     # ouvrir une nouvelle (revue PR #24, point #8 -- voir docstring de
@@ -895,9 +1081,69 @@ async def create_pipeline_session_endpoint(
     except Exception:
         pass
 
+    filenames = [f.filename or "import" for f in files]
     source_label = (
-        parsed[0][0] if len(parsed) == 1 else f"{len(parsed)} fichiers ({', '.join(f for f, _ in parsed[:3])}{'…' if len(parsed) > 3 else ''})"
+        filenames[0] if len(filenames) == 1
+        else f"{len(filenames)} fichiers ({', '.join(filenames[:3])}{'…' if len(filenames) > 3 else ''})"
     )
+
+    if total_bytes > PIPELINE_STREAM_THRESHOLD_BYTES:
+        session = create_pipeline_session(ctx.client, org_id, ctx.user.id, source_filename=source_label)
+        try:
+            result = await asyncio.to_thread(
+                _stream_import_pipeline_files, ctx.client, session["id"], list(zip(filenames, files)),
+            )
+        except Exception as exc:
+            try:
+                delete_pipeline_session(ctx.client, session["id"])
+            except Exception:
+                pass
+            raise HTTPException(
+                status_code=500,
+                detail="Échec de l'import (un ou plusieurs lots n'ont pas pu être enregistrés). Réessayez.",
+            ) from exc
+        if result["row_count"] == 0:
+            try:
+                delete_pipeline_session(ctx.client, session["id"])
+            except Exception:
+                pass
+            raise HTTPException(status_code=400, detail="Fichier(s) vide(s) ou sans ligne exploitable.")
+        try:
+            adjust_pipeline_row_count(ctx.client, session["id"], result["row_count"])
+        except Exception as exc:
+            try:
+                delete_pipeline_session(ctx.client, session["id"])
+            except Exception:
+                pass
+            raise HTTPException(
+                status_code=500,
+                detail="Échec de l'import (mise à jour du compteur). Réessayez.",
+            ) from exc
+
+        master_cols = get_org_master_columns(ctx.client, org_id)
+        return {
+            "session_id": session["id"],
+            "status": session.get("status", "importing"),
+            "row_count": result["row_count"],
+            "columns": result["columns"],
+            "unknown_columns": unknown_columns(result["columns"], master_cols),
+            "preview_rows": result["preview_rows"],
+            "sheets": result["sheets"],
+        }
+
+    # MODE CLASSIQUE (import sous le seuil de flux) -- inchangé, chemin le
+    # plus emprunté et déjà couvert par la suite de tests existante.
+    parsed = [(filename, await f.read()) for filename, f in zip(filenames, files)]
+    sheets = _parse_and_merge_pipeline_files(parsed)
+    rows, columns = _merge_pipeline_sheets(sheets)
+    if not rows:
+        raise HTTPException(status_code=400, detail="Fichier(s) vide(s) ou sans ligne exploitable.")
+
+    # [7] Un résumé PAR ONGLET (avant toute écriture en staging) -- permet à
+    # l'écran de construire une carte par onglet (menus + aperçu alignés)
+    # sans re-télécharger les fichiers.
+    sheet_summaries = [_sheet_summary_from_df(key, df) for key, df in sheets.items()]
+
     session = create_pipeline_session(ctx.client, org_id, ctx.user.id, source_filename=source_label)
 
     # Import rapide : tous les lots insérés EN PARALLÈLE (asyncio.gather +
@@ -1268,12 +1514,30 @@ def apply_pipeline_mapping(
             suggestion = {sheet_key: _sheet_suggestion(sheet_rows) for sheet_key, sheet_rows in sheets_sample.items()}
         return {"session_id": session_id, "suggested_mapping": suggestion}
 
-    # Application réelle : chaque ligne doit être réécrite, la session
-    # entière est donc forcément chargée ici (contrairement au dry_run
-    # ci-dessus) -- le mapping doit voir chaque onglet en entier, pas
-    # juste un échantillon, sinon des lignes resteraient non mappées.
-    all_rows = _all_pipeline_rows(ctx.client, session_id)
-    sheets_data = _sheet_data_by_key(all_rows)
+    # Application réelle : chaque ligne doit être réécrite. Avec
+    # `body.sheet_keys` fourni (même contrat que le dry_run ci-dessus --
+    # le frontend le transmet toujours depuis session.sheets), tout se
+    # fait PAR PAGES depuis la base (_pages_for_sheet), sans jamais
+    # charger la session entière en mémoire -- indispensable pour les
+    # gros imports désormais acceptés en mode flux côté import (voir
+    # PIPELINE_STREAM_THRESHOLD_BYTES) : sans ça, cette étape aurait
+    # simplement déplacé le même risque d'OOM un peu plus loin dans le
+    # pipeline. Sans sheet_keys (anciens appelants), repli sur l'ancien
+    # chargement complet -- comportement identique à avant, sans risque
+    # de régression pour ce cas.
+    streaming_apply = bool(body.sheet_keys)
+    sheets_data: dict[str, list[dict]] | None = None
+    if streaming_apply:
+        known_sheet_keys = body.sheet_keys
+    else:
+        all_rows = _all_pipeline_rows(ctx.client, session_id)
+        sheets_data = _sheet_data_by_key(all_rows)
+        known_sheet_keys = list(sheets_data.keys())
+
+    def _suggestion_sample(sheet_key: str) -> list[dict]:
+        if sheets_data is not None:
+            return sheets_data.get(sheet_key, [])[:PIPELINE_PREVIEW_SIZE]
+        return list_pipeline_rows_for_sheet(ctx.client, session_id, sheet_key, limit=PIPELINE_PREVIEW_SIZE)
 
     if body.mapping is not None:
         # Une clé d'onglet qui ne correspond à AUCUN onglet réel de cette
@@ -1283,7 +1547,7 @@ def apply_pipeline_mapping(
         # réponse "mapped" à zéro ligne -- rejeté avant toute mutation
         # plutôt que de laisser ça se produire silencieusement (revue
         # Copilot, PR #27).
-        unknown_keys = sorted(set(body.mapping) - set(sheets_data))
+        unknown_keys = sorted(set(body.mapping) - set(known_sheet_keys))
         if unknown_keys:
             raise HTTPException(
                 status_code=400,
@@ -1291,7 +1555,7 @@ def apply_pipeline_mapping(
             )
         mapping_by_sheet = body.mapping
     else:
-        mapping_by_sheet = {sheet_key: _sheet_suggestion(sheet_rows) for sheet_key, sheet_rows in sheets_data.items()}
+        mapping_by_sheet = {sheet_key: _sheet_suggestion(_suggestion_sample(sheet_key)) for sheet_key in known_sheet_keys}
 
     if not any(
         m and m != "(non assigne)"
@@ -1333,16 +1597,21 @@ def apply_pipeline_mapping(
         # MÊLANT TOUS les onglets réellement mappés (pas seulement le
         # premier) -- plafonné par onglet (IBAN_DETECTION_SAMPLE_SIZE
         # réparti) pour rester borné en mémoire même avec beaucoup
-        # d'onglets.
-        per_sheet_cap = max(50, IBAN_DETECTION_SAMPLE_SIZE // max(len(sheets_data), 1))
+        # d'onglets, en mode flux comme en mode classique.
+        per_sheet_cap = max(50, IBAN_DETECTION_SAMPLE_SIZE // max(len(known_sheet_keys), 1))
         iban_sample_rows = []
         for sheet_key, sheet_map in mapping_by_sheet.items():
-            sheet_rows = sheets_data.get(sheet_key, [])
-            if not sheet_rows or not any(m and m != "(non assigne)" for m in sheet_map.values()):
+            if not any(m and m != "(non assigne)" for m in sheet_map.values()):
+                continue
+            sample = (
+                sheets_data.get(sheet_key, [])[:per_sheet_cap] if sheets_data is not None
+                else list_pipeline_rows_for_sheet(ctx.client, session_id, sheet_key, limit=per_sheet_cap)
+            )
+            if not sample:
                 continue
             iban_sample_rows.extend(
                 merge_mapped_row(_without_sheet_key(r["data"]), sheet_map, master_cols, None, set())
-                for r in sheet_rows[:per_sheet_cap]
+                for r in sample
             )
         iban_masters = detect_iban_master_columns(iban_sample_rows, master_cols)
 
@@ -1352,25 +1621,29 @@ def apply_pipeline_mapping(
         iban_invalid_samples: dict[str, list[str]] = {}
         applied_mapping: dict[str, dict[str, str]] = {}
 
-        for sheet_key, sheet_rows in sheets_data.items():
+        for sheet_key in known_sheet_keys:
             sheet_map = mapping_by_sheet.get(sheet_key, {})
             has_assignment = any(m and m != "(non assigne)" for m in sheet_map.values())
+            # Pages LAZY (rien n'est encore exécuté/chargé ici) -- soit
+            # depuis la liste préchargée (repli ancien appelant), soit
+            # depuis la base PAR LOTS bornés (PIPELINE_APPEND_BATCH,
+            # même taille que l'import) : un seul .in_("id", ...) avec les
+            # ids de tout un onglet dépasserait les limites de taille de
+            # requête PostgREST sur les gros volumes -- revue Copilot,
+            # PR #27, désormais vrai aussi côté SOURCE des pages, pas
+            # seulement leur taille d'envoi.
+            pages = (
+                _paginate_list(sheets_data.get(sheet_key, []), PIPELINE_APPEND_BATCH) if sheets_data is not None
+                else _pages_for_sheet(ctx.client, session_id, sheet_key, PIPELINE_APPEND_BATCH)
+            )
+
             if not has_assignment:
                 # Onglet décoché par l'utilisateur (absent de `mapping`) ou
                 # sans aucune assignation : exclu de la base fusionnée,
                 # comme "Aucune colonne assignée, ignoré" / l'étape [3] de
                 # la référence -- ses lignes de staging sont retirées
-                # plutôt que de rester à moitié mappées. Par LOTS bornés
-                # (même taille que l'import, PIPELINE_APPEND_BATCH) : un
-                # seul .in_("id", ...) avec les ids de tout un onglet
-                # dépasserait les limites de taille de requête PostgREST
-                # sur les gros volumes documentés (>600 000 lignes) --
-                # revue Copilot, PR #27.
-                sheet_ids = [r["id"] for r in sheet_rows]
-                for start in range(0, len(sheet_ids), PIPELINE_APPEND_BATCH):
-                    n_excluded += delete_pipeline_rows(
-                        ctx.client, session_id, sheet_ids[start:start + PIPELINE_APPEND_BATCH],
-                    )
+                # plutôt que de rester à moitié mappées.
+                n_excluded += _delete_sheet_pages(ctx.client, session_id, pages)
                 continue
 
             applied_mapping[sheet_key] = sheet_map
@@ -1379,20 +1652,17 @@ def apply_pipeline_mapping(
                 base = session.get("source_filename") or "import"
                 source_label = f"{base} ({sheet_key})" if sheet_key else base
 
-            for row in sheet_rows:
-                new_data = merge_mapped_row(
-                    _without_sheet_key(row["data"]), sheet_map, master_cols, source_label, iban_masters,
-                )
-
-                for col in iban_masters:
-                    if col in new_data and iban_is_valid(new_data[col]) is False:
-                        iban_invalid_counts[col] = iban_invalid_counts.get(col, 0) + 1
-                        samples = iban_invalid_samples.setdefault(col, [])
-                        if len(samples) < 20:
-                            samples.append(row["id"])
-
-                update_pipeline_row_data(ctx.client, row["id"], new_data)
-                n_updated += 1
+            updated, invalid_counts, invalid_samples = _update_sheet_pages(
+                ctx.client, pages, sheet_map, master_cols, source_label, iban_masters,
+            )
+            n_updated += updated
+            for col, cnt in invalid_counts.items():
+                iban_invalid_counts[col] = iban_invalid_counts.get(col, 0) + cnt
+            for col, samples in invalid_samples.items():
+                bucket = iban_invalid_samples.setdefault(col, [])
+                for row_id in samples:
+                    if len(bucket) < 20:
+                        bucket.append(row_id)
     except Exception as exc:
         try:
             delete_pipeline_session(ctx.client, session_id)

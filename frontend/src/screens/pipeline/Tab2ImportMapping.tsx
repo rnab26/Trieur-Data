@@ -203,7 +203,9 @@ export function Tab2ImportMapping({
       for (const s of activeSheets) {
         activeMapping[s.sheet_key] = mapping[s.sheet_key] ?? {}
       }
-      const data = await applyPipelineMapping(orgId, session.session_id, activeMapping)
+      const data = await applyPipelineMapping(
+        orgId, session.session_id, activeMapping, session.sheets.map((s) => s.sheet_key),
+      )
       onMapped(data)
     } catch (err) {
       setBuildError(err instanceof ApiError ? err.message : 'Erreur inconnue.')

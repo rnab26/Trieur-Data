@@ -1217,6 +1217,50 @@ def _upload_csv(tc, org_id, content: bytes, filename="clients.csv"):
     )
 
 
+def test_pipeline_session_create_rejects_upload_above_hard_cap(client_factory, monkeypatch):
+    """Au-delà de PIPELINE_MAX_UPLOAD_BYTES (plafond ABSOLU, protège le
+    disque/le temps de requête -- pas la RAM, voir mode flux), rejeté en
+    413 avant tout traitement. Plafond réduit ici pour ne pas générer un
+    vrai gros fichier de test."""
+    from api import main as api_main
+
+    monkeypatch.setattr(api_main, "PIPELINE_MAX_UPLOAD_BYTES", 10)
+
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = _upload_csv(tc, "org-1", b"NOM,EMAIL\nDupont,d@x.com\n")
+
+    assert res.status_code == 413
+    assert "volumineux" in res.json()["detail"]
+    assert not fake.postgrest.tables["pipeline_sessions"]
+
+
+def test_pipeline_session_create_streams_above_threshold(client_factory, monkeypatch):
+    """Au-delà de PIPELINE_STREAM_THRESHOLD_BYTES (mais sous le plafond
+    absolu), bascule en mode flux (_stream_import_pipeline_files) -- même
+    résultat final que le mode classique pour l'appelant : mêmes lignes en
+    base, même forme de réponse. Seuil réduit ici pour déclencher le mode
+    flux sans générer un vrai gros fichier."""
+    from api import main as api_main
+
+    monkeypatch.setattr(api_main, "PIPELINE_STREAM_THRESHOLD_BYTES", 10)
+
+    fake = _make_client()
+    tc = client_factory(fake)
+    content = b"NOM,EMAIL\nDupont,d@x.com\nMartin,m@x.com\n"
+    res = _upload_csv(tc, "org-1", content)
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["row_count"] == 2
+    assert body["columns"] == ["NOM", "EMAIL"]
+    assert [r["NOM"] for r in body["preview_rows"]] == ["Dupont", "Martin"]
+    assert body["sheets"][0]["row_count"] == 2
+
+    rows = fake.postgrest.tables["pipeline_rows"]
+    assert sorted(r["data"]["NOM"] for r in rows) == ["Dupont", "Martin"]
+
+
 def test_pipeline_session_create_stages_rows_and_detects_columns(client_factory):
     fake = _make_client()
     tc = client_factory(fake)
@@ -1638,6 +1682,128 @@ def test_pipeline_mapping_excludes_one_of_two_sheets_across_multiple_batches(cli
     rows = fake.postgrest.tables["pipeline_rows"]
     assert len(rows) == 1
     assert rows[0]["data"] == {"NOM": "Garde"}
+
+
+def test_pipeline_mapping_streaming_apply_excludes_and_updates_across_multiple_pages(client_factory, monkeypatch):
+    """Même scénario que le test précédent (exclusion sur plusieurs lots),
+    mais avec `sheet_keys` fourni -- exerce le NOUVEAU chemin par pages
+    (_pages_for_sheet/_delete_sheet_pages/_update_sheet_pages), pas le
+    repli sur le chargement complet. Vérifie surtout que la pagination
+    "auto-consommante" (une page à la fois, sans offset explicite) ne
+    saute ni ne double aucune ligne sur PLUSIEURS pages, à la fois pour
+    la suppression (onglet exclu) ET la mise à jour (onglet mappé)."""
+    from api import main as api_main
+
+    monkeypatch.setattr(api_main, "PIPELINE_APPEND_BATCH", 2)
+
+    fake = _make_client()
+    tc = client_factory(fake)
+    content_a = b"NOM\n" + b"\n".join(f"A{i}".encode() for i in range(5)) + b"\n"
+    content_b = b"NOM\n" + b"\n".join(f"B{i}".encode() for i in range(5)) + b"\n"
+    upload = tc.post(
+        "/orgs/org-1/pipeline/sessions",
+        files=[
+            ("files", ("a.csv", content_a, "text/csv")),
+            ("files", ("b.csv", content_b, "text/csv")),
+        ],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    ).json()
+    session_id = upload["session_id"]
+    sheet_keys = [s["sheet_key"] for s in upload["sheets"]]
+    sheet_key_b = next(k for k in sheet_keys if "b.csv" in k)
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {sheet_key_b: {"NOM": "NOM"}}, "sheet_keys": sheet_keys},  # "a" absent -> exclu
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["n_rows_excluded"] == 5
+    assert body["n_rows_updated"] == 5
+
+    rows = fake.postgrest.tables["pipeline_rows"]
+    assert len(rows) == 5
+    assert sorted(r["data"]["NOM"] for r in rows) == [f"B{i}" for i in range(5)]
+
+
+def test_pipeline_mapping_streaming_apply_rejects_unknown_sheet_key(client_factory):
+    """Même garde que le chemin classique (400 avant toute mutation), mais
+    validée contre `sheet_keys` fourni plutôt qu'un chargement complet."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_csv(tc, "org-1", b"NOM\nDupont\n").json()["session_id"]
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {"typo": {"NOM": "NOM"}}, "sheet_keys": ["clients"]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+    rows = fake.postgrest.tables["pipeline_rows"]
+    assert len(rows) == 1  # rien touché
+
+
+def test_pipeline_full_flow_end_to_end_via_streaming_paths(client_factory, monkeypatch):
+    """Parcours COMPLET (import -> suggestion -> application -> vérif des
+    données finales) sur un fichier assez gros pour forcer PLUSIEURS
+    pages à chaque étape, en mode flux de bout en bout -- pas juste
+    l'import isolé (voir tests/test_io_excel_streaming.py pour la mesure
+    mémoire) ni la mutation isolée (voir les tests streaming_apply
+    ci-dessus) : ici, la VRAIE suite d'appels que fait le frontend."""
+    import io as _io
+
+    import pandas as pd
+
+    from api import main as api_main
+
+    monkeypatch.setattr(api_main, "PIPELINE_STREAM_THRESHOLD_BYTES", 10)
+    monkeypatch.setattr(api_main, "PIPELINE_APPEND_BATCH", 7)  # force plusieurs pages sur 20 lignes
+
+    n = 20
+    buf = _io.BytesIO()
+    pd.DataFrame({
+        "NOM": [f"NOM{i}" for i in range(n)],
+        "EMAIL": [f"user{i}@example.com" for i in range(n)],
+    }).to_excel(buf, index=False, sheet_name="Feuil1")
+
+    fake = _make_client()
+    tc = client_factory(fake)
+    upload = tc.post(
+        "/orgs/org-1/pipeline/sessions",
+        files=[("files", ("gros.xlsx", buf.getvalue(),
+                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert upload.status_code == 200
+    upload_body = upload.json()
+    assert upload_body["row_count"] == n
+    session_id = upload_body["session_id"]
+    sheet_keys = [s["sheet_key"] for s in upload_body["sheets"]]
+
+    dry = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"dry_run": True, "sheet_keys": sheet_keys},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert dry.status_code == 200
+    suggestion = dry.json()["suggested_mapping"]
+    assert suggestion[sheet_keys[0]].get("NOM") == "NOM"
+
+    apply_res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": suggestion, "sheet_keys": sheet_keys},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert apply_res.status_code == 200
+    apply_body = apply_res.json()
+    assert apply_body["n_rows_updated"] == n
+    assert apply_body["n_rows_excluded"] == 0
+
+    rows = fake.postgrest.tables["pipeline_rows"]
+    assert len(rows) == n
+    assert {r["data"]["NOM"] for r in rows} == {f"NOM{i}" for i in range(n)}
+    assert all("_sheet" not in r["data"] for r in rows)  # retiré à l'application, comme le chemin classique
 
 
 def test_pipeline_session_create_cleans_up_if_row_count_rpc_fails(client_factory, monkeypatch):

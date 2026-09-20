@@ -71,6 +71,40 @@ def test_stream_excel_sheets_sans_entete_deduit_les_colonnes_comme_le_chemin_cla
     assert [r[columns[0]] for r in rows] == list(classic_df[columns[0]])
 
 
+def test_stream_excel_sheets_sans_entete_colonne_creuse_reste_detectee_comme_email():
+    """Trouvaille Copilot (PR #29) : si les cellules vides d'une colonne
+    devenaient la CHAÎNE "None" au lieu de rester NaN pendant l'inférence
+    d'en-tête, _sample_values (dropna()) ne les exclurait plus, diluant le
+    ratio d'emails valides sous le seuil de détection (0.5) -- une colonne
+    EMAIL à moitié vide ne serait alors plus reconnue comme EMAIL. Colonne
+    volontairement creuse (2 emails sur 6 lignes) : seul un dropna() qui
+    fonctionne vraiment permet au ratio (2/2, une fois les vides exclus)
+    de dépasser 0.5 et de matcher le chemin classique."""
+    from trieur.io_excel import apply_header_inference_excel
+
+    df = pd.DataFrame([
+        ["Dupont", "j.dupont@mail.fr"],
+        ["Martin", None],
+        ["Durand", None],
+        ["Petit", None],
+        ["Bernard", "a.bernard@mail.fr"],
+        ["Roux", None],
+    ])
+    data = _xlsx_bytes(df, sheet_name="Leads", header=False)
+
+    classic = read_excel_all_sheets_from_file(io.BytesIO(data), "creux.xlsx")
+    classic, inferred = apply_header_inference_excel(classic, io.BytesIO(data))
+    classic_df = classic["Leads"]
+
+    streamed = _collect(stream_excel_sheets(io.BytesIO(data)))
+    columns, _n_dup, rows = streamed["Leads"]
+
+    assert inferred == ["Leads"]
+    assert columns == list(classic_df.columns)
+    assert "EMAIL" in columns, f"colonne EMAIL non détectée sur un échantillon creux : {columns}"
+    assert [r[columns[0]] for r in rows] == list(classic_df[columns[0]])
+
+
 def test_stream_excel_sheets_plusieurs_onglets():
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as w:

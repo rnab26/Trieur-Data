@@ -747,12 +747,18 @@ PIPELINE_SUGGESTION_ROW_CAP = 3000
 PIPELINE_STREAM_THRESHOLD_BYTES = 8 * 1024 * 1024
 # Plafond ABSOLU (accepté même en mode flux) : protège le disque
 # (spooling des uploads) et le temps de requête, pas la RAM -- le mode
-# flux garde la RAM bornée quelle que soit la taille du fichier, mais un
-# import de plusieurs centaines de Mo prend réellement plusieurs minutes
-# (des milliers d'allers-retours DB) et reste soumis aux éventuels délais
-# d'expiration de la plateforme (proxy Render), non vérifiés au-delà de
-# quelques dizaines de Mo à ce jour.
-PIPELINE_MAX_UPLOAD_BYTES = 200 * 1024 * 1024
+# flux garde la RAM bornée quelle que soit la taille du fichier. Fixé à
+# 550 Mo (marge au-dessus du besoin réel signalé : imports "jusqu'à 500
+# Mo", ancien Streamlit maxUploadSize=500) plutôt qu'un plafond plus bas
+# choisi arbitrairement -- revue Copilot, PR #29 (un plafond sous le
+# besoin réel aurait ré-introduit la régression que ce PR corrige, juste
+# déplacée du "plante en RAM" au "rejeté en 413"). Non encore vérifié
+# EN CONDITIONS RÉELLES au-delà de quelques dizaines de Mo à ce jour :
+# un import de plusieurs centaines de Mo prend réellement plusieurs
+# minutes (des milliers d'allers-retours DB) et reste soumis aux
+# éventuels délais d'expiration de la plateforme (proxy Render) -- voir
+# le test réel prévu après déploiement dans la description du PR.
+PIPELINE_MAX_UPLOAD_BYTES = 550 * 1024 * 1024
 
 
 def _parse_pipeline_file(filename: str, content: bytes) -> dict[str, pd.DataFrame]:

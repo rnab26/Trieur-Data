@@ -149,7 +149,18 @@ def stream_excel_sheets(file_obj, header_sample_size=1000):
                 # TOUTES les lignes (y compris la 1re) redeviennent des
                 # données, et les noms de colonnes sont devinés d'après le
                 # contenu de l'échantillon.
-                columns = infer_column_names(pd.DataFrame(buffer, dtype=str))
+                # str() colonne par colonne plutôt que pd.DataFrame(buffer,
+                # dtype=str) : même si vérifié sans divergence sur la
+                # version de pandas installée (None reste NaN après
+                # dropna()), convertir explicitement seulement les valeurs
+                # non nulles supprime toute dépendance à ce comportement
+                # d'implémentation -- infer_column_names (via
+                # _sample_values/dropna, trieur/matching.py) doit rester
+                # aligné sur le chemin classique (pd.read_excel(dtype=str))
+                # quelle que soit la version de pandas (revue Copilot,
+                # PR #29).
+                str_buffer = [[None if v is None else str(v) for v in row] for row in buffer]
+                columns = infer_column_names(pd.DataFrame(str_buffer))
                 buffered_data_rows = buffer
 
             n_duplicates_sample = int(

@@ -99,6 +99,11 @@ export function Tab2ImportMapping({
 
   async function handleFilesChange(files: File[]) {
     if (!files.length) return
+    // Enregistré AVANT le contrôle de taille -- sinon un rejet affiche
+    // encore l'ancienne sélection (noms/tailles d'un import précédent)
+    // à côté du message d'erreur calculé pour la NOUVELLE sélection
+    // refusée, ce qui ne correspond à rien de réel (revue Copilot, PR #28).
+    setPendingFiles(files)
     const totalBytes = files.reduce((sum, f) => sum + f.size, 0)
     if (totalBytes > MAX_UPLOAD_BYTES) {
       setUploadError(
@@ -108,7 +113,6 @@ export function Tab2ImportMapping({
       )
       return
     }
-    setPendingFiles(files)
     setUploading(true)
     setUploadElapsedSec(0)
     setUploadError(null)

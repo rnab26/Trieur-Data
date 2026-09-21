@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
+import { ThemeToggle } from '@/components/ThemeToggle'
 import { useAuth } from '@/lib/AuthContext'
 
 export function LoginScreen() {
@@ -40,6 +41,9 @@ export function LoginScreen() {
 
   return (
     <div className="flex min-h-screen items-center justify-center px-4">
+      <div className="fixed right-4 top-4">
+        <ThemeToggle />
+      </div>
       <Card className="w-full max-w-sm">
         <CardHeader>
           <h1 className="text-lg font-semibold">Trieur de Data</h1>

@@ -57,6 +57,16 @@ la suite, en intégrant ces réponses et leurs commentaires :
 13. [ ] **Reporté par l'utilisateur** ("plus tard") : colonnes
     calculées simples (n8).
 
+**2026-09-21** : les points 7, 8, 11, 12 et 13 ci-dessus (les seuls encore
+non livrés de cette liste) sont maintenant aussi des chantiers dans le
+Cockpit (`trieur_data.chantiers`, org "global"), avec le contexte utile
+en premier message de chaque fil. Ce fichier reste le journal détaillé
+(quoi, pourquoi, ce qui a été vérifié) ; le Cockpit reste le tableau de
+bord court et à jour en temps réel (visible dans l'appli ET par toute
+session Claude Code sur ce repo, qu'une entrée vienne d'une saisie
+manuelle ou d'une session en cours -- même table Supabase des deux
+côtés, pas de synchronisation à faire).
+
 ---
 
 ## Recherche avancée + modification multiple + diff au réimport (2026-09-17)

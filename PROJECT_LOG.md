@@ -3347,6 +3347,61 @@ rouge, documenté sur chaque PR. Pas de nouvelle cause racine identifiée
 au-delà de ce qui est déjà dans l'entrée PR #42 ci-dessus ; à surveiller
 si ça redevient fréquent.
 
+### PR #44/#45 : import multi-fichiers + résumé des étapes de traitement (2026-09-21)
+
+Raphaël a signalé n'avoir aucun retour visuel à l'import (drag-drop ou
+clic) et a demandé le support multi-fichiers pour l'avenir, puis un
+"petit résumé des étapes" après import (pas une fonctionnalité
+permanente, juste pour comprendre ce qui a été fait sur le fichier).
+
+- PR #44 : import multi-fichiers (`<input multiple>`, sélection
+  cumulable, retrait fichier par fichier, fusion `pd.concat` côté
+  serveur).
+- PR #45 : résumé en phrases lisibles après génération (fichiers/lignes
+  lues, exclusions détaillées par raison, mandats First/RCUR générés,
+  fusions MYJURIS+IMMO appliquées) -- encodé en base64 dans un en-tête
+  HTTP dédié (`X-Steps-B64`, ASCII only) et ajouté à `expose_headers`
+  CORS (même classe de bug déjà rencontrée une fois pour
+  `X-Ooff-Count`, évitée ici d'emblée). Mergée malgré le flake connu
+  ci-dessous (436 passed / 1 failed, non lié au diff).
+
+### PR #46 : bug réel -- exclusion silencieuse d'un client avec produit actif (2026-09-21)
+
+En re-testant un fichier déjà validé, Raphaël a obtenu "86 First / 0
+RCUR / 1 exclue" au lieu du "87/0" attendu -- fichier confirmé
+identique (hash SHA256) à l'original. Root-cause trouvée en comparant
+mon chemin de validation (lecture openpyxl brute) au vrai chemin
+serveur (`pandas.read_excel` + `.where(pd.notnull(df), None)`) :
+**`DataFrame.where(pd.notnull(df), None)` ne remplace pas toujours une
+cellule vide par `None` sur une colonne de nombres** -- une colonne
+`float64` ne peut pas contenir `None`, pandas la recase discrètement en
+`NaN`. `to_amount()` laissait ce `NaN` contaminer les sommes
+(`49.9 + nan = nan`), et le filtre "montant > 0" excluait à tort le
+client MGS-18397 MACEDO ANNIE (Optilife=49,90€ actif) à cause d'une
+AUTRE colonne produit (Optivie) vide.
+
+**Corrigé** : garde NaN explicite (`raw != raw`) dans `to_amount()`,
+sans dépendance externe ajoutée au module (toujours pur, sans
+pandas/réseau/DB). Nouveau test dédié
+(`test_to_amount_nan_is_zero_not_contagious`). Revalidé sur le fichier
+exact de Raphaël (87/0, corrigé) et sur le fichier de référence 291
+lignes (415/4, inchangé -- pas de régression). `pytest` : 436 passed.
+Mergée malgré le même flake connu (2 échecs identiques sur le re-run,
+non lié à ce diff qui ne touche que `trieur/prelevement.py`).
+
+**Ce bug renforce la nécessité** de la validation en lot réel par
+Raphaël avant tout envoi bancaire (déjà demandée ci-dessus) : une
+exclusion silencieuse de ce type serait passée inaperçue sans son
+signalement.
+
+**CI -- flake persistant** : `test_master_columns_localstorage_fallback`
+a de nouveau échoué (2 fois d'affilée sur PR #46, une fois sur PR #45),
+toujours la même assertion sur la valeur d'un textarea. GitHub envoie
+un mail "run failed" à chaque échec -- expliqué à Raphaël, ce n'est pas
+lié à ses données. Pas encore de cause racine identifiée au-delà de ce
+qui est déjà noté plus haut ; commence à devenir fréquent, pourrait
+justifier un chantier dédié si ça continue.
+
 **Reste à faire côté Raphaël** :
 - Fournir le numéro ICS quand il l'aura (réglable directement dans
   l'onglet Prélèvement, aucune session nécessaire).

@@ -640,7 +640,30 @@ async def import_records(
     permet au frontend d'afficher un aperçu et de choisir la colonne
     IBAN avant de confirmer, comme le fait `st.dataframe(df.head(10))`
     côté Streamlit (views/tab_database.py:_render_import), sans dupliquer
-    la lecture CSV/Excel (pandas) côté navigateur."""
+    la lecture CSV/Excel (pandas) côté navigateur.
+
+    Même plafond que l'import du Trieur de Data (PIPELINE_MAX_UPLOAD_BYTES,
+    voir POST .../pipeline/sessions) -- ce parcours-ci (import direct côté
+    Base de données) lit aussi tout le fichier en DataFrame pandas d'un
+    coup, exactement le même risque d'OOM mesuré en conditions réelles
+    sur un gros .xlsx (revue Copilot, PR #28)."""
+    if file.size is None:
+        # Défense en profondeur (même raisonnement que POST .../pipeline/sessions,
+        # revue Copilot) : un total silencieusement compté à 0 octet
+        # contournerait ce plafond -- on refuse plutôt que de deviner.
+        raise HTTPException(
+            status_code=413,
+            detail="Taille de fichier indéterminable -- réessayez l'import.",
+        )
+    if file.size > PIPELINE_MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Fichier trop volumineux ({file.size / 1_048_576:.1f} Mo, max "
+                f"{PIPELINE_MAX_UPLOAD_BYTES / 1_048_576:.0f} Mo) -- utilisez le format CSV "
+                "(bien plus léger que .xlsx pour le même volume) ou importez en plusieurs fois."
+            ),
+        )
     content = await file.read()
     filename = file.filename or "import"
     try:
@@ -732,6 +755,17 @@ PIPELINE_APPEND_BATCH = 500
 # automatique (l'utilisateur mappe à la main) -- dégradation, jamais une
 # perte de données.
 PIPELINE_SUGGESTION_ROW_CAP = 3000
+# Plafond en octets sur la somme des fichiers d'UN import -- mesuré en
+# conditions réelles (Render, plan 512 Mo) : un .xlsx de 8,5 Mo a fait
+# grimper le process à ~490 Mo de RAM (parsing pandas/openpyxl, qui
+# charge tout en mémoire, PAS un lecteur en flux), déclenchant un
+# OOM-kill du serveur en cours de requête -- l'utilisateur ne voit
+# qu'une connexion coupée ("Erreur inconnue" côté navigateur), rien côté
+# serveur (le process meurt avant de répondre). Un CSV du même volume de
+# données pèse nettement moins en mémoire ; ce plafond vaut donc pour
+# TOUS les formats par simplicité et sécurité, avec un message qui
+# oriente vers le CSV pour les gros volumes.
+PIPELINE_MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 
 
 def _parse_pipeline_file(filename: str, content: bytes) -> dict[str, pd.DataFrame]:
@@ -874,6 +908,37 @@ async def create_pipeline_session_endpoint(
     renvoie un aperçu + les colonnes détectées pour l'étape de mapping
     suivante. N'écrit jamais dans trieur_data.records (donnée permanente)
     -- ça reste la validation finale du pipeline, pas encore portée ici."""
+    # Vérifié AVANT toute lecture (f.size, connu dès la fin du parsing
+    # multipart par Starlette -- jamais un await f.read()) : sinon le
+    # plafond ne protège rien, chaque fichier est déjà entièrement
+    # matérialisé en mémoire par le moment où la somme est comparée --
+    # exactement la défaillance qu'il doit éviter (revue Copilot, PR #28).
+    if any(f.size is None for f in files):
+        # Starlette initialise toujours UploadFile.size dès la lecture du
+        # multipart (vérifié sur MultiPartParser) -- si jamais absent, on
+        # refuse plutôt que de compter silencieusement 0 octet : un total
+        # sous-estimé contournerait ce plafond ET laisserait passer
+        # `await f.read()` juste après sur un fichier arbitrairement
+        # volumineux (revue Copilot, PR #28).
+        raise HTTPException(
+            status_code=413,
+            detail="Taille de fichier indéterminable -- réessayez l'import.",
+        )
+    total_bytes = sum(f.size for f in files)
+    if total_bytes > PIPELINE_MAX_UPLOAD_BYTES:
+        # Rejeté AVANT le parsing pandas/openpyxl (voir
+        # PIPELINE_MAX_UPLOAD_BYTES) : un fichier trop volumineux fait
+        # planter le process (OOM) plutôt que de répondre proprement --
+        # un 413 explicite vaut mieux qu'une connexion coupée sans
+        # explication.
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Fichier(s) trop volumineux ({total_bytes / 1_048_576:.1f} Mo, max "
+                f"{PIPELINE_MAX_UPLOAD_BYTES / 1_048_576:.0f} Mo par import) -- utilisez le format "
+                "CSV (bien plus léger que .xlsx pour le même volume) ou importez en plusieurs fois."
+            ),
+        )
     parsed = [(f.filename or "import", await f.read()) for f in files]
     sheets = _parse_and_merge_pipeline_files(parsed)
     rows, columns = _merge_pipeline_sheets(sheets)

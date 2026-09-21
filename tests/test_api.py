@@ -635,6 +635,80 @@ def test_master_columns_write_allowed_for_admin(client_factory):
 _CSV_CONTENT = b"NOM,VILLE\nDupont,Paris\nMartin,Lyon\n"
 
 
+def test_import_rejects_oversized_upload_before_reading(client_factory, monkeypatch):
+    """Trouvaille Copilot, PR #28 : le plafond de taille (voir POST
+    .../pipeline/sessions) ne couvrait QUE l'import du Trieur de Data --
+    ce parcours-ci (Base de données > Importer) lisait encore tout le
+    fichier (await file.read()) puis pd.read_excel sans limite, même
+    risque d'OOM sur un gros .xlsx. Corrigé avec le même plafond
+    (PIPELINE_MAX_UPLOAD_BYTES). Vérifie aussi que le rejet a lieu AVANT
+    la lecture -- pas juste le code retour."""
+    from api import main as api_main
+
+    from starlette.datastructures import UploadFile
+
+    monkeypatch.setattr(api_main, "PIPELINE_MAX_UPLOAD_BYTES", 10)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("pd.read_csv ne doit jamais être atteint après le rejet 413")
+
+    async def _boom_read(*args, **kwargs):
+        raise AssertionError(
+            "UploadFile.read ne doit jamais être atteint après le rejet 413 -- "
+            "sinon le fichier est chargé en mémoire malgré le plafond."
+        )
+
+    monkeypatch.setattr(api_main.pd, "read_csv", _boom)
+    monkeypatch.setattr(UploadFile, "read", _boom_read)
+
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/import",
+        files={"file": ("clients.csv", _CSV_CONTENT, "text/csv")},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 413
+    assert "volumineux" in res.json()["detail"]
+    assert fake.postgrest.tables["records"] == []
+
+
+def test_import_rejects_upload_with_unknown_size():
+    """Même défense en profondeur que POST .../pipeline/sessions (voir
+    test_pipeline_session_create_rejects_upload_with_unknown_size) : un
+    .size indisponible est refusé plutôt que silencieusement compté à 0
+    octet. Appel direct de l'endpoint (impossible à simuler via
+    TestClient, qui calcule toujours une vraie taille pendant le parsing
+    multipart)."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from api import main as api_main
+
+    fake = _make_client()
+    ctx = api_main.get_current_ctx(authorization=f"Bearer {TOKEN}", client=fake)
+    ctx = api_main.require_org_access("org-1", ctx)
+
+    fake_upload = SimpleNamespace(size=None, filename="clients.csv")
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            api_main.import_records(
+                org_id="org-1",
+                file=fake_upload,
+                iban_col=None,
+                add_unknown_columns=False,
+                dry_run=False,
+                ctx=ctx,
+            )
+        )
+
+    assert exc_info.value.status_code == 413
+    assert "indéterminable" in exc_info.value.detail
+    assert fake.postgrest.tables["records"] == []
+
+
 def test_import_dry_run_previews_without_writing(client_factory):
     fake = _make_client()
     tc = client_factory(fake)
@@ -1215,6 +1289,67 @@ def _upload_csv(tc, org_id, content: bytes, filename="clients.csv"):
         files={"files": (filename, content, "text/csv")},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
+
+
+def test_pipeline_session_create_rejects_oversized_upload_before_parsing(client_factory, monkeypatch):
+    """Un .xlsx de 8,5 Mo mesuré en conditions réelles (Render, plan
+    512 Mo) a fait grimper le process à ~490 Mo de RAM au parsing
+    pandas/openpyxl et déclenché un OOM-kill en cours de requête --
+    l'utilisateur ne voyait qu'une connexion coupée, rien côté serveur.
+    Rejeté maintenant AVANT tout parsing (413), plafond réduit ici pour
+    ne pas générer un vrai gros fichier de test.
+
+    Trouvaille Copilot, PR #28 : un test qui ne vérifie QUE le code 413
+    passerait encore si le contrôle de taille arrivait APRÈS un
+    f.read()/parsing -- ne verrouille pas la propriété qui protège
+    l'OOM. On fait donc explicitement planter le parsing s'il est
+    jamais atteint, pour prouver que le rejet a bien lieu avant."""
+    from api import main as api_main
+
+    monkeypatch.setattr(api_main, "PIPELINE_MAX_UPLOAD_BYTES", 10)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("le parsing ne doit jamais être atteint après le rejet 413")
+
+    monkeypatch.setattr(api_main, "_parse_and_merge_pipeline_files", _boom)
+
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = _upload_csv(tc, "org-1", b"NOM,EMAIL\nDupont,d@x.com\n")
+
+    assert res.status_code == 413
+    assert "CSV" in res.json()["detail"]
+    assert not fake.postgrest.tables["pipeline_sessions"]
+
+
+def test_pipeline_session_create_rejects_upload_with_unknown_size():
+    """Même défense en profondeur que sur POST /orgs/{org_id}/import (voir
+    test_import_rejects_upload_with_unknown_size) : un .size indisponible
+    est refusé plutôt que silencieusement compté à 0 octet -- sinon
+    `await f.read()` juste après matérialise le fichier en mémoire malgré
+    le plafond (revue Copilot, PR #28). Appel direct de l'endpoint
+    (impossible à simuler via TestClient, qui calcule toujours une vraie
+    taille pendant le parsing multipart)."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from api import main as api_main
+
+    fake = _make_client()
+    ctx = api_main.get_current_ctx(authorization=f"Bearer {TOKEN}", client=fake)
+    ctx = api_main.require_org_access("org-1", ctx)
+
+    fake_upload = SimpleNamespace(size=None, filename="clients.csv")
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            api_main.create_pipeline_session_endpoint(org_id="org-1", files=[fake_upload], ctx=ctx)
+        )
+
+    assert exc_info.value.status_code == 413
+    assert "indéterminable" in exc_info.value.detail
+    assert not fake.postgrest.tables["pipeline_sessions"]
 
 
 def test_pipeline_session_create_stages_rows_and_detects_columns(client_factory):

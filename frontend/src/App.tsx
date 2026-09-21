@@ -17,6 +17,9 @@ const PipelineScreen = lazy(() =>
 const CockpitScreen = lazy(() =>
   import('@/screens/CockpitScreen').then((m) => ({ default: m.CockpitScreen })),
 )
+const PrelevementScreen = lazy(() =>
+  import('@/screens/PrelevementScreen').then((m) => ({ default: m.PrelevementScreen })),
+)
 
 function EcranFallback() {
   return (
@@ -26,7 +29,7 @@ function EcranFallback() {
   )
 }
 
-type Ecran = 'database' | 'pipeline' | 'cockpit'
+type Ecran = 'database' | 'pipeline' | 'cockpit' | 'prelevement'
 
 function AppContent() {
   const { session, loading } = useAuth()
@@ -55,7 +58,12 @@ function AppContent() {
   const onglets: [Ecran, string][] = [
     ['database', 'Base de données'],
     ['pipeline', 'Trieur de Data'],
-    ...(isAdmin ? ([['cockpit', 'Cockpit']] as [Ecran, string][]) : []),
+    ...(isAdmin
+      ? ([
+          ['prelevement', 'Prélèvement'],
+          ['cockpit', 'Cockpit'],
+        ] as [Ecran, string][])
+      : []),
   ]
 
   return (
@@ -83,8 +91,11 @@ function AppContent() {
       </nav>
       <Suspense fallback={<EcranFallback />}>
         {ecran === 'cockpit' && isAdmin && <CockpitScreen />}
+        {ecran === 'prelevement' && isAdmin && <PrelevementScreen />}
         {ecran === 'pipeline' && <PipelineScreen />}
-        {(ecran === 'database' || (ecran === 'cockpit' && !isAdmin)) && <DatabaseScreen />}
+        {(ecran === 'database' || ((ecran === 'cockpit' || ecran === 'prelevement') && !isAdmin)) && (
+          <DatabaseScreen />
+        )}
       </Suspense>
     </div>
   )

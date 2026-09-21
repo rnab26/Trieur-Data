@@ -1028,3 +1028,50 @@ def delete_pipeline_session(client: Client, session_id: str) -> None:
     (`cleanup_expired_pipeline_sessions`, appelé séparément, jamais
     depuis cette fonction)."""
     _td(client, "pipeline_sessions").delete().eq("id", session_id).execute()
+
+
+# ---------------------------------------------------------------
+# Règles de génération des mandats de prélèvement (environnement
+# Prélèvement) -- ICS, nature CORE/B2B, délai minimum avant le 1er
+# prélèvement. Réglages ajustables sans toucher au code (Raphaël,
+# 2026-09-21), une ligne par organisation comme master_columns.
+# ---------------------------------------------------------------
+
+def get_prelevement_rules(client: Client, org_id: str) -> dict:
+    res = (
+        _td(client, "prelevement_rules")
+        .select("*")
+        .eq("org_id", org_id)
+        .limit(1)
+        .execute()
+    )
+    if res.data:
+        return res.data[0]
+    # Pas encore de réglage enregistré pour cet environnement -- les
+    # valeurs par défaut du module trieur.prelevement (ICS vide, CORE,
+    # 3 jours), jamais une ligne vide qui forcerait l'appelant à gérer
+    # un cas particulier.
+    return {"org_id": org_id, "ics": None, "nature": "CORE", "delay_days": 3}
+
+
+def save_prelevement_rules(
+    client: Client, org_id: str, ics: str | None, nature: str, delay_days: int, user_id: str,
+) -> dict:
+    from datetime import datetime, timezone
+
+    res = (
+        _td(client, "prelevement_rules")
+        .upsert(
+            {
+                "org_id": org_id,
+                "ics": ics,
+                "nature": nature,
+                "delay_days": delay_days,
+                "updated_by": user_id,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="org_id",
+        )
+        .execute()
+    )
+    return res.data[0]

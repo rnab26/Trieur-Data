@@ -298,13 +298,20 @@ if "remembered_mappings" not in st.session_state:
 _mc_restored = sync_master_columns(st.session_state.master_columns)
 if _mc_restored:
     st.session_state.master_columns = _mc_restored
-    # Le widget text_area de l'onglet 1 (key="master_cols_input") garde sa
-    # propre valeur en session des qu'il a ete rendu une premiere fois : sans
-    # ceci, la restauration mettrait a jour master_columns mais le texte
-    # affiche resterait celui du tout premier rendu (valeurs par defaut).
+    # Le widget text_area de l'onglet 1 (key="master_cols_input") ne lit
+    # `value=` qu'a sa toute premiere instanciation -- ensuite il garde sa
+    # propre valeur en session_state. Cette section s'execute AVANT que
+    # l'onglet ne rende ce widget (meme run de script), donc reecrire la cle
+    # ici suffit a l'afficher tout de suite : pas besoin d'un st.rerun()
+    # supplementaire. Un ancien st.rerun() ici entrait en course avec le
+    # rerun deja declenche automatiquement par le composant (changement de
+    # sa valeur) et perdait la restauration environ une fois sur deux --
+    # cause du flake e2e sur test_master_columns_localstorage_fallback
+    # (PR #35/#38/#40/#42/#46). Confirme par 10 executions e2e reelles
+    # d'affilee, systematiquement vertes une fois ce rerun retire (contre
+    # ~50% d'echec avant, avec le meme navigateur que la CI).
     st.session_state["master_cols_input"] = "\n".join(_mc_restored)
     save_master_columns(_mc_restored)
-    st.rerun()
 
 
 col_logo, col_title = st.columns([1, 8])

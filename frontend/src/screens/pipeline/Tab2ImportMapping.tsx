@@ -91,9 +91,28 @@ export function Tab2ImportMapping({
     [session, excludedSheets],
   )
 
+  // Même plafond que côté serveur (PIPELINE_MAX_UPLOAD_BYTES,
+  // api/main.py) -- vérifié ICI avant même l'envoi, pour ne pas faire
+  // attendre l'utilisateur sur un upload voué à échouer (un .xlsx trop
+  // gros fait planter le serveur en mémoire, voir le message côté API).
+  const MAX_UPLOAD_BYTES = 8 * 1024 * 1024
+
   async function handleFilesChange(files: File[]) {
     if (!files.length) return
+    // Enregistré AVANT le contrôle de taille -- sinon un rejet affiche
+    // encore l'ancienne sélection (noms/tailles d'un import précédent)
+    // à côté du message d'erreur calculé pour la NOUVELLE sélection
+    // refusée, ce qui ne correspond à rien de réel (revue Copilot, PR #28).
     setPendingFiles(files)
+    const totalBytes = files.reduce((sum, f) => sum + f.size, 0)
+    if (totalBytes > MAX_UPLOAD_BYTES) {
+      setUploadError(
+        `Fichier(s) trop volumineux (${(totalBytes / 1_048_576).toFixed(1)} Mo, max ` +
+          `${(MAX_UPLOAD_BYTES / 1_048_576).toFixed(0)} Mo par import) -- utilise le format CSV ` +
+          '(bien plus léger que .xlsx pour le même volume) ou importe en plusieurs fois.',
+      )
+      return
+    }
     setUploading(true)
     setUploadElapsedSec(0)
     setUploadError(null)
@@ -321,10 +340,16 @@ export function Tab2ImportMapping({
                 </div>
               ))}
               {uploading && (
-                <p className="flex items-center gap-2 text-xs text-[var(--muted)]">
-                  Import en cours… ({uploadElapsedSec}s)
-                  {uploadElapsedSec >= 8 && ' -- un gros fichier peut prendre encore quelques instants.'}
-                </p>
+                <>
+                  <p className="flex items-center gap-2 text-xs text-[var(--muted)]">
+                    Import en cours… ({uploadElapsedSec}s)
+                    {uploadElapsedSec >= 8 && ' -- un gros fichier peut prendre encore quelques instants.'}
+                  </p>
+                  <p className="text-xs font-medium text-[var(--danger)]">
+                    ⚠️ Ne quitte pas cette page (ni une autre appli/onglet) tant que l'import est en
+                    cours -- ça coupe l'envoi et il faudra recommencer.
+                  </p>
+                </>
               )}
             </div>
           )}

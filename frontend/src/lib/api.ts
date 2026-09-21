@@ -41,13 +41,86 @@ function handleUnauthorized() {
   void supabase.auth.signOut()
 }
 
-async function throwForErrorResponse(res: Response): Promise<never> {
-  let detail = res.statusText
+// Message générique -- ce wrapper couvre TOUTES les requêtes de ce
+// client (dashboard, listes, export, import...), pas seulement l'import
+// de fichiers : un avertissement "ne quitte pas la page pendant
+// l'import" serait faux/trompeur sur un simple GET. L'avertissement
+// spécifique à l'import reste affiché dans Tab2ImportMapping.tsx
+// pendant que l'upload est actif -- pas ici (revue Copilot, PR #28).
+const NETWORK_ERROR_MESSAGE =
+  "Connexion interrompue -- vérifie ta connexion et ne quitte pas cette page (ni un autre "
+  + "onglet/appli) tant qu'une action est en cours, puis réessaie."
+
+// `fetch` lui-même peut échouer sans jamais renvoyer de Response --
+// connexion coupée en cours d'envoi (page mise en arrière-plan sur
+// mobile : le navigateur suspend/tue la requête), page/appli quittée,
+// ou coupure réseau. Sans ce wrapper, l'erreur brute du navigateur
+// (souvent "Failed to fetch"/"Load failed", jamais une ApiError) tombe
+// dans le `catch` générique de chaque écran et s'affiche comme
+// "Erreur inconnue" -- aucune info exploitable pour l'utilisateur.
+async function safeFetch(url: string, init: RequestInit): Promise<Response> {
   try {
-    const body = await res.json()
+    return await fetch(url, init)
+  } catch {
+    throw new ApiError(0, NETWORK_ERROR_MESSAGE)
+  }
+}
+
+// Une connexion peut aussi être coupée APRÈS avoir reçu les en-têtes de
+// la Response, pendant la lecture du corps (res.json()/res.blob()) --
+// safeFetch ne voit rien de ça (la promesse de fetch() s'est déjà
+// résolue). Sans ce wrapper, la même coupure produit encore une erreur
+// brute hors ApiError sur cette 2e moitié de la requête (revue Copilot,
+// PR #28).
+async function safeReadJson<T>(res: Response): Promise<T> {
+  // res.json() confond deux choses : la LECTURE du corps (peut échouer sur
+  // coupure réseau) et son PARSING (peut échouer sur un JSON invalide --
+  // proxy qui renvoie du HTML, réponse serveur malformée...). Les séparer
+  // pour ne pas accuser à tort la connexion d'une réponse serveur
+  // défaillante (revue Copilot, PR #28).
+  let text: string
+  try {
+    text = await res.text()
+  } catch {
+    throw new ApiError(0, NETWORK_ERROR_MESSAGE)
+  }
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    throw new ApiError(res.status, "Réponse du serveur invalide.")
+  }
+}
+
+async function safeReadBlob(res: Response): Promise<Blob> {
+  try {
+    return await res.blob()
+  } catch {
+    throw new ApiError(0, NETWORK_ERROR_MESSAGE)
+  }
+}
+
+async function throwForErrorResponse(res: Response): Promise<never> {
+  // Même distinction que safeReadJson : une coupure réseau PENDANT la
+  // lecture du corps d'une réponse d'erreur (en-têtes 4xx/5xx déjà reçus,
+  // puis connexion perdue) doit remonter NETWORK_ERROR_MESSAGE, pas un
+  // simple repli silencieux sur statusText -- sinon l'utilisateur ne voit
+  // jamais le message réseau explicite pour cette moitié des coupures
+  // possibles (revue Copilot, PR #28).
+  let detail = res.statusText
+  let text: string | null = null
+  try {
+    text = await res.text()
+  } catch {
+    if (res.status === 401) {
+      handleUnauthorized()
+    }
+    throw new ApiError(0, NETWORK_ERROR_MESSAGE)
+  }
+  try {
+    const body = JSON.parse(text)
     detail = body.detail ?? detail
   } catch {
-    // pas de corps JSON -- on garde le statusText
+    // pas de corps JSON (ou corps vide) -- on garde le statusText
   }
   if (res.status === 401) {
     handleUnauthorized()
@@ -57,7 +130,7 @@ async function throwForErrorResponse(res: Response): Promise<never> {
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = await authHeader()
-  const res = await fetch(`${API_URL}${path}`, {
+  const res = await safeFetch(`${API_URL}${path}`, {
     ...init,
     headers: {
       ...headers,
@@ -69,7 +142,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     return throwForErrorResponse(res)
   }
   if (res.status === 204) return undefined as T
-  return res.json() as Promise<T>
+  return safeReadJson<T>(res)
 }
 
 export type Organization = {
@@ -221,7 +294,7 @@ async function importRequest<T>(
   if (opts.ibanCol) form.set('iban_col', opts.ibanCol)
   form.set('add_unknown_columns', String(opts.addUnknownColumns ?? false))
   form.set('dry_run', String(opts.dryRun ?? false))
-  const res = await fetch(`${API_URL}/orgs/${orgId}/import`, {
+  const res = await safeFetch(`${API_URL}/orgs/${orgId}/import`, {
     method: 'POST',
     headers,
     body: form,
@@ -229,7 +302,7 @@ async function importRequest<T>(
   if (!res.ok) {
     return throwForErrorResponse(res)
   }
-  return res.json() as Promise<T>
+  return safeReadJson<T>(res)
 }
 
 export type SavedView = {
@@ -339,11 +412,11 @@ export async function exportRecords(
   if (opts.visibleCols) params.set('visible_cols', opts.visibleCols.join(','))
   if (opts.knownCols) params.set('known_cols', opts.knownCols.join(','))
 
-  const res = await fetch(`${API_URL}/orgs/${orgId}/records/export?${params.toString()}`, { headers })
+  const res = await safeFetch(`${API_URL}/orgs/${orgId}/records/export?${params.toString()}`, { headers })
   if (!res.ok) {
     return throwForErrorResponse(res)
   }
-  const blob = await res.blob()
+  const blob = await safeReadBlob(res)
   const disposition = res.headers.get('content-disposition') ?? ''
   const match = /filename="?([^"]+)"?/.exec(disposition)
   const filename = match ? match[1] : `export.${opts.format}`
@@ -539,7 +612,7 @@ async function uploadPipelineFiles<T>(orgId: string, files: File[]): Promise<T> 
   const headers = await authHeader()
   const form = new FormData()
   for (const file of files) form.append('files', file)
-  const res = await fetch(`${API_URL}/orgs/${orgId}/pipeline/sessions`, {
+  const res = await safeFetch(`${API_URL}/orgs/${orgId}/pipeline/sessions`, {
     method: 'POST',
     headers,
     body: form,
@@ -547,7 +620,7 @@ async function uploadPipelineFiles<T>(orgId: string, files: File[]): Promise<T> 
   if (!res.ok) {
     return throwForErrorResponse(res)
   }
-  return res.json() as Promise<T>
+  return safeReadJson<T>(res)
 }
 
 // Plusieurs fichiers fusionnés en UNE session -- restaure le
@@ -716,14 +789,14 @@ export async function exportPipelineSessionRows(
   // = toutes les colonnes, ordre d'apparition (comportement précédent).
   if (opts.columns) params.set('columns', opts.columns.join(','))
 
-  const res = await fetch(
+  const res = await safeFetch(
     `${API_URL}/orgs/${orgId}/pipeline/sessions/${sessionId}/export?${params.toString()}`,
     { headers },
   )
   if (!res.ok) {
     return throwForErrorResponse(res)
   }
-  const blob = await res.blob()
+  const blob = await safeReadBlob(res)
   const disposition = res.headers.get('content-disposition') ?? ''
   const match = /filename="?([^"]+)"?/.exec(disposition)
   const serverFilename = match ? match[1] : `export_pipeline.${opts.format}`

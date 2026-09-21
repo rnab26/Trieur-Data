@@ -67,6 +67,23 @@ session Claude Code sur ce repo, qu'une entrée vienne d'une saisie
 manuelle ou d'une session en cours -- même table Supabase des deux
 côtés, pas de synchronisation à faire).
 
+**2026-09-21, suite** : Raphaël a demandé un traitement automatique des
+chantiers Cockpit, sans avoir à relancer une session pour chacun.
+Routine créée : **"Cockpit Trieur de Data — traitement horaire des
+chantiers"** (`trig_01LGJrQmy1KPBmXj8qDAXae9`), toutes les heures,
+branchée sur une session dédiée (`session_01Q9jyjGCsc1DfK4XPNZSTgQ`,
+accès Supabase + GitHub + dépôt vérifiés). À chaque passe : prend
+jusqu'à 2 chantiers `a_faire` (priorité haute d'abord), les traite de
+bout en bout (branche, code, tests, PR, merge sur main) si l'énoncé est
+clair ; si un vrai choix ambigu se pose, publie une fiche Artifact
+(mêmes boutons cliquables + commentaire que la fiche fonctionnalités du
+17/09) plutôt que de bloquer en texte, et repasse le chantier en
+`attente_retour`. Si rien à traiter, la passe s'arrête tout de suite
+(coût minimal). Prompt complet de la Routine consultable via
+`list_triggers` (MCP claude-code-remote) si besoin de le retoucher.
+**Nettoyage à faire si abandonné** : désactiver/supprimer cette Routine
+et archiver la session dédiée si ce mode de fonctionnement est arrêté.
+
 ---
 
 ## Recherche avancée + modification multiple + diff au réimport (2026-09-17)

@@ -1657,6 +1657,27 @@ def test_prelevement_generate_sheets_are_mandat_first_rcur_exclus(client_factory
     assert "Date d'effet" in mandat_header
 
 
+def test_prelevement_generate_exposes_count_headers_cross_origin(client_factory):
+    """Sans Access-Control-Expose-Headers, le navigateur reçoit bien
+    X-Ooff-Count etc. mais les cache au JS -- res.headers.get(...) renvoie
+    null côté frontend même avec un vrai fichier généré (bug réel vécu par
+    Raphaël : "0/0/0" affiché alors que le classeur téléchargé contenait 66
+    mandats). TestClient n'applique le middleware CORS que si un en-tête
+    Origin est présent -- il faut donc le simuler explicitement ici."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/prelevement/generate",
+        files={"file": ("export.csv", _PRELEVEMENT_CSV, "text/csv")},
+        headers={"Authorization": f"Bearer {TOKEN}", "Origin": "https://trieur-data-app-test.onrender.com"},
+    )
+    assert res.status_code == 200
+    exposed = res.headers["access-control-expose-headers"]
+    assert "X-Ooff-Count" in exposed
+    assert "X-Rcur-Count" in exposed
+    assert "X-Exclus-Count" in exposed
+
+
 def test_prelevement_generate_forbidden_for_non_admin(client_factory):
     fake = _make_client()
     tc = client_factory(fake)

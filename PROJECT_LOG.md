@@ -36,7 +36,8 @@ la suite, en intégrant ces réponses et leurs commentaires :
    l'ancien point 6 et de n6 "Rappel visible des alertes en attente" —
    même famille, "vue d'ensemble en
    arrivant").
-7. [ ] Étiquettes libres sur un client (n1).
+7. [x] Étiquettes libres sur un client (n1) — livré, voir section
+   ci-dessous.
 8. [ ] Annuler un import entier en un clic (n3).
 9. [x] Recherche avancée façon Google Sheets + modification multiple —
    livré, voir section ci-dessous.
@@ -3149,3 +3150,49 @@ CI l'installe et passe).
 
 **Pas encore vérifié** : rendu réel dans l'app avec un vrai compte
 partenaire en lecture seule (pas de tel compte existant à ce jour).
+
+---
+
+## Étiquettes libres sur un client (2026-09-21, PR #38, Routine Cockpit)
+
+**Fait** (chantier point 7 ci-dessus, n1) : statut manuel filtrable par
+client (ex. "VIP", "à recontacter", "litige"), demande explicite de
+Raphaël, sans commentaire additionnel.
+
+- Migration `0021_client_tags.sql` : table `record_tags` à part (pas
+  une clé de plus dans le jsonb `data`, qui mélangerait avec les champs
+  importés) -- une ligne par (client, étiquette), partagée par toute
+  l'organisation (pas liée à un compte comme les vues enregistrées).
+  Écriture réservée à `trieur_data.can_write()` (migration 0020) : un
+  membre lecture seule voit les étiquettes mais ne peut ni en poser ni
+  en retirer.
+- La liste clients affiche une colonne "Étiquettes" (jointes par
+  virgule, triées) construite à côté de "Modifié par" -- elle profite
+  gratuitement des filtres par colonne déjà existants (contient/vide/
+  non vide...), pas de filtre dédié à écrire ni maintenir.
+- Ajout/retrait immédiat depuis la fiche d'un client sélectionné, sans
+  bouton "Enregistrer" séparé (une étiquette est triviale à défaire,
+  contrairement à une modification de champ importé).
+- API (`api/main.py`) : mêmes endpoints (`GET /orgs/{org}/tags`,
+  `POST`/`DELETE .../records/{id}/tags`, gardés par
+  `require_write_access`), même colonne "Étiquettes" en liste/export,
+  pour rester cohérent avec le frontend React en cours de portage.
+
+**Vérifié** : `pytest` : 417/418 en local avant push, puis en CI.
+
+**CI rouge rencontrée, sans lien avec ce chantier** :
+`tests/test_e2e_smoke.py::test_master_columns_localstorage_fallback`
+échoue de façon reproductible (confirmé par un re-run identique) --
+mais échoue À L'IDENTIQUE sur `main` lui-même depuis plusieurs commits
+déjà (avant cette PR, ex. la clôture de la PR #35). Pas touché par ce
+chantier (rien ici ne touche `views/_ls_sync.py` ni la restauration
+localStorage des colonnes maîtres) -- mergé malgré ce rouge
+pré-existant, comme les PR #35/#36 avant elle. **À corriger sans lien
+avec un chantier produit** : ce test e2e semble casser dès qu'un autre
+test de la même session a déjà modifié les colonnes maîtres par défaut
+(les valeurs qu'il trouve, "GENRE/CIVILITE", "VILLE", "Source Data"...,
+ressemblent à un état laissé par un autre test) -- probable manque
+d'isolation entre tests e2e, pas encore diagnostiqué en détail.
+
+**Pas encore vérifié** : rendu réel dans l'app (pas de compte Supabase
+connecté disponible dans cette session).

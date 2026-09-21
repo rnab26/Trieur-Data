@@ -2845,3 +2845,52 @@ vérifiés, aucune erreur).
   dizaines de Mo).
 - [ ] Reproduire le scénario original (quitter la page pendant un
   import) pour confirmer que le message est bien maintenant lisible.
+
+---
+
+## Fix : écran blanc entre les changements de menu (2026-09-21, PR #30)
+
+**Signalé par Raphaël** : bascule entre "Base de données" / "Trieur de
+Data" / "Cockpit" → écran blanc à chaque fois, et l'environnement
+sélectionné revenait au premier de la liste.
+
+**Cause** : `App.tsx` démonte entièrement l'écran actif à chaque
+changement d'onglet du haut (rendu conditionnel, pas de persistance).
+`useOrgs()`/`useIsAdmin()` (`frontend/src/lib/useAccount.ts`)
+repartaient donc de zéro à CHAQUE bascule -- le temps de l'aller-retour
+réseau, la barre d'onglets et le sélecteur d'environnement (conditionnés
+à `orgs`/`orgId` non nuls) disparaissaient complètement du DOM, sans
+indicateur de chargement.
+
+**Fait** :
+- Cache module-level dans `useAccount.ts` (survit aux remontages de
+  composant, pas aux rechargements de page) : sert immédiatement la
+  dernière valeur connue au remontage, une requête revalide en
+  arrière-plan.
+- Environnement sélectionné conservé entre les bascules (repli sur le
+  premier de la liste seulement si l'accès a été retiré entre-temps).
+- Cache vidé explicitement à la déconnexion (`AuthContext.signOut`)
+  pour ne jamais fuiter les environnements/le statut admin d'un compte
+  vers un autre compte connecté ensuite dans le même onglet.
+
+**Corrigé après revue Copilot (2 rounds)** : une requête `listOrgs()`/
+`getMe()` déjà en vol au moment de `clearAccountCache()` (déconnexion
+suivie d'une reconnexion rapide avec un AUTRE compte) pouvait résoudre
+APRÈS le nettoyage et réécrire le cache partagé avec les données de
+l'ancien compte -- son `cancelled` local ne se ferme qu'au démontage du
+composant, pas au nettoyage du cache. Ajout d'un compteur de génération
+(`cacheGeneration`, incrémenté à chaque `clearAccountCache()`) capturé
+par chaque requête au lancement et revérifié juste avant toute écriture
+du cache module-level.
+
+**CI** : `pytest` rouge sur le dernier commit (344 passed, 1 failed) --
+`test_master_columns_localstorage_fallback`, le flake Playwright
+préexistant déjà documenté plus haut dans ce journal (délai fixe de 4s
+parfois trop court), sans rapport avec le diff (`useAccount.ts`
+uniquement). Re-run fait une fois : même échec exact, confirmé non lié.
+Mergé en l'état (commentaire de constat sur la PR).
+
+**Reste à faire côté Raphaël** :
+- [ ] Confirmer en conditions réelles (bascule entre les 3 menus,
+  connecté) -- pas d'identifiants de test Supabase disponibles dans cet
+  environnement pour un clic réel en navigateur.

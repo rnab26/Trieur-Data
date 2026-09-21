@@ -91,11 +91,16 @@ export function Tab2ImportMapping({
     [session, excludedSheets],
   )
 
-  // Même plafond que côté serveur (PIPELINE_MAX_UPLOAD_BYTES,
-  // api/main.py) -- vérifié ICI avant même l'envoi, pour ne pas faire
-  // attendre l'utilisateur sur un upload voué à échouer (un .xlsx trop
-  // gros fait planter le serveur en mémoire, voir le message côté API).
-  const MAX_UPLOAD_BYTES = 8 * 1024 * 1024
+  // Même plafond ABSOLU que côté serveur (PIPELINE_MAX_UPLOAD_BYTES,
+  // api/main.py -- 550 Mo, mode flux au-delà de 8 Mo) -- vérifié ICI
+  // avant même l'envoi, pour ne pas faire attendre l'utilisateur sur un
+  // upload voué à échouer. Laissé à 8 Mo par erreur lors du passage au
+  // mode flux (PR #29) : ce plafond CÔTÉ NAVIGATEUR n'avait jamais été
+  // relevé en même temps que le serveur, donc un .xlsx de plusieurs
+  // dizaines/centaines de Mo -- exactement le cas que le mode flux sert
+  // à supporter -- était encore rejeté ICI, avant même d'atteindre le
+  // serveur (signalé par Raphaël, capture d'écran à 8 Mo).
+  const MAX_UPLOAD_BYTES = 550 * 1024 * 1024
 
   async function handleFilesChange(files: File[]) {
     if (!files.length) return
@@ -108,8 +113,7 @@ export function Tab2ImportMapping({
     if (totalBytes > MAX_UPLOAD_BYTES) {
       setUploadError(
         `Fichier(s) trop volumineux (${(totalBytes / 1_048_576).toFixed(1)} Mo, max ` +
-          `${(MAX_UPLOAD_BYTES / 1_048_576).toFixed(0)} Mo par import) -- utilise le format CSV ` +
-          '(bien plus léger que .xlsx pour le même volume) ou importe en plusieurs fois.',
+          `${(MAX_UPLOAD_BYTES / 1_048_576).toFixed(0)} Mo par import) -- importe en plusieurs fois.`,
       )
       return
     }

@@ -255,6 +255,44 @@ def set_chantier_todo_done(client: Client, todo_id: str, done: bool) -> None:
 
 
 # ---------------------------------------------------------------
+# Questions à choix cliquables sur un chantier (Raphaël, 2026-09-21) --
+# remplace la "fiche" Artifact claude.ai, séparée du Cockpit et donc
+# perdue d'une session à l'autre. Une question posée ici vit dans la
+# même table que le reste du Cockpit : une session Claude et l'appli
+# lisent/écrivent la même ligne, répondre d'un côté répond de l'autre.
+# ---------------------------------------------------------------
+
+def list_chantier_questions(client: Client, chantier_id: str) -> list[dict]:
+    res = (
+        _td(client, "chantier_questions")
+        .select("*")
+        .eq("chantier_id", chantier_id)
+        .order("created_at")
+        .execute()
+    )
+    return res.data or []
+
+
+def add_chantier_question(client: Client, chantier_id: str, question: str, options: list[str]) -> dict:
+    res = (
+        _td(client, "chantier_questions")
+        .insert({"chantier_id": chantier_id, "question": question, "options": options})
+        .execute()
+    )
+    return res.data[0]
+
+
+def answer_chantier_question(client: Client, question_id: str, answer: str, comment: str | None) -> None:
+    from datetime import datetime, timezone
+
+    _td(client, "chantier_questions").update({
+        "answer": answer,
+        "comment": comment,
+        "answered_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", question_id).execute()
+
+
+# ---------------------------------------------------------------
 # Résumé "où j'en suis" et repère "depuis ta dernière visite"
 # (cockpit-kit/FONCTIONNALITES.md, points 1 et 2).
 # ---------------------------------------------------------------

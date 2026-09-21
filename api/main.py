@@ -30,7 +30,9 @@ from fastapi.responses import StreamingResponse
 from trieur.db import (
     LIST_PAGE_SIZE,
     add_chantier_message,
+    add_chantier_question,
     add_chantier_todo,
+    answer_chantier_question,
     add_org_master_columns,
     adjust_pipeline_row_count,
     append_pipeline_rows,
@@ -57,6 +59,7 @@ from trieur.db import (
     is_pipeline_dedupe_lock_owner,
     list_all_records,
     list_chantier_messages,
+    list_chantier_questions,
     list_chantier_todos,
     list_chantiers,
     list_dedup_alerts,
@@ -2156,3 +2159,50 @@ def patch_chantier_todo(
         raise HTTPException(status_code=404, detail="Point à suivre introuvable.")
     set_chantier_todo_done(ctx.client, todo_id, body.done)
     return {"id": todo_id, "done": body.done}
+
+
+@app.get("/orgs/{org_id}/chantiers/{chantier_id}/questions")
+def get_chantier_questions(org_id: str, chantier_id: str, ctx: AuthCtx = Depends(require_cockpit_access)):
+    _get_chantier_or_404(ctx, org_id, chantier_id)
+    return list_chantier_questions(ctx.client, chantier_id)
+
+
+class ChantierQuestionCreate(BaseModel):
+    question: str
+    options: list[str] = []
+
+
+@app.post("/orgs/{org_id}/chantiers/{chantier_id}/questions")
+def post_chantier_question(
+    org_id: str, chantier_id: str, body: ChantierQuestionCreate, ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    if not body.question.strip():
+        raise HTTPException(status_code=400, detail="La question est vide.")
+    _get_chantier_or_404(ctx, org_id, chantier_id)
+    add_chantier_question(ctx.client, chantier_id, body.question.strip(), body.options)
+    return list_chantier_questions(ctx.client, chantier_id)
+
+
+class ChantierQuestionAnswer(BaseModel):
+    answer: str
+    comment: Optional[str] = None
+
+
+@app.patch("/orgs/{org_id}/chantiers/{chantier_id}/questions/{question_id}")
+def patch_chantier_question(
+    org_id: str,
+    chantier_id: str,
+    question_id: str,
+    body: ChantierQuestionAnswer,
+    ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    if not body.answer.strip():
+        raise HTTPException(status_code=400, detail="La réponse est vide.")
+    _get_chantier_or_404(ctx, org_id, chantier_id)
+    questions = list_chantier_questions(ctx.client, chantier_id)
+    if not any(q["id"] == question_id for q in questions):
+        raise HTTPException(status_code=404, detail="Question introuvable.")
+    answer_chantier_question(
+        ctx.client, question_id, body.answer.strip(), body.comment.strip() if body.comment else None,
+    )
+    return list_chantier_questions(ctx.client, chantier_id)

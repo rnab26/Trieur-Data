@@ -32,8 +32,9 @@ export function PrelevementScreen() {
   const [savingRules, setSavingRules] = useState(false)
   const [rulesSaved, setRulesSaved] = useState(false)
 
-  const [fileInputKey, setFileInputKey] = useState(0)
-  const fileRef = useRef<HTMLInputElement | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [dragOver, setDragOver] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [generateError, setGenerateError] = useState<string | null>(null)
   const [result, setResult] = useState<PrelevementGenerateResult | null>(null)
@@ -76,17 +77,36 @@ export function PrelevementScreen() {
     }
   }
 
+  function handleFileSelected(file: File | null) {
+    setSelectedFile(file)
+    setResult(null)
+    setGenerateError(null)
+  }
+
+  function handleDrop(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault()
+    setDragOver(false)
+    if (generating) return
+    const file = e.dataTransfer.files?.[0]
+    if (file) handleFileSelected(file)
+  }
+
+  function formatFileSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} o`
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} Ko`
+    return `${(bytes / (1024 * 1024)).toFixed(1)} Mo`
+  }
+
   async function handleGenerate() {
-    if (!orgId) return
-    const file = fileRef.current?.files?.[0]
-    if (!file) return
+    if (!orgId || !selectedFile) return
     setGenerating(true)
     setGenerateError(null)
     setResult(null)
     try {
-      const counts = await generatePrelevementMandats(orgId, file)
+      const counts = await generatePrelevementMandats(orgId, selectedFile)
       setResult(counts)
-      setFileInputKey((k) => k + 1) // vide le champ fichier, pour ne pas relancer par erreur sur le même fichier
+      setSelectedFile(null) // vide la sélection, pour ne pas relancer par erreur sur le même fichier
+      if (fileInputRef.current) fileInputRef.current.value = ''
     } catch (err) {
       setGenerateError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
     } finally {
@@ -206,23 +226,70 @@ export function PrelevementScreen() {
             <CardContent className="flex flex-col gap-3">
               <h2 className="text-sm font-semibold">Générer les mandats</h2>
               <div>
-                <label
-                  htmlFor="prelevement-file"
-                  className="mb-1 block text-sm text-[var(--muted)]"
-                >
+                <p className="mb-1 text-sm text-[var(--muted)]">
                   1. Choisis le fichier export CRM (.csv ou .xlsx)
-                </label>
+                </p>
                 <input
-                  id="prelevement-file"
-                  key={fileInputKey}
-                  ref={fileRef}
+                  ref={fileInputRef}
                   type="file"
                   accept=".csv,.xlsx,.xls"
-                  className="block w-full rounded-md border border-dashed border-[var(--border)] bg-[var(--card)] p-3 text-sm"
+                  onChange={(e) => handleFileSelected(e.target.files?.[0] ?? null)}
+                  className="hidden"
                 />
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => !generating && fileInputRef.current?.click()}
+                  onKeyDown={(e) => {
+                    if ((e.key === 'Enter' || e.key === ' ') && !generating) fileInputRef.current?.click()
+                  }}
+                  onDragOver={(e) => {
+                    e.preventDefault()
+                    if (!generating) setDragOver(true)
+                  }}
+                  onDragLeave={() => setDragOver(false)}
+                  onDrop={handleDrop}
+                  className={`flex flex-col items-center gap-2 rounded-lg border-2 border-dashed px-6 py-8 text-center transition-colors ${
+                    generating
+                      ? 'cursor-not-allowed border-[var(--border)] opacity-60'
+                      : dragOver
+                        ? 'cursor-pointer border-[var(--primary)] bg-[var(--primary)]/5'
+                        : 'cursor-pointer border-[var(--border)] hover:border-[var(--primary)]'
+                  }`}
+                >
+                  <svg
+                    width="36"
+                    height="36"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    className="text-[var(--muted)]"
+                    aria-hidden="true"
+                  >
+                    <path d="M12 16V4m0 0-4 4m4-4 4 4" strokeLinecap="round" strokeLinejoin="round" />
+                    <path
+                      d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                  {selectedFile ? (
+                    <p className="text-sm font-medium">
+                      {selectedFile.name}{' '}
+                      <span className="text-[var(--muted)]">({formatFileSize(selectedFile.size)})</span>
+                    </p>
+                  ) : (
+                    <p className="text-sm font-medium">
+                      Glisse le fichier ici, ou{' '}
+                      <span className="text-[var(--primary)] underline">clique pour choisir</span>
+                    </p>
+                  )}
+                  <p className="text-xs text-[var(--muted)]">Excel (.xlsx) ou CSV -- un seul fichier</p>
+                </div>
               </div>
               <div>
-                <Button onClick={() => void handleGenerate()} disabled={generating}>
+                <Button onClick={() => void handleGenerate()} disabled={generating || !selectedFile}>
                   {generating ? 'Génération…' : '2. Générer et télécharger'}
                 </Button>
               </div>

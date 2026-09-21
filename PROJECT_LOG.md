@@ -2921,3 +2921,67 @@ Mergé en l'état (commentaire de constat sur la PR).
 - [ ] Confirmer en conditions réelles (bascule entre les 3 menus,
   connecté) -- pas d'identifiants de test Supabase disponibles dans cet
   environnement pour un clic réel en navigateur.
+
+---
+
+## Cockpit : sections auto-classées, liens cliquables, questions intégrées, chiffres cliquables (2026-09-21, PR #31 et #32)
+
+**Signalé par Raphaël**, en usage réel du Cockpit (captures d'écran) :
+- Créer un chantier demandait de choisir une section à la main.
+- Un lien posté dans le fil d'un chantier (fiche de questions) n'était
+  pas cliquable au pouce sur téléphone.
+- Répondre à une question posée par une session Claude nécessitait le
+  lien claude.ai de la fiche -- perdu d'une session à l'autre, invisible
+  sans lui, oblige à "dédoublonner" entre le Cockpit et les sessions.
+- Les 4 chiffres "Où j'en suis" (Bouge/Livré/Pour toi/Dort) ne menaient
+  nulle part -- "je vois écrit 2, je sais pas où ils sont".
+- Le sélecteur d'environnement (Global/Prélèvement/Leads) n'expliquait
+  pas ce qu'il fait.
+- Les titres de chantiers étaient trop longs/techniques.
+
+**Fait (PR #31)** :
+- `POST /orgs/{org}/chantiers` sans thème devine la section depuis le
+  titre (sections existantes en priorité, sinon une famille de
+  mots-clés du domaine, sinon "Général") et la crée si besoin --
+  `trieur/db.py:infer_chantier_theme`. Le formulaire du Cockpit ne
+  demande plus de section.
+- Les URL dans un message de chantier sont rendues en lien cliquable
+  (`ChantierCard.tsx:LinkifiedText`).
+
+**Fait (PR #32)** :
+- Nouvelle table `trieur_data.chantier_questions` (migration 0018) :
+  une question à choix cliquables + commentaire vit **dans le Cockpit
+  lui-même**, plus sur une page claude.ai à part. Une session Claude
+  crée la question par SQL, Raphaël répond dans l'appli (ou
+  inversement) -- même ligne des deux côtés, rien à synchroniser.
+  Endpoints `GET/POST/PATCH /orgs/{org}/chantiers/{id}/questions`.
+  Affichées inconditionnellement dans `ChantierCard` (pas cachées
+  derrière "voir le fil"), comme les points à suivre.
+- Les 4 chiffres "Où j'en suis" sont cliquables : chaque nombre fait
+  défiler jusqu'à la liste filtrée sur ce statut ("Livré aujourd'hui"
+  ouvre les chantiers clos).
+- Phrase d'explication ajoutée sous le sélecteur d'environnement.
+- Titres de chantiers simplifiés (en base, hors code) : le détail
+  technique reste dans le 1er message du fil, jamais dans le titre.
+
+**Routine horaire du Cockpit mise à jour en conséquence** (même
+Routine que la section précédente, `trig_015S4ox6ncE2kZmF81BSW4WK`
+après recréation -- l'ancien id `trig_0119bTU23D8zmvbsJPqqhiNH` n'est
+plus valide) : elle n'utilise plus JAMAIS la fiche Artifact claude.ai
+pour poser une question sur un chantier ambigu -- elle insère dans
+`trieur_data.chantier_questions` à la place, et vérifie cette table
+(plus `ArtifactData`) pour savoir si une réponse est arrivée avant de
+reprendre un chantier `attente_retour`. Consigne aussi ajoutée : titres
+de chantier toujours courts (5-8 mots), jamais de jargon technique dans
+le titre.
+
+**Vérifié** : `npm run build`/`npm run lint` (aucune nouvelle erreur,
+les deux PR), `pytest` 349 passed hors flake e2e déjà documenté (PR
+#32 ajoute 5 tests sur les questions + corrige un vrai bug de cache
+trouvé en les écrivant : `list_sections` n'était pas purgée entre les
+tests, voir PR #31).
+
+**Reste à faire côté Raphaël** :
+- [ ] Vérifier en conditions réelles dans le Cockpit : créer un
+  chantier (section auto), cliquer un chiffre "Où j'en suis", répondre
+  à une question si la Routine en pose une.

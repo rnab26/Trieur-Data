@@ -108,6 +108,7 @@ def _base_row(**overrides) -> dict:
         "Périodicité (Mensuel/trimestre/annuel)             ": "Mensuelle",
         "IBAN  ": VALID_IBAN,
         "BIC": "CMBRFR2B",
+        "Date création": "01/01/2026",
         "Date de premier prélèvement": "24/09/2026",
         "Adresse": "1 rue Test",
         "Ville": "Paris",
@@ -141,6 +142,13 @@ def test_generate_mandats_ooff_when_frais_present():
     assert mandat.bic == "CMBRFR2BXXX"
     assert mandat.motif == "MGS-RUM000001-O"
     assert mandat.date_premiere_echeance == "24/09/2026"
+    # Date de signature = date de création du contrat, PAS la date de
+    # génération du fichier ("today" ci-dessus) -- vérifié contre un
+    # vrai client du fichier de référence (2026-09-21).
+    assert mandat.date_signature_mandat == "01/01/2026"
+    # Vide pour un 1er prélèvement -- ne décrit que la récurrence des
+    # prélèvements SUIVANTS (vérifié contre le fichier de référence).
+    assert mandat.explication_periodicite == ""
 
 
 def test_generate_mandats_rcur_when_no_frais():
@@ -195,6 +203,52 @@ def test_generate_mandats_ignores_casse_auditif_column_entirely():
     row = _base_row(**{"Contrat MYMO casse & perte appareil auditif ": 15.0})
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
     assert result.ooff[0].montant_eur == 139.0  # inchangé
+
+
+def test_generate_mandats_matches_real_reference_client():
+    """Comparaison ligne par ligne avec un vrai client du fichier Excel
+    de référence (RUM/IBAN/montants réels, nom et adresse fictifs ici
+    pour ne pas committer plus de PII que nécessaire au dépôt) --
+    vérifié à la main contre les onglets "3 Sheet1"/"Mandats CAIXA" du
+    classeur "3_creations_des_mandats" (2026-09-21). A trouvé 2 bugs
+    réels avant ce test : date de signature = aujourd'hui au lieu de la
+    date de création du contrat, et explication de périodicité non
+    vidée pour un 1er prélèvement."""
+    row = {
+        "Référence du client ": "MGS-20230",
+        "Nom complet": "CLIENT TEST",
+        "RUM": "1422647",
+        "Statut": "Sepa validé par le client",
+        "Type de prélèvement": "Prélèvement",
+        "Périodicité (Mensuel/trimestre/annuel)             ": "Mensuelle",
+        "IBAN  ": VALID_IBAN,
+        "BIC": "CMBRFR2B",
+        "Date création": "21/08/2026",
+        "Date de premier prélèvement": "10/09/2026",
+        "Adresse": "1 rue Fictive",
+        "Ville": "Ville Test",
+        "Code postal": "00000",
+        "Email": "client-test@example.com",
+        "Téléphone": "+33600000000",
+        "Optilife": 99.0,
+        "Total frais de dossier": 20.0,
+        "Total cotisation et frais de dossier": 119.0,
+    }
+    # "today" volontairement différent de la date de création (mais
+    # encore avant la date prévue + délai, pour ne pas interférer avec
+    # la règle J+3 testée ailleurs) -- le test échoue si
+    # date_signature_mandat repart de "today" au lieu de "Date création"
+    # (le bug trouvé en vérifiant contre le fichier réel).
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 8, 25))
+    assert len(result.ooff) == 1
+    mandat = result.ooff[0]
+    assert mandat.type_sequence == "FRST"
+    assert mandat.montant_eur == 119.0
+    assert mandat.motif == "MGS-1422647-O"
+    assert mandat.bic == "CMBRFR2BXXX"
+    assert mandat.date_premiere_echeance == "10/09/2026"
+    assert mandat.date_signature_mandat == "21/08/2026"
+    assert mandat.explication_periodicite == ""
 
 
 def test_generate_mandats_empty_input_returns_empty_result():

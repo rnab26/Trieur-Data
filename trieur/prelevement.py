@@ -47,6 +47,7 @@ COL_PERIODICITE = "Périodicité (Mensuel/trimestre/annuel)"
 COL_IBAN = "IBAN"
 COL_BIC = "BIC"
 COL_DATE_PREMIER = "Date de premier prélèvement"
+COL_DATE_CREATION = "Date création"
 COL_ADRESSE = "Adresse"
 COL_VILLE = "Ville"
 COL_CODE_POSTAL = "Code postal"
@@ -320,6 +321,21 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
             type_sequence = "RCUR"
             montant = total_cotis_frais - total_frais  # frais=0 ici, mais explicite plutôt que réutiliser total_cotis_frais
 
+        # Date de signature du mandat = la date de création du contrat
+        # dans le CRM, PAS la date à laquelle ce fichier est généré --
+        # vérifié contre le fichier de référence (2026-09-21) : un
+        # client créé le 21/08 garde cette date, même généré des
+        # semaines après. Repli sur aujourd'hui seulement si absente.
+        date_signature = _parse_date(_get(row, COL_DATE_CREATION, keyed)) or today
+
+        # "Explication périodicité" (ex. "Tous les 1 mois") : laissée
+        # vide pour un 1er prélèvement (FRST) -- elle ne décrit que la
+        # récurrence des prélèvements SUIVANTS, vérifié contre le
+        # fichier de référence.
+        explication = "" if type_sequence == "FRST" else _explication_periodicite(
+            _get(row, COL_PERIODICITE, keyed),
+        )
+
         mandat = MandatRow(
             reference_client=ref_client,
             nom=nom,
@@ -335,10 +351,10 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
             type_sequence=type_sequence,
             montant_eur=round(montant, 2),
             devise="EUR",
-            date_signature_mandat=today.strftime("%d/%m/%Y"),
+            date_signature_mandat=date_signature.strftime("%d/%m/%Y"),
             date_premiere_echeance=date_premiere.strftime("%d/%m/%Y"),
             periodicite=str(_get(row, COL_PERIODICITE, keyed) or ""),
-            explication_periodicite=_explication_periodicite(_get(row, COL_PERIODICITE, keyed)),
+            explication_periodicite=explication,
             motif=build_motif(rum, amounts),
         )
         (result.ooff if type_sequence == "FRST" else result.rcur).append(mandat)

@@ -981,11 +981,11 @@ export type PrelevementGenerateResult = {
 // sans avoir à rouvrir le fichier téléchargé.
 export async function generatePrelevementMandats(
   orgId: string,
-  file: File,
+  files: File[],
 ): Promise<PrelevementGenerateResult> {
   const headers = await authHeader()
   const form = new FormData()
-  form.set('file', file)
+  for (const file of files) form.append('files', file)
   const res = await safeFetch(`${API_URL}/orgs/${orgId}/prelevement/generate`, {
     method: 'POST',
     headers,

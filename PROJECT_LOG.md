@@ -48,12 +48,10 @@ la suite, en intégrant ces réponses et leurs commentaires :
     activité (ancien point 7) — les deux posent la même question de
     fond ("quelle règle de rapprochement pour quelle activité"), à
     trancher ensemble une fois l'Excel reçu.
-12. [ ] **À cadrer avec l'utilisateur avant de coder**, pas juste
-    "commencer par le haut" : rôles plus fins par environnement, avec
-    "encore plus de restrictions possibles si nécessaire" (n5) —
-    formulation volontairement ouverte, la granularité exacte
-    (lecture/écriture par colonne ? par action ? autre chose ?) doit se
-    discuter avant d'écrire du code, pas être devinée.
+12. [x] Rôles plus fins par environnement (n5) — premier palier livré
+    (rôle "lecture seule" par environnement), voir section ci-dessous.
+    Granularité plus fine (par colonne, par action...) pas demandée
+    pour l'instant, reste ouverte si besoin plus tard.
 13. [ ] **Reporté par l'utilisateur** ("plus tard") : colonnes
     calculées simples (n8).
 
@@ -3099,3 +3097,55 @@ que le correctif ne change que les 2 champs erronés, rien d'autre.
 - [ ] Chantier séparé déjà noté dans le Cockpit pour la suite :
   historique/doublons/impayés/relevé bancaire -- à ne prendre qu'une
   fois celui-ci validé en conditions réelles.
+
+---
+
+## Accès en lecture seule par environnement (2026-09-21, PR #35, Routine Cockpit)
+
+**Fait** (chantier point 12 ci-dessus, "rôles plus fins par
+environnement") : Raphaël a besoin de donner à des partenaires externes
+un accès de consultation seule -- "un accès de lecture simple pour
+consulter certaines informations, ça m'évite de leur expliquer tout ou
+leur sortir des documents". Réponse "encore plus de restrictions
+possibles si nécessaire" prise comme feu vert pour un premier palier
+simple (lecture/écriture par environnement entier), pas une
+granularité fine par colonne (pas demandée, resterait à cadrer si
+besoin plus tard).
+
+- Migration `0020_read_only_role.sql` (appliquée en base sous le nom
+  `0018_read_only_role` avant une collision de numéro avec `main`,
+  fichier renommé ensuite -- aucun impact, Supabase suit les
+  migrations par horodatage) : troisième valeur `lecture_seule` pour
+  `memberships.role`, fonction `trieur_data.can_write()`, policies RLS
+  séparées lecture/écriture sur `records`/`import_batches`/
+  `dedup_alerts`. C'est la vraie barrière de sécurité : Streamlit et
+  l'API FastAPI utilisent tous deux la clé anon + le jeton de
+  l'utilisateur connecté, jamais `service_role` -- donc appliquée quel
+  que soit le chemin emprunté.
+- Streamlit (`views/tab_database.py`) et API (`api/main.py`) :
+  import/modification/suppression/résolution d'alerte masqués ou
+  refusés (403) pour un membre lecture seule, en plus de la RLS (double
+  vérification, même convention que le reste de l'app).
+- Réglages de l'environnement (admin) : nouvelle section "👥 Membres de
+  cet environnement" pour changer le rôle d'un membre déjà présent ou
+  retirer son accès, sans écrire de SQL à chaque changement.
+
+**Limite connue, documentée, hors périmètre de ce chantier** : créer
+une toute première appartenance pour un nouveau compte reste manuel
+(aucun flux d'invitation n'existe pour personne aujourd'hui, pas
+seulement pour ce rôle). Une fois la ligne `memberships` créée une
+fois (dashboard Supabase + une ligne SQL), son rôle est modifiable
+directement dans l'app.
+
+**Vérifié** : migration testée sur le projet Supabase réel avant
+application (contraintes/policies confirmées, tous les membres
+existants étaient `org_admin` donc aucune régression pour eux).
+`pytest` : 400 passed (nouveaux tests : rôle lecture seule refusé sur
+bulk delete/update, patch, résolution d'alerte, import ; lecture
+toujours autorisée ; super-admin toujours en écriture même sans ligne
+`memberships` ; endpoints membres réservés aux admins), hors le flake
+e2e Playwright déjà documenté (environnement sandbox sans navigateur,
+CI l'installe et passe).
+
+**Pas encore vérifié** : rendu réel dans l'app avec un vrai compte
+partenaire en lecture seule (pas de tel compte existant à ce jour).

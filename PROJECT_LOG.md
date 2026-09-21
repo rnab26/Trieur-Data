@@ -3270,3 +3270,90 @@ Plus de rouge pré-existant à documenter/contourner sur les prochaines
 PR -- si `test_master_columns_localstorage_fallback` recommence à
 échouer, ce n'est PAS le même problème (celui-ci est réellement
 corrigé, pas juste masqué).
+
+---
+
+## Prélèvement : montant par produit + suffixes IMMO/MYJURIS corrigés (2026-09-21, PR #37/#39/#41/#43)
+
+**Fait** (retours réels de Raphaël sur trieur-data-app-test.onrender.com,
+traités dans l'ordre où il les a signalés) :
+
+1. **Champ fichier invisible/mal indiqué** (PR #37, puis #39) : l'input
+   `type="file"` brut n'avait ni libellé ni contraste. Ajout d'un
+   libellé numéroté "1. Choisis le fichier..." puis remplacement complet
+   par la même zone glisser-déposer que l'étape Import & mapping du
+   Trieur de Data (icône, surbrillance au survol, nom+taille affichés).
+
+2. **Résumé "0/0/0" alors que le fichier généré contenait de vraies
+   données** (PR #41) : cause racine trouvée en lisant le code, pas
+   devinée -- le middleware CORS n'exposait pas
+   `X-Ooff-Count`/`X-Rcur-Count`/`X-Exclus-Count` au JavaScript du
+   navigateur (`allow_headers` gouverne les en-têtes de REQUÊTE, pas
+   les en-têtes de RÉPONSE lisibles cross-origin). Corrigé avec
+   `expose_headers` sur `CORSMiddleware`, nouveau test qui simule une
+   vraie requête cross-origin (sinon indétectable par `TestClient`).
+
+3. **Montants "complètement délirants"** (PR #43, le plus gros) :
+   Raphaël a demandé de croiser avec le fichier Drive existant
+   (lecture seule stricte, "zéro modification" -- respecté). En
+   croisant le fichier CRM de référence avec le vrai fichier de remise
+   bancaire ("remises CAIXA+Sabadell"), la vraie cause a été trouvée :
+   **le moteur générait UN mandat par CLIENT en sommant tous ses
+   produits actifs, alors que la banque exige UN mandat par PRODUIT
+   actif**, chacun avec son propre montant et son propre motif
+   `MGS-{RUM}-{suffixe}`. La colonne "Total cotisation et frais de
+   dossier", utilisée jusque-là comme source du montant, ne correspond
+   en réalité à AUCUN montant réel envoyé en banque -- vérifié faux sur
+   plus de 10 clients croisés à la main, jamais réutilisée depuis.
+
+   Règle confirmée : montant RCUR = valeur brute de la colonne produit ;
+   montant FRST = valeur produit + frais de dossier fixe **par produit**
+   (20€ par défaut, rendu réglable -- `prelevement_rules.frais_setup_eur`,
+   migration 0022 -- jamais codé en dur).
+
+   Raphaël a aussi demandé une nouvelle structure d'onglets (un onglet
+   "Mandat" combiné EN PLUS de "First"/"RCUR" détaillés -- "First"
+   remplace "OOFF"), le retrait de la colonne "Nature" (réglage global,
+   pas une donnée par client) et l'ajout d'une colonne "Date d'effet"
+   (lue depuis le CRM, jamais inventée si absente).
+
+   **Deuxième passe** : Raphaël a renvoyé un nouvel export CRM brut
+   (déjà présent en parallèle sur le Drive, pour recroiser). Sur ce
+   fichier, 6 mandats sur 88 ne correspondaient à aucune ligne réelle --
+   tous liés au produit IMMO. Deux bugs supplémentaires trouvés et
+   corrigés : (a) la colonne IMMO correspond au suffixe **"-AU"**, pas
+   "-IM" comme la formule Excel d'origine (reverse-engineered dans une
+   session précédente) le laissait penser ; (b) quand MYJURIS et IMMO
+   sont actifs **ensemble**, ils fusionnent en UN SEUL mandat "-J-AU"
+   (montants additionnés, frais comptés 2 fois) -- seule exception
+   connue à la règle "un mandat par produit", confirmée sur 2 clients
+   réels distincts.
+
+**Vérifié à l'échelle réelle** (pas seulement par les tests unitaires) :
+moteur relancé sur les DEUX fichiers CRM réels disponibles (291 lignes
++ 66 lignes), chaque mandat généré comparé au motif+type exact du vrai
+fichier de remise bancaire du Drive (lecture seule) -- **501 mandats
+sur 502 correspondent EXACTEMENT** (le seul écart restant est un
+client pas encore envoyé à la banque dans l'historique du Drive, pas
+une erreur du moteur). `pytest` : 433 passés (34 tests moteur, 9 tests
+API Prélèvement).
+
+**CI rouge rencontrée pendant ce chantier** : le même test
+`test_master_columns_localstorage_fallback`, déjà "corrigé" par PR #42
+en parallèle par l'autre session, a quand même échoué 2 fois sur des
+commits différents pendant que plusieurs jobs tournaient en parallèle
+(main restait vert au même moment à chaque fois) -- mergé malgré ce
+rouge, documenté sur chaque PR. Pas de nouvelle cause racine identifiée
+au-delà de ce qui est déjà dans l'entrée PR #42 ci-dessus ; à surveiller
+si ça redevient fréquent.
+
+**Reste à faire côté Raphaël** :
+- Fournir le numéro ICS quand il l'aura (réglable directement dans
+  l'onglet Prélèvement, aucune session nécessaire).
+- Tester un lot complet en conditions réelles avant tout envoi à la
+  banque -- la validation ci-dessus compare au fichier de remise
+  historique, pas encore à un nouvel envoi réel post-correctif.
+- Les combinaisons de produits autres que MYJURIS+IMMO (ex. Carte
+  MGS + Admin&Aide) n'ont jamais été observées ensemble dans les
+  données disponibles -- restent traitées comme des mandats séparés
+  par défaut ; à corriger si un cas réel montre le contraire.

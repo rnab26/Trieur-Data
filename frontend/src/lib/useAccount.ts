@@ -24,6 +24,17 @@ let cachedOrgsError: string | null = null
 let cachedOrgId: string | null = null
 let cachedIsAdmin: boolean | null = null
 
+// Incrémentée à chaque clearAccountCache() -- un listOrgs()/getMe() lancé
+// AVANT le nettoyage peut se résoudre APRÈS (déconnexion suivie d'une
+// reconnexion rapide avec un AUTRE compte, voir clearAccountCache
+// ci-dessous) : son `cancelled` local (fermé sur le démontage du
+// composant, pas sur le nettoyage) ne l'empêche pas d'écrire dans le
+// cache -- sans cette génération, il réinjecterait les
+// environnements/le statut admin de l'ANCIEN compte après le nettoyage
+// (revue Copilot, PR #30). Chaque requête capture la génération en
+// cours au lancement ; elle n'écrit le cache que si elle n'a pas changé.
+let cacheGeneration = 0
+
 // À appeler à la déconnexion (voir AuthContext.signOut) -- signOut() ne
 // recharge pas la page, donc sans ce nettoyage explicite, une connexion
 // avec un AUTRE compte dans le même onglet verrait un instant les
@@ -34,6 +45,7 @@ export function clearAccountCache() {
   cachedOrgsError = null
   cachedOrgId = null
   cachedIsAdmin = null
+  cacheGeneration += 1
 }
 
 export function useOrgs() {
@@ -48,12 +60,17 @@ export function useOrgs() {
 
   useEffect(() => {
     let cancelled = false
+    const requestGeneration = cacheGeneration
     listOrgs()
       .then((data) => {
         if (cancelled) return
+        setOrgs(data)
+        // Écrit le cache SEULEMENT si aucune déconnexion (clearAccountCache)
+        // n'a eu lieu depuis le lancement de cette requête -- voir
+        // cacheGeneration ci-dessus.
+        if (requestGeneration !== cacheGeneration) return
         cachedOrgs = data
         cachedOrgsError = null
-        setOrgs(data)
         // Ne touche à orgId QUE si rien n'est encore choisi, ou si
         // l'environnement choisi n'existe plus dans la liste fraîche
         // (accès retiré entre-temps) -- ne jamais écraser un choix
@@ -67,8 +84,9 @@ export function useOrgs() {
       .catch((err: unknown) => {
         if (cancelled) return
         const msg = err instanceof ApiError ? err.message : 'Erreur inconnue.'
-        cachedOrgsError = msg
         setOrgsError(msg)
+        if (requestGeneration !== cacheGeneration) return
+        cachedOrgsError = msg
       })
     return () => {
       cancelled = true
@@ -99,18 +117,20 @@ export function useIsAdmin(ready: boolean) {
   useEffect(() => {
     if (!ready) return
     let cancelled = false
+    const requestGeneration = cacheGeneration
     getMe()
       .then((data) => {
-        // Écrit le cache SEULEMENT si cet appel n'a pas été annulé
-        // (revue Copilot, PR #30) -- un getMe() lancé avant un
-        // démontage/déconnexion peut se résoudre APRÈS coup ; sans ce
-        // garde, il réinjecterait le statut admin de l'ancien compte
-        // dans le cache partagé, visible par un remontage suivant même
-        // pour un autre compte.
         if (cancelled) return
         const value = Boolean(data.profile.is_super_admin)
-        cachedIsAdmin = value
         setIsAdmin(value)
+        // Écrit le cache SEULEMENT si aucune déconnexion (clearAccountCache)
+        // n'a eu lieu depuis le lancement de cette requête (revue Copilot,
+        // PR #30) -- un getMe() lancé avant un démontage/déconnexion peut
+        // se résoudre APRÈS coup ; sans ce garde, il réinjecterait le
+        // statut admin de l'ancien compte dans le cache partagé, visible
+        // par un remontage suivant même pour un autre compte.
+        if (requestGeneration !== cacheGeneration) return
+        cachedIsAdmin = value
       })
       .catch(() => {
         // Pas bloquant : en cas d'échec, on reste en lecture seule /

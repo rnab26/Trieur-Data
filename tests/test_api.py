@@ -1292,18 +1292,20 @@ def _upload_csv(tc, org_id, content: bytes, filename="clients.csv"):
 
 
 def test_pipeline_session_create_rejects_oversized_upload_before_parsing(client_factory, monkeypatch):
-    """Un .xlsx de 8,5 Mo mesuré en conditions réelles (Render, plan
-    512 Mo) a fait grimper le process à ~490 Mo de RAM au parsing
-    pandas/openpyxl et déclenché un OOM-kill en cours de requête --
-    l'utilisateur ne voyait qu'une connexion coupée, rien côté serveur.
-    Rejeté maintenant AVANT tout parsing (413), plafond réduit ici pour
+    """Au-delà de PIPELINE_MAX_UPLOAD_BYTES (plafond ABSOLU même en mode
+    flux -- protège le disque/le temps de requête, pas la RAM, voir sa
+    docstring), rejeté en 413 AVANT tout parsing. Plafond réduit ici pour
     ne pas générer un vrai gros fichier de test.
 
     Trouvaille Copilot, PR #28 : un test qui ne vérifie QUE le code 413
     passerait encore si le contrôle de taille arrivait APRÈS un
     f.read()/parsing -- ne verrouille pas la propriété qui protège
     l'OOM. On fait donc explicitement planter le parsing s'il est
-    jamais atteint, pour prouver que le rejet a bien lieu avant."""
+    jamais atteint, pour prouver que le rejet a bien lieu avant. Message
+    ne suggère plus le CSV (contrairement à l'ancien plafond de #28) --
+    devenu inutile une fois le mode flux fusionné : un .xlsx volumineux
+    est désormais accepté nativement, seul un dépassement du plafond
+    absolu (550 Mo) est rejeté."""
     from api import main as api_main
 
     monkeypatch.setattr(api_main, "PIPELINE_MAX_UPLOAD_BYTES", 10)
@@ -1318,7 +1320,7 @@ def test_pipeline_session_create_rejects_oversized_upload_before_parsing(client_
     res = _upload_csv(tc, "org-1", b"NOM,EMAIL\nDupont,d@x.com\n")
 
     assert res.status_code == 413
-    assert "CSV" in res.json()["detail"]
+    assert "volumineux" in res.json()["detail"]
     assert not fake.postgrest.tables["pipeline_sessions"]
 
 
@@ -1350,6 +1352,69 @@ def test_pipeline_session_create_rejects_upload_with_unknown_size():
     assert exc_info.value.status_code == 413
     assert "indéterminable" in exc_info.value.detail
     assert not fake.postgrest.tables["pipeline_sessions"]
+
+
+def test_pipeline_session_create_streams_above_threshold(client_factory, monkeypatch):
+    """Au-delà de PIPELINE_STREAM_THRESHOLD_BYTES (mais sous le plafond
+    absolu), bascule en mode flux (_stream_import_pipeline_files) -- même
+    résultat final que le mode classique pour l'appelant : mêmes lignes en
+    base, même forme de réponse. Seuil réduit ici pour déclencher le mode
+    flux sans générer un vrai gros fichier."""
+    from api import main as api_main
+
+    monkeypatch.setattr(api_main, "PIPELINE_STREAM_THRESHOLD_BYTES", 10)
+
+    fake = _make_client()
+    tc = client_factory(fake)
+    content = b"NOM,EMAIL\nDupont,d@x.com\nMartin,m@x.com\n"
+    res = _upload_csv(tc, "org-1", content)
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["row_count"] == 2
+    assert body["columns"] == ["NOM", "EMAIL"]
+    assert [r["NOM"] for r in body["preview_rows"]] == ["Dupont", "Martin"]
+    assert body["sheets"][0]["row_count"] == 2
+
+    rows = fake.postgrest.tables["pipeline_rows"]
+    assert sorted(r["data"]["NOM"] for r in rows) == ["Dupont", "Martin"]
+
+
+def test_pipeline_session_create_never_streams_xls_even_above_threshold(client_factory, monkeypatch):
+    """Trouvaille Copilot, PR #29 : stream_excel_sheets() repose sur
+    openpyxl, qui ne lit PAS le format .xls binaire (Excel 97-2003,
+    différent de .xlsx). Router un .xls volumineux vers le mode flux
+    ferait donc échouer un import que le chemin classique (engines
+    calamine/openpyxl via pandas, avec repli) pouvait réussir --
+    régression de compatibilité. Un .xls reste donc TOUJOURS sur le
+    chemin classique, quelle que soit sa taille : vérifié ici en
+    empêchant explicitement stream_excel_sheets d'être appelée."""
+    from api import main as api_main
+
+    monkeypatch.setattr(api_main, "PIPELINE_STREAM_THRESHOLD_BYTES", 10)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("stream_excel_sheets ne doit jamais être appelée pour un .xls")
+
+    monkeypatch.setattr(api_main, "stream_excel_sheets", _boom)
+
+    import io as _io
+
+    import pandas as pd
+
+    buf = _io.BytesIO()
+    pd.DataFrame({"NOM": ["Dupont"], "EMAIL": ["d@x.com"]}).to_excel(buf, index=False, sheet_name="Feuil1")
+
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/pipeline/sessions",
+        files=[("files", ("clients.xls", buf.getvalue(),
+                           "application/vnd.ms-excel"))],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.json()["row_count"] == 1
 
 
 def test_pipeline_session_create_stages_rows_and_detects_columns(client_factory):
@@ -1773,6 +1838,353 @@ def test_pipeline_mapping_excludes_one_of_two_sheets_across_multiple_batches(cli
     rows = fake.postgrest.tables["pipeline_rows"]
     assert len(rows) == 1
     assert rows[0]["data"] == {"NOM": "Garde"}
+
+
+def test_pipeline_mapping_streaming_apply_excludes_and_updates_across_multiple_pages(client_factory, monkeypatch):
+    """Même scénario que le test précédent (exclusion sur plusieurs lots),
+    mais avec `sheet_keys` fourni -- exerce le NOUVEAU chemin par pages
+    (_pages_for_sheet/_delete_sheet_pages/_update_sheet_pages), pas le
+    repli sur le chargement complet. Vérifie surtout que la pagination
+    "auto-consommante" (une page à la fois, sans offset explicite) ne
+    saute ni ne double aucune ligne sur PLUSIEURS pages, à la fois pour
+    la suppression (onglet exclu) ET la mise à jour (onglet mappé)."""
+    from api import main as api_main
+
+    monkeypatch.setattr(api_main, "PIPELINE_APPEND_BATCH", 2)
+
+    fake = _make_client()
+    tc = client_factory(fake)
+    content_a = b"NOM\n" + b"\n".join(f"A{i}".encode() for i in range(5)) + b"\n"
+    content_b = b"NOM\n" + b"\n".join(f"B{i}".encode() for i in range(5)) + b"\n"
+    upload = tc.post(
+        "/orgs/org-1/pipeline/sessions",
+        files=[
+            ("files", ("a.csv", content_a, "text/csv")),
+            ("files", ("b.csv", content_b, "text/csv")),
+        ],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    ).json()
+    session_id = upload["session_id"]
+    sheet_keys = [s["sheet_key"] for s in upload["sheets"]]
+    sheet_key_b = next(k for k in sheet_keys if "b.csv" in k)
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {sheet_key_b: {"NOM": "NOM"}}, "sheet_keys": sheet_keys},  # "a" absent -> exclu
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["n_rows_excluded"] == 5
+    assert body["n_rows_updated"] == 5
+
+    rows = fake.postgrest.tables["pipeline_rows"]
+    assert len(rows) == 5
+    assert sorted(r["data"]["NOM"] for r in rows) == [f"B{i}" for i in range(5)]
+
+
+def test_pipeline_mapping_streaming_apply_rejects_unknown_sheet_key(client_factory):
+    """Même garde que le chemin classique (400 avant toute mutation), mais
+    validée contre `sheet_keys` fourni plutôt qu'un chargement complet."""
+    fake = _make_client()
+    tc = client_factory(fake)
+    session_id = _upload_csv(tc, "org-1", b"NOM\nDupont\n").json()["session_id"]
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": {"typo": {"NOM": "NOM"}}, "sheet_keys": ["clients"]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+    rows = fake.postgrest.tables["pipeline_rows"]
+    assert len(rows) == 1  # rien touché
+
+
+def test_pipeline_mapping_streaming_apply_rejects_incomplete_sheet_keys(client_factory, monkeypatch):
+    """Trouvaille Copilot (PR #29) : known_sheet_keys = body.sheet_keys
+    (mode flux) -- si le client fournit une liste incomplète (onglet
+    ajouté entre l'aperçu et l'application, appel manuel de l'API...),
+    les lignes du sheet_key MANQUANT n'étaient ni mises à jour ni
+    exclues, mais la session passait quand même à 'mapped' : staging à
+    moitié transformé et invisible. Garde ajoutée : n_updated +
+    n_excluded comparé à session['row_count'], échec explicite (même
+    filet que les autres échecs en cours de route -- session supprimée)
+    si ça ne correspond pas."""
+    import io as _io
+
+    import pandas as pd
+
+    from api import main as api_main
+
+    monkeypatch.setattr(api_main, "PIPELINE_STREAM_THRESHOLD_BYTES", 10)
+
+    buf = _io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        pd.DataFrame({"NOM": ["Dupont"]}).to_excel(w, index=False, sheet_name="Contacts")
+        pd.DataFrame({"VILLE": ["Paris"]}).to_excel(w, index=False, sheet_name="Villes")
+
+    fake = _make_client()
+    tc = client_factory(fake)
+    upload = tc.post(
+        "/orgs/org-1/pipeline/sessions",
+        files=[("files", ("deux_onglets.xlsx", buf.getvalue(),
+                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert upload.status_code == 200
+    upload_body = upload.json()
+    session_id = upload_body["session_id"]
+    all_sheet_keys = [s["sheet_key"] for s in upload_body["sheets"]]
+    assert len(all_sheet_keys) == 2
+    contacts_key = next(k for k in all_sheet_keys if "Contacts" in k)
+
+    res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={
+            "mapping": {contacts_key: {"NOM": "NOM"}},
+            # "Villes" manque volontairement : la session le connaît (2
+            # onglets réellement importés) mais le client n'en informe
+            # que la moitié.
+            "sheet_keys": [contacts_key],
+        },
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+
+    assert res.status_code == 500
+    assert "supprimée" in res.json()["detail"]
+    assert not fake.postgrest.tables["pipeline_sessions"]
+
+
+def test_pipeline_full_flow_end_to_end_via_streaming_paths(client_factory, monkeypatch):
+    """Parcours COMPLET (import -> suggestion -> application -> vérif des
+    données finales) sur un fichier assez gros pour forcer PLUSIEURS
+    pages à chaque étape, en mode flux de bout en bout -- pas juste
+    l'import isolé (voir tests/test_io_excel_streaming.py pour la mesure
+    mémoire) ni la mutation isolée (voir les tests streaming_apply
+    ci-dessus) : ici, la VRAIE suite d'appels que fait le frontend."""
+    import io as _io
+
+    import pandas as pd
+
+    from api import main as api_main
+
+    monkeypatch.setattr(api_main, "PIPELINE_STREAM_THRESHOLD_BYTES", 10)
+    monkeypatch.setattr(api_main, "PIPELINE_APPEND_BATCH", 7)  # force plusieurs pages sur 20 lignes
+
+    n = 20
+    buf = _io.BytesIO()
+    pd.DataFrame({
+        "NOM": [f"NOM{i}" for i in range(n)],
+        "EMAIL": [f"user{i}@example.com" for i in range(n)],
+    }).to_excel(buf, index=False, sheet_name="Feuil1")
+
+    fake = _make_client()
+    tc = client_factory(fake)
+    upload = tc.post(
+        "/orgs/org-1/pipeline/sessions",
+        files=[("files", ("gros.xlsx", buf.getvalue(),
+                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert upload.status_code == 200
+    upload_body = upload.json()
+    assert upload_body["row_count"] == n
+    session_id = upload_body["session_id"]
+    sheet_keys = [s["sheet_key"] for s in upload_body["sheets"]]
+
+    dry = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"dry_run": True, "sheet_keys": sheet_keys},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert dry.status_code == 200
+    suggestion = dry.json()["suggested_mapping"]
+    assert suggestion[sheet_keys[0]].get("NOM") == "NOM"
+
+    apply_res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={"mapping": suggestion, "sheet_keys": sheet_keys},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert apply_res.status_code == 200
+    apply_body = apply_res.json()
+    assert apply_body["n_rows_updated"] == n
+    assert apply_body["n_rows_excluded"] == 0
+
+    rows = fake.postgrest.tables["pipeline_rows"]
+    assert len(rows) == n
+    assert {r["data"]["NOM"] for r in rows} == {f"NOM{i}" for i in range(n)}
+    assert all("_sheet" not in r["data"] for r in rows)  # retiré à l'application, comme le chemin classique
+
+    # Suite du parcours complet : filtrage (onglet 3) puis export (onglet 4)
+    # -- vérifie que les lignes importées/mappées EN FLUX restent lisibles
+    # par le reste du pipeline, pas juste correctement insérées.
+    listed = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"search": "NOM1"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert listed.status_code == 200
+    listed_body = listed.json()
+    assert listed_body["row_count"] == n
+    assert {r["NOM"] for r in listed_body["rows"]} == {"NOM1", "NOM10", "NOM11", "NOM12", "NOM13",
+                                                          "NOM14", "NOM15", "NOM16", "NOM17", "NOM18", "NOM19"}
+
+    export_res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/export",
+        params={"format": "csv"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert export_res.status_code == 200
+    exported_text = export_res.content.decode("utf-8-sig")
+    assert exported_text.count("\n") >= n  # en-tête + n lignes
+    for i in range(n):
+        assert f"NOM{i}" in exported_text
+
+
+def test_pipeline_full_pipeline_all_stages_combined_in_streaming_mode(client_factory, monkeypatch):
+    """Parcours COMPLET jusqu'à l'export, en combinant le plus de cas
+    réels possible en une seule fois, tout en mode flux :
+      - 2 fichiers (xlsx + csv) -> préfixage des clés d'onglet ;
+      - le xlsx a 2 onglets, l'un avec en-tête normale, l'autre SANS
+        en-tête (déduite par contenu) ;
+      - un onglet exclu (absent du mapping) -> supprimé par pagination ;
+      - détection + validation IBAN (une valeur invalide) ;
+      - filtre multi-critères (groups, département par CP) ;
+      - dédoublonnage (mode rule) SCOPÉ au filtre actif ;
+      - export final en .xlsx (pas juste CSV, voir test précédent).
+    Plusieurs pages forcées à chaque étape (PIPELINE_APPEND_BATCH réduit)
+    pour exercer la pagination "auto-consommante" sur un scénario
+    réaliste, pas seulement des cas isolés."""
+    import io as _io
+
+    import openpyxl
+    import pandas as pd
+    from openpyxl.utils.dataframe import dataframe_to_rows
+
+    from api import main as api_main
+
+    monkeypatch.setattr(api_main, "PIPELINE_STREAM_THRESHOLD_BYTES", 10)
+    monkeypatch.setattr(api_main, "PIPELINE_APPEND_BATCH", 2)
+
+    # --- Fichier A : xlsx, 2 onglets ---
+    wb = openpyxl.Workbook()
+    ws_clients = wb.active
+    ws_clients.title = "Clients"
+    clients_df = pd.DataFrame({
+        "NOM": ["Dupont", "Dupont", "Martin"],
+        "IBAN": [
+            "FR76 3000 6000 0112 3456 7890 189",  # valide (espaces nettoyés)
+            "FR76 3000 6000 0112 3456 7890 189",  # doublon volontaire (dédoublonnage)
+            "FR0000000000000000000000000",         # checksum invalide
+        ],
+        "CP": ["34000", "34000", "71000"],
+    })
+    for row in dataframe_to_rows(clients_df, index=False, header=True):
+        ws_clients.append(row)
+
+    ws_prospects = wb.create_sheet("Prospects")  # PAS d'en-tête -- sera exclu (pas de mapping fourni)
+    ws_prospects.append(["ProspectX", "0601020304"])
+    ws_prospects.append(["ProspectY", "0601020305"])
+
+    xlsx_buf = _io.BytesIO()
+    wb.save(xlsx_buf)
+
+    csv_content = b"NOM,IBAN,CP\nPetit,FR7630006000011234567890189,34500\n"
+
+    fake = _make_client()
+    tc = client_factory(fake)
+    upload = tc.post(
+        "/orgs/org-1/pipeline/sessions",
+        files=[
+            ("files", ("a.xlsx", xlsx_buf.getvalue(),
+                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")),
+            ("files", ("b.csv", csv_content, "text/csv")),
+        ],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert upload.status_code == 200
+    upload_body = upload.json()
+    assert upload_body["row_count"] == 6  # 3 Clients + 2 Prospects + 1 csv
+    session_id = upload_body["session_id"]
+    sheet_keys = [s["sheet_key"] for s in upload_body["sheets"]]
+    assert len(sheet_keys) == 3  # multi-fichiers -> préfixées "fichier :: onglet"
+    clients_key = next(k for k in sheet_keys if "Clients" in k)
+    prospects_key = next(k for k in sheet_keys if "Prospects" in k)
+    csv_key = next(k for k in sheet_keys if "b.csv" in k)
+
+    # Prospects (sans en-tête) doit quand même être détecté avec des
+    # colonnes déduites -- vérifie que la déduction d'en-tête (testée en
+    # isolation dans test_io_excel_streaming.py) fonctionne aussi à
+    # travers le VRAI endpoint d'upload, pas seulement stream_excel_sheets
+    # appelée directement.
+    prospects_summary = next(s for s in upload_body["sheets"] if s["sheet_key"] == prospects_key)
+    assert prospects_summary["row_count"] == 2
+    assert prospects_summary["columns"]  # colonnes non vides, peu importe lesquelles
+
+    # Mapping : Clients + csv mappés, Prospects absent -> exclu.
+    apply_res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/mapping",
+        json={
+            "mapping": {
+                clients_key: {"NOM": "NOM", "IBAN": "IBAN", "CP": "CP"},
+                csv_key: {"NOM": "NOM", "IBAN": "IBAN", "CP": "CP"},
+            },
+            "sheet_keys": sheet_keys,
+        },
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert apply_res.status_code == 200
+    apply_body = apply_res.json()
+    assert apply_body["n_rows_updated"] == 4  # 3 Clients + 1 csv
+    assert apply_body["n_rows_excluded"] == 2  # Prospects
+    assert apply_body["iban_columns_detected"] == ["IBAN"]
+    assert apply_body["iban_warnings"][0]["column"] == "IBAN"
+    assert apply_body["iban_warnings"][0]["n_invalid"] == 1  # Martin
+
+    rows_after_mapping = fake.postgrest.tables["pipeline_rows"]
+    assert len(rows_after_mapping) == 4
+    assert {r["data"]["NOM"] for r in rows_after_mapping} == {"Dupont", "Martin", "Petit"}
+
+    # Filtre multi-critères (onglet 3) : département 34 -> Dupont(x2, 34000) + Petit(34500), pas Martin(71000).
+    groups = json.dumps([[{"column": "CP", "kind": "departements", "values": ["34"]}]])
+    filtered = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/rows",
+        params={"groups": groups},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert filtered.status_code == 200
+    filtered_body = filtered.json()
+    assert filtered_body["count"] == 3
+    assert {r["NOM"] for r in filtered_body["rows"]} == {"Dupont", "Petit"}
+
+    # Dédoublonnage SCOPÉ au filtre actif (même groupe que ci-dessus) --
+    # Dupont(x2) dans le filtre -> 1 doublon retiré ; Martin (hors filtre)
+    # jamais touché même s'il n'a pas de doublon.
+    dedupe_res = tc.post(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/dedupe",
+        json={"column": "NOM", "mode": "rule", "keep": "first",
+              "groups": [[{"column": "CP", "kind": "departements", "values": ["34"]}]]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert dedupe_res.status_code == 200
+    dedupe_body = dedupe_res.json()
+    assert dedupe_body["n_removed"] == 1
+    assert dedupe_body["row_count"] == 3  # total session restant : Dupont, Martin, Petit
+
+    # Export final -- format .xlsx cette fois (pas juste CSV).
+    export_res = tc.get(
+        f"/orgs/org-1/pipeline/sessions/{session_id}/export",
+        params={"format": "xlsx"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert export_res.status_code == 200
+    exported_wb = openpyxl.load_workbook(_io.BytesIO(export_res.content))
+    exported_rows = list(exported_wb.active.iter_rows(values_only=True))
+    header, data_rows = exported_rows[0], exported_rows[1:]
+    nom_idx = header.index("NOM")
+    assert {r[nom_idx] for r in data_rows} == {"Dupont", "Martin", "Petit"}
+    assert len(data_rows) == 3
 
 
 def test_pipeline_session_create_cleans_up_if_row_count_rpc_fails(client_factory, monkeypatch):

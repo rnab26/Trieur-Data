@@ -670,10 +670,16 @@ export type PipelineMappingResult = {
 // mapping COMPLET voulu pour chaque onglet qu'il inclut, pas un patch ;
 // un onglet absent de `mapping` est exclu de la base fusionnée, même
 // contrat que côté serveur) et fait passer la session au statut "mapped".
-export function applyPipelineMapping(orgId: string, sessionId: string, mapping: PipelineMappingBySheet) {
+// `sheetKeys` (tous les onglets de la session) permet au serveur de
+// traiter chaque onglet PAR PAGES depuis la base plutôt que de tout
+// charger en mémoire -- indispensable pour les gros imports (voir
+// suggestPipelineMapping, même contrat côté dry_run).
+export function applyPipelineMapping(
+  orgId: string, sessionId: string, mapping: PipelineMappingBySheet, sheetKeys: string[],
+) {
   return request<PipelineMappingResult>(
     `/orgs/${orgId}/pipeline/sessions/${sessionId}/mapping`,
-    { method: 'POST', body: JSON.stringify({ mapping, dry_run: false }) },
+    { method: 'POST', body: JSON.stringify({ mapping, dry_run: false, sheet_keys: sheetKeys }) },
   )
 }
 

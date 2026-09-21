@@ -72,6 +72,130 @@ def read_excel_all_sheets_from_file(file_obj, filename):
     st.error(f"❌ Impossible de lire {filename}: format non reconnu.")
     return {}
 
+def stream_excel_sheets(file_obj, header_sample_size=1000):
+    """
+    [GROS FICHIERS] Lit un classeur Excel EN FLUX, onglet par onglet, SANS
+    jamais matérialiser une feuille entière en mémoire (contrairement à
+    read_excel_all_sheets_from_file, qui construit un DataFrame pandas
+    complet -- mesuré en conditions réelles à ~45x la taille du fichier en
+    RAM, quel que soit le moteur : un .xlsx de 8,5 Mo a fait planter un
+    serveur à 512 Mo de RAM). Openpyxl en mode `read_only` lit le XML de
+    la feuille sans le charger entièrement, seule voie qui permet de tenir
+    sur de gros volumes avec une mémoire bornée.
+
+    La détection d'en-tête (looks_like_header/infer_column_names,
+    trieur/matching.py) est reproduite à l'IDENTIQUE mais sur un
+    ÉCHANTILLON borné des `header_sample_size` premières lignes -- ces deux
+    fonctions n'inspectent de toute façon jamais plus que ça en interne
+    (_sample_values(sample=200), detect_phone_column_kind(sample=200) via
+    un head(1000)) : aucune perte de précision par rapport au chemin
+    classique, juste jamais toute la feuille en mémoire pour autant.
+
+    Chaque valeur est convertie en str() pour matcher le comportement de
+    pandas(dtype=str) sur les types courants (nombres, dates -- vérifié :
+    str(datetime(...)) donne exactement le même format "AAAA-MM-JJ HH:MM:SS"
+    que pandas ; un entier Excel reste un int côté openpyxl, jamais un
+    float parasite comme "100.0").
+
+    `n_duplicates_sample` (comptée sur ce même échantillon borné, jamais sur
+    la feuille entière -- valeur informative, pas fonctionnelle : le vrai
+    dédoublonnage reste l'étape dédiée de l'onglet 3, pas celle-ci) fait
+    partie du résultat pour que le résumé par onglet reste cohérent avec le
+    chemin classique (_sheet_summary_from_df, api/main.py), même s'il est
+    calculé sur un sous-ensemble pour un gros fichier.
+
+    Générateur de (nom_onglet, colonnes, n_duplicates_sample,
+    itérateur_de_dicts) -- l'appelant consomme l'itérateur lui-même en flux
+    (jamais converti en liste) pour garder la mémoire bornée jusqu'au bout
+    de la chaîne.
+    """
+    import openpyxl
+
+    def _cell(v):
+        return None if v is None else str(v)
+
+    def _row_has_data(row):
+        return row is not None and any(v is not None for v in row)
+
+    # Même convention que les autres lecteurs de ce module (read_excel_
+    # all_sheets_from_file, read_csv_file) : rembobiner avant lecture,
+    # jamais supposer que l'appelant l'a déjà fait -- un file_obj réutilisé
+    # ou un pointeur pas remis à 0 ferait échouer/tronquer la lecture
+    # openpyxl silencieusement sinon (revue Copilot, PR #29).
+    file_obj.seek(0)
+    wb = openpyxl.load_workbook(file_obj, read_only=True, data_only=True)
+    try:
+        for ws in wb.worksheets:
+            rows_iter = ws.iter_rows(values_only=True)
+            buffer = []
+            for row in rows_iter:
+                if _row_has_data(row):
+                    buffer.append(row)
+                if len(buffer) >= header_sample_size:
+                    break
+            if not buffer:
+                continue
+
+            # Même convention que pandas (pd.read_excel/ExcelFile.parse,
+            # chemin classique) -- vérifié en conditions réelles, pas
+            # supposé : une cellule vide devient "Unnamed: <index>" (index
+            # de colonne, pas un compteur -- deux cellules vides voisines
+            # donnent "Unnamed: 1"/"Unnamed: 2", jamais de collision entre
+            # elles), et un nom dupliqué reçoit un suffixe ".1", ".2"...
+            # plutôt que d'écraser silencieusement une colonne lors du
+            # dict(zip(...)) plus bas (revue Copilot, PR #29).
+            seen_header_names: dict[str, int] = {}
+            candidate_header = []
+            for i, c in enumerate(buffer[0]):
+                name = str(c).strip() if c is not None else ""
+                if not name:
+                    name = f"Unnamed: {i}"
+                if name in seen_header_names:
+                    seen_header_names[name] += 1
+                    name = f"{name}.{seen_header_names[name]}"
+                else:
+                    seen_header_names[name] = 0
+                candidate_header.append(name)
+            if looks_like_header(pd.DataFrame(columns=candidate_header)):
+                columns = candidate_header
+                buffered_data_rows = buffer[1:]
+            else:
+                # Même repli que apply_header_inference_excel/_reread_sheet_
+                # without_header : l'en-tête n'a pas l'air d'en être une,
+                # TOUTES les lignes (y compris la 1re) redeviennent des
+                # données, et les noms de colonnes sont devinés d'après le
+                # contenu de l'échantillon.
+                # str() colonne par colonne plutôt que pd.DataFrame(buffer,
+                # dtype=str) : même si vérifié sans divergence sur la
+                # version de pandas installée (None reste NaN après
+                # dropna()), convertir explicitement seulement les valeurs
+                # non nulles supprime toute dépendance à ce comportement
+                # d'implémentation -- infer_column_names (via
+                # _sample_values/dropna, trieur/matching.py) doit rester
+                # aligné sur le chemin classique (pd.read_excel(dtype=str))
+                # quelle que soit la version de pandas (revue Copilot,
+                # PR #29).
+                str_buffer = [[None if v is None else str(v) for v in row] for row in buffer]
+                columns = infer_column_names(pd.DataFrame(str_buffer))
+                buffered_data_rows = buffer
+
+            n_duplicates_sample = int(
+                pd.DataFrame(buffered_data_rows, columns=columns).duplicated().sum()
+            ) if buffered_data_rows else 0
+
+            def _rows(buffered_data_rows=buffered_data_rows, columns=columns, rows_iter=rows_iter):
+                for row in buffered_data_rows:
+                    yield dict(zip(columns, (_cell(v) for v in row)))
+                for row in rows_iter:
+                    if not _row_has_data(row):
+                        continue
+                    yield dict(zip(columns, (_cell(v) for v in row)))
+
+            yield ws.title, columns, n_duplicates_sample, _rows()
+    finally:
+        wb.close()
+
+
 def read_csv_file(file_obj, filename):
     """
     [GROS FICHIERS] Lit un fichier CSV importe (un seul 'onglet').

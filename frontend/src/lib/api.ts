@@ -973,6 +973,19 @@ export type PrelevementGenerateResult = {
   ooffCount: number
   rcurCount: number
   exclusCount: number
+  steps: string[]
+}
+
+// Les en-têtes HTTP n'acceptent que de l'ASCII -- le résumé des étapes
+// (accents compris) arrive encodé en base64 UTF-8 depuis l'API.
+function decodeStepsHeader(raw: string | null): string[] {
+  if (!raw) return []
+  try {
+    const bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0))
+    return JSON.parse(new TextDecoder('utf-8').decode(bytes)) as string[]
+  } catch {
+    return []
+  }
 }
 
 // Envoie le fichier CRM brut, déclenche le téléchargement automatique
@@ -1012,5 +1025,6 @@ export async function generatePrelevementMandats(
     ooffCount: Number(res.headers.get('x-ooff-count') ?? 0),
     rcurCount: Number(res.headers.get('x-rcur-count') ?? 0),
     exclusCount: Number(res.headers.get('x-exclus-count') ?? 0),
+    steps: decodeStepsHeader(res.headers.get('x-steps-b64')),
   }
 }

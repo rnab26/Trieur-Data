@@ -340,11 +340,27 @@ export function PrelevementScreen() {
               </div>
               {generateError && <p className="text-sm text-[var(--danger)]">{generateError}</p>}
               {result && (
-                <p className="text-sm text-[var(--foreground)]">
-                  ✅ {result.ooffCount} mandat(s) First, {result.rcurCount} mandat(s) RCUR,{' '}
-                  {result.exclusCount} ligne(s) exclue(s) (voir l'onglet "Exclus" du fichier
-                  téléchargé pour la raison de chacune).
-                </p>
+                <div className="flex flex-col gap-2 rounded-md border border-[var(--border)] p-3">
+                  <p className="text-sm font-medium text-[var(--foreground)]">
+                    Résumé du traitement
+                  </p>
+                  {result.steps.length > 0 ? (
+                    <ol className="list-decimal pl-5 text-sm text-[var(--foreground)]">
+                      {result.steps.map((step, i) => (
+                        <li key={i}>{step}</li>
+                      ))}
+                    </ol>
+                  ) : (
+                    <p className="text-sm text-[var(--foreground)]">
+                      ✅ {result.ooffCount} mandat(s) First, {result.rcurCount} mandat(s) RCUR,{' '}
+                      {result.exclusCount} ligne(s) exclue(s).
+                    </p>
+                  )}
+                  <p className="text-xs text-[var(--muted)]">
+                    Voir l'onglet "Exclus" du fichier téléchargé pour la raison précise de chaque
+                    ligne exclue.
+                  </p>
+                </div>
               )}
             </CardContent>
           </Card>

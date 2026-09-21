@@ -205,16 +205,25 @@ export function PrelevementScreen() {
           <Card>
             <CardContent className="flex flex-col gap-3">
               <h2 className="text-sm font-semibold">Générer les mandats</h2>
-              <input
-                key={fileInputKey}
-                ref={fileRef}
-                type="file"
-                accept=".csv,.xlsx,.xls"
-                className="text-sm"
-              />
+              <div>
+                <label
+                  htmlFor="prelevement-file"
+                  className="mb-1 block text-sm text-[var(--muted)]"
+                >
+                  1. Choisis le fichier export CRM (.csv ou .xlsx)
+                </label>
+                <input
+                  id="prelevement-file"
+                  key={fileInputKey}
+                  ref={fileRef}
+                  type="file"
+                  accept=".csv,.xlsx,.xls"
+                  className="block w-full rounded-md border border-dashed border-[var(--border)] bg-[var(--card)] p-3 text-sm"
+                />
+              </div>
               <div>
                 <Button onClick={() => void handleGenerate()} disabled={generating}>
-                  {generating ? 'Génération…' : 'Générer et télécharger'}
+                  {generating ? 'Génération…' : '2. Générer et télécharger'}
                 </Button>
               </div>
               {generateError && <p className="text-sm text-[var(--danger)]">{generateError}</p>}

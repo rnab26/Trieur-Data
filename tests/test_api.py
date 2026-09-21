@@ -636,6 +636,46 @@ def test_export_includes_tags_column(client_factory):
     assert "VIP" in res.text
 
 
+def test_read_only_member_cannot_add_tag(client_factory):
+    fake = _make_client(records=[_record(1)], memberships=READ_ONLY_MEMBERSHIP)
+    tc = client_factory(fake)
+
+    res = tc.post(
+        "/orgs/org-1/records/rec-1/tags", json={"tag": "VIP"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 403
+    assert fake.postgrest.tables["record_tags"] == []
+
+
+def test_read_only_member_cannot_remove_tag(client_factory):
+    fake = _make_client(
+        records=[_record(1)],
+        record_tags=[{"record_id": "rec-1", "tag": "VIP", "org_id": "org-1"}],
+        memberships=READ_ONLY_MEMBERSHIP,
+    )
+    tc = client_factory(fake)
+
+    res = tc.delete(
+        "/orgs/org-1/records/rec-1/tags/VIP", headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 403
+    assert len(fake.postgrest.tables["record_tags"]) == 1
+
+
+def test_read_only_member_can_still_see_tags(client_factory):
+    fake = _make_client(
+        records=[_record(1)],
+        record_tags=[{"record_id": "rec-1", "tag": "VIP", "org_id": "org-1"}],
+        memberships=READ_ONLY_MEMBERSHIP,
+    )
+    tc = client_factory(fake)
+
+    res = tc.get("/orgs/org-1/tags", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 200
+    assert res.json() == {"tags": ["VIP"]}
+
+
 # ---------------------------------------------------------------
 # Vues enregistrées : create / list / delete
 # ---------------------------------------------------------------
@@ -1071,6 +1111,191 @@ def test_resolve_dedup_alert_wrong_org_is_404(client_factory):
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 404
+
+
+# ---------------------------------------------------------------
+# Accès en lecture seule par environnement (migration 0018) : un membre
+# 'lecture_seule' peut lire (déjà couvert par les tests ci-dessus, qui
+# utilisent tous le rôle 'member' par défaut) mais jamais écrire.
+# ---------------------------------------------------------------
+
+READ_ONLY_MEMBERSHIP = [
+    {"user_id": "user-1", "org_id": "org-1", "role": "lecture_seule", "organizations": {"slug": "leads", "name": "Leads"}}
+]
+
+
+def test_read_only_member_cannot_bulk_delete_records(client_factory):
+    fake = _make_client(records=[_record(1)], memberships=READ_ONLY_MEMBERSHIP)
+    tc = client_factory(fake)
+
+    res = tc.request(
+        "DELETE", "/orgs/org-1/records", json={"ids": ["rec-1"]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 403
+    assert len(fake.postgrest.tables["records"]) == 1
+
+
+def test_read_only_member_cannot_bulk_update_records(client_factory):
+    fake = _make_client(records=[_record(1)], memberships=READ_ONLY_MEMBERSHIP)
+    tc = client_factory(fake)
+
+    res = tc.patch(
+        "/orgs/org-1/records/bulk",
+        json={"ids": ["rec-1"], "field": "VILLE", "value": "Paris"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 403
+    assert "VILLE" not in fake.postgrest.tables["records"][0]["data"]
+
+
+def test_read_only_member_cannot_patch_single_record(client_factory):
+    fake = _make_client(records=[_record(1)], memberships=READ_ONLY_MEMBERSHIP)
+    tc = client_factory(fake)
+
+    res = tc.patch(
+        "/orgs/org-1/records/rec-1",
+        json={"data": {"NOM": "Nouveau"}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 403
+
+
+def test_read_only_member_cannot_resolve_dedup_alert(client_factory):
+    fake = _make_client(dedup_alerts=[_dedup_alert()], memberships=READ_ONLY_MEMBERSHIP)
+    tc = client_factory(fake)
+
+    res = tc.post(
+        "/orgs/org-1/dedup-alerts/alert-1/resolve",
+        json={"status": "confirmed_duplicate"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 403
+    assert fake.postgrest.tables["dedup_alerts"][0]["status"] == "pending"
+
+
+def test_read_only_member_cannot_import(client_factory):
+    fake = _make_client(memberships=READ_ONLY_MEMBERSHIP)
+    tc = client_factory(fake)
+
+    res = tc.post(
+        "/orgs/org-1/import",
+        files={"file": ("clients.csv", _CSV_CONTENT, "text/csv")},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 403
+    assert fake.postgrest.tables["records"] == []
+
+
+def test_read_only_member_can_still_read_records(client_factory):
+    """La lecture (liste, export, alertes) n'est pas concernée par
+    require_write_access -- seules les écritures le sont."""
+    fake = _make_client(records=[_record(1)], memberships=READ_ONLY_MEMBERSHIP)
+    tc = client_factory(fake)
+
+    res = tc.get("/orgs/org-1/records", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 200
+    assert res.json()["total"] == 1
+
+
+def test_super_admin_can_write_even_without_membership_row(client_factory):
+    fake = _make_client(
+        profiles=[{"id": "user-1", "full_name": "Alice", "is_super_admin": True}],
+        records=[_record(1)],
+        memberships=[],
+    )
+    tc = client_factory(fake)
+
+    res = tc.request(
+        "DELETE", "/orgs/org-1/records", json={"ids": ["rec-1"]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+
+
+# ---------------------------------------------------------------
+# Membres d'un environnement (rôles, migration 0018) -- réservé aux
+# administrateurs.
+# ---------------------------------------------------------------
+
+def test_list_members_forbidden_for_non_admin(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+
+    res = tc.get("/orgs/org-1/members", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 403
+
+
+def test_list_members_as_admin(client_factory):
+    fake = _make_client(
+        profiles=[ADMIN_PROFILE],
+        memberships=[
+            {"user_id": "user-1", "org_id": "org-1", "role": "org_admin", "created_at": "2026-01-01", "organizations": {"slug": "leads", "name": "Leads"}},
+            {"user_id": "user-2", "org_id": "org-1", "role": "member", "created_at": "2026-01-02", "organizations": {"slug": "leads", "name": "Leads"}},
+        ],
+    )
+    tc = client_factory(fake)
+
+    res = tc.get("/orgs/org-1/members", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 200
+    assert {m["user_id"] for m in res.json()} == {"user-1", "user-2"}
+
+
+def test_patch_member_role_as_admin(client_factory):
+    fake = _make_client(
+        profiles=[ADMIN_PROFILE],
+        memberships=[
+            {"user_id": "user-1", "org_id": "org-1", "role": "org_admin", "created_at": "2026-01-01", "organizations": {"slug": "leads", "name": "Leads"}},
+            {"user_id": "user-2", "org_id": "org-1", "role": "member", "created_at": "2026-01-02", "organizations": {"slug": "leads", "name": "Leads"}},
+        ],
+    )
+    tc = client_factory(fake)
+
+    res = tc.patch(
+        "/orgs/org-1/members/user-2", json={"role": "lecture_seule"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    stored = next(m for m in fake.postgrest.tables["memberships"] if m["user_id"] == "user-2")
+    assert stored["role"] == "lecture_seule"
+
+
+def test_patch_member_role_invalid_role_is_400(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+
+    res = tc.patch(
+        "/orgs/org-1/members/user-1", json={"role": "n_importe_quoi"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_patch_member_role_forbidden_for_non_admin(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+
+    res = tc.patch(
+        "/orgs/org-1/members/user-1", json={"role": "lecture_seule"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 403
+
+
+def test_delete_member_as_admin(client_factory):
+    fake = _make_client(
+        profiles=[ADMIN_PROFILE],
+        memberships=[
+            {"user_id": "user-1", "org_id": "org-1", "role": "org_admin", "created_at": "2026-01-01", "organizations": {"slug": "leads", "name": "Leads"}},
+            {"user_id": "user-2", "org_id": "org-1", "role": "member", "created_at": "2026-01-02", "organizations": {"slug": "leads", "name": "Leads"}},
+        ],
+    )
+    tc = client_factory(fake)
+
+    res = tc.delete("/orgs/org-1/members/user-2", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 200
+    remaining = {m["user_id"] for m in fake.postgrest.tables["memberships"]}
+    assert remaining == {"user-1"}
 
 
 # ---------------------------------------------------------------

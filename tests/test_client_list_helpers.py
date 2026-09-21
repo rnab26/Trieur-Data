@@ -5,10 +5,24 @@ complet -- un bug ici casse les deux en même temps."""
 from views.tab_database import (
     _apply_tags,
     _build_rows,
+    _current_role,
     _filter_by_columns,
     _filter_by_search,
     _resolve_modifier_names,
 )
+
+
+def test_current_role_matches_org_id():
+    memberships = [
+        {"org_id": "org-1", "role": "lecture_seule"},
+        {"org_id": "org-2", "role": "member"},
+    ]
+    assert _current_role(memberships, "org-1") == "lecture_seule"
+    assert _current_role(memberships, "org-2") == "member"
+
+
+def test_current_role_none_when_no_membership():
+    assert _current_role([], "org-1") is None
 
 
 def test_build_rows_master_columns_first_then_extras():

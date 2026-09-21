@@ -48,12 +48,10 @@ la suite, en intégrant ces réponses et leurs commentaires :
     activité (ancien point 7) — les deux posent la même question de
     fond ("quelle règle de rapprochement pour quelle activité"), à
     trancher ensemble une fois l'Excel reçu.
-12. [ ] **À cadrer avec l'utilisateur avant de coder**, pas juste
-    "commencer par le haut" : rôles plus fins par environnement, avec
-    "encore plus de restrictions possibles si nécessaire" (n5) —
-    formulation volontairement ouverte, la granularité exacte
-    (lecture/écriture par colonne ? par action ? autre chose ?) doit se
-    discuter avant d'écrire du code, pas être devinée.
+12. [x] Rôles plus fins par environnement (n5) — premier palier livré
+    (rôle "lecture seule" par environnement), voir section ci-dessous.
+    Granularité plus fine (par colonne, par action...) pas demandée
+    pour l'instant, reste ouverte si besoin plus tard.
 13. [ ] **Reporté par l'utilisateur** ("plus tard") : colonnes
     calculées simples (n8).
 
@@ -3066,14 +3064,88 @@ le moteur pur avec un IBAN réel du fichier de référence, 6 sur les
 2 endpoints), hors le flake e2e déjà documenté. `npm run build`/`npm
 run lint` : aucune nouvelle erreur.
 
+**Comparaison ligne par ligne faite par Claude (2026-09-21, PR #36)** :
+Raphaël a demandé la comparaison au fichier Excel actuel -- faite
+directement contre les onglets calculés du classeur de référence
+("3 Sheet1"/"Mandats CAIXA"), sur le seul vrai client encore présent
+dans ce classeur au moment de l'analyse (`MGS-20230`, RUM `1422647`,
+les autres lignes du classeur n'étaient que des restes de formules
+vides malgré un `max_row` élevé -- vérifié cellule par cellule avant
+de conclure). 5 champs sur 7 correspondaient déjà exactement (montant,
+motif, BIC, IBAN, type de séquence). 2 ne correspondaient pas, corrigés
+dans la foulée :
+- `date_signature_mandat` repartait de la date du jour au lieu de la
+  date de création du contrat dans le CRM.
+- `explication_periodicite` restait remplie pour un 1er prélèvement
+  (FRST), alors que le fichier de référence la laisse vide.
+
+Re-testé sur le fichier CRM complet (291 lignes) après correctif :
+toujours 287 OOFF / 0 RCUR / 4 exclus, identique à avant -- confirme
+que le correctif ne change que les 2 champs erronés, rien d'autre.
+
 **Reste à faire côté Raphaël, IMPORTANT avant tout usage réel** :
-- [ ] Tester avec un vrai fichier et comparer le résultat **ligne par
-  ligne** à ce que produit le fichier Excel actuel, avant de faire
-  confiance à ce module pour une vraie remise en banque. Aucune
-  automatisation bancaire ne doit partir en production sans cette
-  vérification humaine, même si tous les tests automatisés passent.
+- [ ] Comparer un lot COMPLET (pas juste 1 ligne comme ci-dessus, faute
+  de plus de vraies lignes disponibles dans le classeur de référence
+  au moment de la vérification) au résultat de son père sur le même
+  lot, avant de faire confiance à ce module pour une vraie remise en
+  banque. Aucune automatisation bancaire ne doit partir en production
+  sans cette vérification humaine à plus grande échelle, même si tous
+  les tests automatisés passent et que le seul exemple disponible
+  correspond.
 - [ ] Donner le numéro ICS quand il sera disponible (réglage dans
   l'onglet Prélèvement, pas besoin de redemander à Claude).
 - [ ] Chantier séparé déjà noté dans le Cockpit pour la suite :
   historique/doublons/impayés/relevé bancaire -- à ne prendre qu'une
   fois celui-ci validé en conditions réelles.
+
+---
+
+## Accès en lecture seule par environnement (2026-09-21, PR #35, Routine Cockpit)
+
+**Fait** (chantier point 12 ci-dessus, "rôles plus fins par
+environnement") : Raphaël a besoin de donner à des partenaires externes
+un accès de consultation seule -- "un accès de lecture simple pour
+consulter certaines informations, ça m'évite de leur expliquer tout ou
+leur sortir des documents". Réponse "encore plus de restrictions
+possibles si nécessaire" prise comme feu vert pour un premier palier
+simple (lecture/écriture par environnement entier), pas une
+granularité fine par colonne (pas demandée, resterait à cadrer si
+besoin plus tard).
+
+- Migration `0020_read_only_role.sql` (appliquée en base sous le nom
+  `0018_read_only_role` avant une collision de numéro avec `main`,
+  fichier renommé ensuite -- aucun impact, Supabase suit les
+  migrations par horodatage) : troisième valeur `lecture_seule` pour
+  `memberships.role`, fonction `trieur_data.can_write()`, policies RLS
+  séparées lecture/écriture sur `records`/`import_batches`/
+  `dedup_alerts`. C'est la vraie barrière de sécurité : Streamlit et
+  l'API FastAPI utilisent tous deux la clé anon + le jeton de
+  l'utilisateur connecté, jamais `service_role` -- donc appliquée quel
+  que soit le chemin emprunté.
+- Streamlit (`views/tab_database.py`) et API (`api/main.py`) :
+  import/modification/suppression/résolution d'alerte masqués ou
+  refusés (403) pour un membre lecture seule, en plus de la RLS (double
+  vérification, même convention que le reste de l'app).
+- Réglages de l'environnement (admin) : nouvelle section "👥 Membres de
+  cet environnement" pour changer le rôle d'un membre déjà présent ou
+  retirer son accès, sans écrire de SQL à chaque changement.
+
+**Limite connue, documentée, hors périmètre de ce chantier** : créer
+une toute première appartenance pour un nouveau compte reste manuel
+(aucun flux d'invitation n'existe pour personne aujourd'hui, pas
+seulement pour ce rôle). Une fois la ligne `memberships` créée une
+fois (dashboard Supabase + une ligne SQL), son rôle est modifiable
+directement dans l'app.
+
+**Vérifié** : migration testée sur le projet Supabase réel avant
+application (contraintes/policies confirmées, tous les membres
+existants étaient `org_admin` donc aucune régression pour eux).
+`pytest` : 400 passed (nouveaux tests : rôle lecture seule refusé sur
+bulk delete/update, patch, résolution d'alerte, import ; lecture
+toujours autorisée ; super-admin toujours en écriture même sans ligne
+`memberships` ; endpoints membres réservés aux admins), hors le flake
+e2e Playwright déjà documenté (environnement sandbox sans navigateur,
+CI l'installe et passe).
+
+**Pas encore vérifié** : rendu réel dans l'app avec un vrai compte
+partenaire en lecture seule (pas de tel compte existant à ce jour).

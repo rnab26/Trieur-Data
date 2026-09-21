@@ -20,9 +20,17 @@ import {
 // pour la banque (OOFF/RCUR/Exclus). L'historique, les doublons, les
 // impayés et le relevé bancaire sont un chantier à part (Cockpit,
 // "Historique, doublons, impayés et relevé bancaire").
+// Nom de l'environnement dans lequel cet écran doit TOUJOURS travailler --
+// verrouillé (pas de sélecteur) car les réglages Prélèvement (ICS, frais de
+// dossier...) sont stockés par environnement, et pouvoir en choisir un autre
+// ici menait à éditer silencieusement le mauvais jeu de réglages (signalé
+// par Raphaël, 2026-09-21).
+const PRELEVEMENT_ORG_NAME = 'Prélèvement'
+
 export function PrelevementScreen() {
   const { session, signOut } = useAuth()
-  const { orgs, orgsError, orgId, setOrgId } = useOrgs()
+  const { orgs, orgsError } = useOrgs()
+  const orgId = orgs?.find((o) => o.name === PRELEVEMENT_ORG_NAME)?.id ?? null
 
   const [rules, setRules] = useState<PrelevementRules | null>(null)
   const [rulesError, setRulesError] = useState<string | null>(null)
@@ -154,23 +162,16 @@ export function PrelevementScreen() {
       )}
 
       {orgs && orgs.length > 0 && (
-        <div className="mb-4 flex flex-wrap items-center gap-3">
-          <label htmlFor="prelevement-org-switcher" className="text-sm text-[var(--muted)]">
-            Environnement
-          </label>
-          <select
-            id="prelevement-org-switcher"
-            className="rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm"
-            value={orgId ?? ''}
-            onChange={(e) => setOrgId(e.target.value)}
-          >
-            {orgs.map((org) => (
-              <option key={org.id} value={org.id}>
-                {org.name}
-              </option>
-            ))}
-          </select>
-        </div>
+        <p className="mb-4 flex items-center gap-2 text-sm text-[var(--muted)]">
+          Environnement <span className="font-medium text-[var(--foreground)]">{PRELEVEMENT_ORG_NAME}</span>{' '}
+          (verrouillé -- les réglages ci-dessous sont propres à cet environnement)
+        </p>
+      )}
+
+      {orgs && orgs.length > 0 && !orgId && (
+        <p className="mb-4 text-sm text-[var(--danger)]">
+          Aucun accès à l'environnement "{PRELEVEMENT_ORG_NAME}" -- demande l'accès avant de continuer.
+        </p>
       )}
 
       {orgId && (

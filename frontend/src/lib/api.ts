@@ -2,6 +2,7 @@
 // jeton Supabase courant en "Authorization: Bearer <token>" -- voir
 // api/main.py:get_current_ctx pour le contrat côté serveur.
 
+import { clearAccountCache } from './useAccount'
 import { supabase } from './supabase'
 
 const API_URL = import.meta.env.VITE_API_URL
@@ -38,6 +39,13 @@ function handleUnauthorized() {
     // stockage indisponible (navigation privée...) -- la déconnexion reste
     // effective, seul le message explicatif sur l'écran de connexion sera absent.
   }
+  // Même nettoyage que AuthContext.signOut() (revue Copilot, PR #30) --
+  // ce chemin de déconnexion forcée appelle directement
+  // supabase.auth.signOut() sans passer par AuthContext, donc sans lui
+  // le cache compte (useAccount.ts) survivrait à une session
+  // expirée/révoquée et fuiterait vers le compte suivant connecté dans
+  // le même onglet.
+  clearAccountCache()
   void supabase.auth.signOut()
 }
 

@@ -101,9 +101,16 @@ export function useIsAdmin(ready: boolean) {
     let cancelled = false
     getMe()
       .then((data) => {
+        // Écrit le cache SEULEMENT si cet appel n'a pas été annulé
+        // (revue Copilot, PR #30) -- un getMe() lancé avant un
+        // démontage/déconnexion peut se résoudre APRÈS coup ; sans ce
+        // garde, il réinjecterait le statut admin de l'ancien compte
+        // dans le cache partagé, visible par un remontage suivant même
+        // pour un autre compte.
+        if (cancelled) return
         const value = Boolean(data.profile.is_super_admin)
         cachedIsAdmin = value
-        if (!cancelled) setIsAdmin(value)
+        setIsAdmin(value)
       })
       .catch(() => {
         // Pas bloquant : en cas d'échec, on reste en lecture seule /

@@ -3271,6 +3271,15 @@ PR -- si `test_master_columns_localstorage_fallback` recommence à
 échouer, ce n'est PAS le même problème (celui-ci est réellement
 corrigé, pas juste masqué).
 
+**Correction (2026-09-21, plus tard le même jour)** : **ce diagnostic
+était incomplet.** Le même test a re-échoué sur la PR #46 juste après.
+La vraie cause racine (un `st.rerun()` en trop dans `app.py`, pas
+seulement un délai de test trop court) est corrigée dans l'entrée
+"Correctif du flake e2e -- vraie cause" plus bas. Gardé cette entrée
+telle quelle (pas réécrite) pour que la trace de ce qui a été cru à
+tort reste visible -- voir plus bas pour l'explication complète et la
+vérification réelle.
+
 ---
 
 ## Prélèvement : montant par produit + suffixes IMMO/MYJURIS corrigés (2026-09-21, PR #37/#39/#41/#43)
@@ -3412,3 +3421,48 @@ justifier un chantier dédié si ça continue.
   MGS + Admin&Aide) n'ont jamais été observées ensemble dans les
   données disponibles -- restent traitées comme des mandats séparés
   par défaut ; à corriger si un cas réel montre le contraire.
+
+---
+
+## Correctif du flake e2e -- vraie cause cette fois (2026-09-21, PR #47)
+
+**Le diagnostic de la PR #42 (plus haut) était incomplet.** Le même
+test (`test_master_columns_localstorage_fallback`) a re-échoué sur la
+PR #46 juste après avoir été "corrigé". Root-cause repris de zéro
+plutôt que de re-contourner une 5e fois.
+
+**Pourquoi le diagnostic précédent avait l'air correct alors qu'il ne
+l'était pas** : testé localement avec le Chromium déjà présent dans
+l'environnement (une version assez ancienne) -- le bug ne s'y
+reproduisait jamais, quel que soit le nombre d'essais. Téléchargé le
+Chromium EXACT que la CI installe (Chrome for Testing 153.0.8010.12)
+pour refaire le diagnostic : le flake est immédiatement apparu, environ
+1 fois sur 2 (2 échecs sur 4 premiers essais).
+
+**Vraie cause racine** : dans `app.py`, la restauration depuis le
+localStorage appelait un `st.rerun()` explicite après avoir mis à jour
+`st.session_state`. Ce rerun entrait en collision avec le rerun **déjà
+déclenché automatiquement** par Streamlit quand la valeur du composant
+localStorage change -- selon l'ordre d'arrivée de ces deux reruns
+concurrents, la restauration pouvait se perdre. Ce n'était donc pas
+une histoire de délai de test trop court (le diagnostic de la PR #42),
+mais un vrai bug produit : en conditions réelles, un utilisateur dont
+le fichier serveur a été perdu (redémarrage de conteneur) pouvait ne
+PAS récupérer sa configuration depuis son navigateur, une fois sur
+deux.
+
+**Corrigé** : `st.rerun()` retiré. Inutile de toute façon -- la ligne
+juste avant (`st.session_state["master_cols_input"] = ...`) s'exécute
+avant que l'onglet ne rende ce widget dans le MÊME passage de script,
+donc Streamlit affiche déjà la valeur restaurée sans rerun
+supplémentaire à déclencher.
+
+**Vérifié, pas supposé** : avec le Chromium exact de la CI, 10
+exécutions consécutives du test réel après le correctif -- 10/10
+vertes, rapides (~21s à chaque fois, signe que la valeur est correcte
+dès le premier rendu, pas après plusieurs tentatives). `pytest` (hors
+e2e) : 436 passés, aucune régression.
+
+Cette fois, si `test_master_columns_localstorage_fallback` recommence
+à échouer, ce sera un problème différent -- la cause connue jusqu'ici
+est réellement éliminée, pas juste masquée une deuxième fois.

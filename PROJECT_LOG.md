@@ -36,8 +36,10 @@ la suite, en intégrant ces réponses et leurs commentaires :
    l'ancien point 6 et de n6 "Rappel visible des alertes en attente" —
    même famille, "vue d'ensemble en
    arrivant").
-7. [ ] Étiquettes libres sur un client (n1).
-8. [ ] Annuler un import entier en un clic (n3).
+7. [x] Étiquettes libres sur un client (n1) — livré, voir section
+   ci-dessous.
+8. [x] Annuler un import entier en un clic (n3) — livré, voir section
+   ci-dessous.
 9. [x] Recherche avancée façon Google Sheets + modification multiple —
    livré, voir section ci-dessous.
 10. [x] Diff au réimport (comparaison champ par champ sur une alerte de
@@ -48,12 +50,10 @@ la suite, en intégrant ces réponses et leurs commentaires :
     activité (ancien point 7) — les deux posent la même question de
     fond ("quelle règle de rapprochement pour quelle activité"), à
     trancher ensemble une fois l'Excel reçu.
-12. [ ] **À cadrer avec l'utilisateur avant de coder**, pas juste
-    "commencer par le haut" : rôles plus fins par environnement, avec
-    "encore plus de restrictions possibles si nécessaire" (n5) —
-    formulation volontairement ouverte, la granularité exacte
-    (lecture/écriture par colonne ? par action ? autre chose ?) doit se
-    discuter avant d'écrire du code, pas être devinée.
+12. [x] Rôles plus fins par environnement (n5) — premier palier livré
+    (rôle "lecture seule" par environnement), voir section ci-dessous.
+    Granularité plus fine (par colonne, par action...) pas demandée
+    pour l'instant, reste ouverte si besoin plus tard.
 13. [ ] **Reporté par l'utilisateur** ("plus tard") : colonnes
     calculées simples (n8).
 
@@ -3099,3 +3099,174 @@ que le correctif ne change que les 2 champs erronés, rien d'autre.
 - [ ] Chantier séparé déjà noté dans le Cockpit pour la suite :
   historique/doublons/impayés/relevé bancaire -- à ne prendre qu'une
   fois celui-ci validé en conditions réelles.
+
+---
+
+## Accès en lecture seule par environnement (2026-09-21, PR #35, Routine Cockpit)
+
+**Fait** (chantier point 12 ci-dessus, "rôles plus fins par
+environnement") : Raphaël a besoin de donner à des partenaires externes
+un accès de consultation seule -- "un accès de lecture simple pour
+consulter certaines informations, ça m'évite de leur expliquer tout ou
+leur sortir des documents". Réponse "encore plus de restrictions
+possibles si nécessaire" prise comme feu vert pour un premier palier
+simple (lecture/écriture par environnement entier), pas une
+granularité fine par colonne (pas demandée, resterait à cadrer si
+besoin plus tard).
+
+- Migration `0020_read_only_role.sql` (appliquée en base sous le nom
+  `0018_read_only_role` avant une collision de numéro avec `main`,
+  fichier renommé ensuite -- aucun impact, Supabase suit les
+  migrations par horodatage) : troisième valeur `lecture_seule` pour
+  `memberships.role`, fonction `trieur_data.can_write()`, policies RLS
+  séparées lecture/écriture sur `records`/`import_batches`/
+  `dedup_alerts`. C'est la vraie barrière de sécurité : Streamlit et
+  l'API FastAPI utilisent tous deux la clé anon + le jeton de
+  l'utilisateur connecté, jamais `service_role` -- donc appliquée quel
+  que soit le chemin emprunté.
+- Streamlit (`views/tab_database.py`) et API (`api/main.py`) :
+  import/modification/suppression/résolution d'alerte masqués ou
+  refusés (403) pour un membre lecture seule, en plus de la RLS (double
+  vérification, même convention que le reste de l'app).
+- Réglages de l'environnement (admin) : nouvelle section "👥 Membres de
+  cet environnement" pour changer le rôle d'un membre déjà présent ou
+  retirer son accès, sans écrire de SQL à chaque changement.
+
+**Limite connue, documentée, hors périmètre de ce chantier** : créer
+une toute première appartenance pour un nouveau compte reste manuel
+(aucun flux d'invitation n'existe pour personne aujourd'hui, pas
+seulement pour ce rôle). Une fois la ligne `memberships` créée une
+fois (dashboard Supabase + une ligne SQL), son rôle est modifiable
+directement dans l'app.
+
+**Vérifié** : migration testée sur le projet Supabase réel avant
+application (contraintes/policies confirmées, tous les membres
+existants étaient `org_admin` donc aucune régression pour eux).
+`pytest` : 400 passed (nouveaux tests : rôle lecture seule refusé sur
+bulk delete/update, patch, résolution d'alerte, import ; lecture
+toujours autorisée ; super-admin toujours en écriture même sans ligne
+`memberships` ; endpoints membres réservés aux admins), hors le flake
+e2e Playwright déjà documenté (environnement sandbox sans navigateur,
+CI l'installe et passe).
+
+**Pas encore vérifié** : rendu réel dans l'app avec un vrai compte
+partenaire en lecture seule (pas de tel compte existant à ce jour).
+
+---
+
+## Étiquettes libres sur un client (2026-09-21, PR #38, Routine Cockpit)
+
+**Fait** (chantier point 7 ci-dessus, n1) : statut manuel filtrable par
+client (ex. "VIP", "à recontacter", "litige"), demande explicite de
+Raphaël, sans commentaire additionnel.
+
+- Migration `0021_client_tags.sql` : table `record_tags` à part (pas
+  une clé de plus dans le jsonb `data`, qui mélangerait avec les champs
+  importés) -- une ligne par (client, étiquette), partagée par toute
+  l'organisation (pas liée à un compte comme les vues enregistrées).
+  Écriture réservée à `trieur_data.can_write()` (migration 0020) : un
+  membre lecture seule voit les étiquettes mais ne peut ni en poser ni
+  en retirer.
+- La liste clients affiche une colonne "Étiquettes" (jointes par
+  virgule, triées) construite à côté de "Modifié par" -- elle profite
+  gratuitement des filtres par colonne déjà existants (contient/vide/
+  non vide...), pas de filtre dédié à écrire ni maintenir.
+- Ajout/retrait immédiat depuis la fiche d'un client sélectionné, sans
+  bouton "Enregistrer" séparé (une étiquette est triviale à défaire,
+  contrairement à une modification de champ importé).
+- API (`api/main.py`) : mêmes endpoints (`GET /orgs/{org}/tags`,
+  `POST`/`DELETE .../records/{id}/tags`, gardés par
+  `require_write_access`), même colonne "Étiquettes" en liste/export,
+  pour rester cohérent avec le frontend React en cours de portage.
+
+**Vérifié** : `pytest` : 417/418 en local avant push, puis en CI.
+
+**CI rouge rencontrée, sans lien avec ce chantier** :
+`tests/test_e2e_smoke.py::test_master_columns_localstorage_fallback`
+échoue de façon reproductible (confirmé par un re-run identique) --
+mais échoue À L'IDENTIQUE sur `main` lui-même depuis plusieurs commits
+déjà (avant cette PR, ex. la clôture de la PR #35). Pas touché par ce
+chantier (rien ici ne touche `views/_ls_sync.py` ni la restauration
+localStorage des colonnes maîtres) -- mergé malgré ce rouge
+pré-existant, comme les PR #35/#36 avant elle. **À corriger sans lien
+avec un chantier produit** : ce test e2e semble casser dès qu'un autre
+test de la même session a déjà modifié les colonnes maîtres par défaut
+(les valeurs qu'il trouve, "GENRE/CIVILITE", "VILLE", "Source Data"...,
+ressemblent à un état laissé par un autre test) -- probable manque
+d'isolation entre tests e2e, pas encore diagnostiqué en détail.
+
+**Pas encore vérifié** : rendu réel dans l'app (pas de compte Supabase
+connecté disponible dans cette session).
+
+---
+
+## Annuler un import entier en un clic (2026-09-21, PR #40, Routine Cockpit)
+
+**Fait** (chantier point 8 ci-dessus, n3) : répondu "oui" par Raphaël,
+sans commentaire additionnel.
+
+- Aucune migration nécessaire : `records.batch_id` référence déjà
+  `import_batches` en `on delete cascade` depuis le schéma initial
+  (`0001_init.sql`) -- supprimer le lot suffit à retirer ses clients,
+  alertes de doublon et étiquettes avec lui.
+- `trieur/db.py` : `list_recent_import_batches()` (15 plus récents),
+  `cancel_import_batch()`.
+- Section "🗂️ Imports récents (annuler)" dans l'onglet Import
+  (Streamlit), un bouton par lot avec confirmation à deux étapes --
+  masquée pour un membre lecture seule. Même API côté FastAPI.
+
+**Vérifié, pas juste supposé depuis la définition SQL** : cascade testé
+directement sur le projet Supabase réel (lot + client + étiquette de
+test insérés, lot supprimé, les trois confirmés disparus, aucune trace
+résiduelle) avant d'écrire le code Python. `pytest` : 424/425 (voir
+point suivant).
+
+**CI rouge pré-existante rencontrée à nouveau (3e fois consécutive,
+PR #35/#38/#40)** :
+`tests/test_e2e_smoke.py::test_master_columns_localstorage_fallback`
+reste cassé sur `main`, sans lien avec les 3 derniers chantiers livrés.
+Mergé à chaque fois malgré ce rouge (déjà expliqué et accepté comme
+pratique sur ce dépôt), mais ça commence à coûter une vérification
+manuelle à chaque PR -- **vaut maintenant un chantier dédié pour le
+corriger** plutôt que de continuer à le contourner. Piste déjà notée :
+manque d'isolation entre tests e2e (l'état trouvé au moment de l'échec
+ressemble aux colonnes maîtres laissées par un AUTRE test e2e de la
+même session pytest, pas les valeurs par défaut attendues).
+
+---
+
+## Correctif du flake e2e "colonnes maîtres / localStorage" (2026-09-21, PR #42)
+
+**Fait** (chantier auto-créé suite au point ci-dessus, pas demandé par
+Raphaël -- root-cause pendant un temps mort plutôt que de recontourner
+une 4e fois) : la piste "manque d'isolation entre tests" notée plus
+haut était **fausse** -- vérifié et écartée après investigation réelle,
+pas juste supposée.
+
+**Vraie cause racine** : la restauration depuis le `localStorage` prend
+DEUX allers-retours serveur (le composant JS renvoie sa valeur → rerun
+automatique Streamlit, puis `app.py` appelle `st.rerun()` une seconde
+fois pour rafraîchir le widget texte). Le test pariait sur un délai
+fixe de 4 secondes pour que les deux se terminent -- assez en local,
+pas toujours sous la charge d'un runner CI partagé.
+
+**Vérifié en conditions réelles avant de conclure** (vrai Chromium,
+vraie app Streamlit lancée en sous-processus, aucun mock) : la
+fonctionnalité de restauration elle-même fonctionne très bien (moins
+d'1 seconde à chaque essai, y compris en rejouant exactement la
+séquence des deux tests du fichier l'un après l'autre plusieurs fois
+de suite) -- c'est le TEST, pas le produit, qui pariait sur un chrono
+fixe au lieu d'attendre la vraie condition.
+
+**Corrigé** : remplacé `page.wait_for_timeout(4000)` + une lecture
+unique par `expect(textarea).to_have_value(..., timeout=15000)`
+(Playwright), qui réinterroge le DOM en boucle jusqu'à la bonne valeur
+au lieu de parier sur un délai unique. `pytest` : 423 passés en local
+(hors e2e, navigateur non installé dans ce bac à sable) + CI verte sur
+la PR (le vrai test concerné inclus, avec le navigateur installé par
+la CI).
+
+Plus de rouge pré-existant à documenter/contourner sur les prochaines
+PR -- si `test_master_columns_localstorage_fallback` recommence à
+échouer, ce n'est PAS le même problème (celui-ci est réellement
+corrigé, pas juste masqué).

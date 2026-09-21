@@ -3,11 +3,26 @@
 : partagées entre l'affichage paginé de la liste clients et l'export
 complet -- un bug ici casse les deux en même temps."""
 from views.tab_database import (
+    _apply_tags,
     _build_rows,
+    _current_role,
     _filter_by_columns,
     _filter_by_search,
     _resolve_modifier_names,
 )
+
+
+def test_current_role_matches_org_id():
+    memberships = [
+        {"org_id": "org-1", "role": "lecture_seule"},
+        {"org_id": "org-2", "role": "member"},
+    ]
+    assert _current_role(memberships, "org-1") == "lecture_seule"
+    assert _current_role(memberships, "org-2") == "member"
+
+
+def test_current_role_none_when_no_membership():
+    assert _current_role([], "org-1") is None
 
 
 def test_build_rows_master_columns_first_then_extras():
@@ -205,3 +220,69 @@ def test_diff_rows_does_not_treat_zero_as_equal_to_empty():
     from views.tab_database import diff_rows
     rows = diff_rows({"MONTANT": 0}, {"MONTANT": None})
     assert rows[0]["Différent"] == "⚠️"
+
+
+class _FakeClientForTags:
+    """Faux client minimal pour _apply_tags : seul get_record_tags_map
+    (trieur.db) l'utilise, via .postgrest.schema(...).table("record_tags")
+    .select(...).in_(...).execute(). Ids de test dédiés ("tags-testX")
+    pour ne jamais entrer en collision avec le cache partagé d'un autre
+    fichier de test (même piège déjà rencontré avec get_profiles_map)."""
+
+    class _Table:
+        def __init__(self, rows):
+            self._rows = rows
+            self._ids = None
+
+        def select(self, *_a, **_k):
+            return self
+
+        def in_(self, _field, ids):
+            self._ids = set(ids)
+            return self
+
+        def execute(self):
+            from types import SimpleNamespace
+            return SimpleNamespace(data=[r for r in self._rows if r["record_id"] in self._ids])
+
+    class _Postgrest:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def schema(self, _name):
+            return self
+
+        def table(self, _name):
+            return _FakeClientForTags._Table(self._rows)
+
+    def __init__(self, rows):
+        self.postgrest = self._Postgrest(rows)
+
+
+def test_apply_tags_joins_sorted_comma_separated():
+    from trieur.db import get_record_tags_map
+
+    get_record_tags_map.clear()
+    client = _FakeClientForTags([
+        {"record_id": "tags-test-r1", "tag": "VIP"},
+        {"record_id": "tags-test-r1", "tag": "à recontacter"},
+    ])
+    rows = [{"_id": "tags-test-r1"}]
+
+    result = _apply_tags(client, rows)
+
+    assert result[0]["Étiquettes"] == "VIP, à recontacter"
+    get_record_tags_map.clear()
+
+
+def test_apply_tags_no_tags_is_empty_string():
+    from trieur.db import get_record_tags_map
+
+    get_record_tags_map.clear()
+    client = _FakeClientForTags([])
+    rows = [{"_id": "tags-test-r2"}]
+
+    result = _apply_tags(client, rows)
+
+    assert result[0]["Étiquettes"] == ""
+    get_record_tags_map.clear()

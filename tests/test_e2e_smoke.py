@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("playwright")
-from playwright.sync_api import sync_playwright  # noqa: E402
+from playwright.sync_api import expect, sync_playwright  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_CSV = Path(__file__).resolve().parent / "fixtures" / "sample_leads.csv"
@@ -191,12 +191,20 @@ def test_master_columns_localstorage_fallback(streamlit_server):
             # colonnes par defaut, mais le navigateur doit imposer sa version.
             page.goto(streamlit_server, wait_until="load", timeout=30000)
             page.get_by_role("tab").first.wait_for(state="visible", timeout=30000)
-            page.wait_for_timeout(4000)
 
-            textarea_value = page.locator("textarea").first.input_value()
-            assert textarea_value.splitlines() == custom_cols, (
-                f"colonnes maitres non restaurees depuis le localStorage : {textarea_value!r}"
-            )
+            # La restauration prend DEUX aller-retours serveur (le composant
+            # localStorage renvoie sa valeur -> rerun automatique, puis
+            # app.py appelle st.rerun() une deuxieme fois pour rafraichir le
+            # widget texte) : un delai fixe (4s) passait en local mais
+            # cassait par intermittence en CI des que le runner etait plus
+            # lent que d'habitude (confirme flaky sur PR #35/#38/#40, jamais
+            # reproduit en local malgre plusieurs essais). `expect(...)`
+            # reinterroge le DOM en boucle jusqu'a la vraie valeur au lieu de
+            # parier sur un delai unique -- attend moins quand c'est rapide,
+            # plus longtemps quand c'est lent, sans jamais durer plus que le
+            # temps reellement necessaire.
+            textarea = page.locator("textarea").first
+            expect(textarea).to_have_value("\n".join(custom_cols), timeout=15000)
 
             # La restauration doit aussi avoir ete re-ecrite sur le fichier
             # serveur, pour survivre aux reruns suivants de cette session.

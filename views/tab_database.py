@@ -21,7 +21,11 @@ import streamlit as st
 
 from trieur.db import (
     LIST_PAGE_SIZE,
+    ROLE_LABELS,
     add_org_master_columns,
+    add_record_tag,
+    can_write_org,
+    cancel_import_batch,
     count_records,
     delete_record,
     delete_saved_view,
@@ -29,14 +33,21 @@ from trieur.db import (
     get_org_master_columns,
     get_profiles_map,
     get_record,
+    get_record_tags_map,
     import_dataframe,
     list_all_records,
     list_dedup_alerts,
+    list_org_memberships,
+    list_org_tags,
+    list_recent_import_batches,
     list_records,
     list_saved_views,
+    remove_membership,
+    remove_record_tag,
     resolve_dedup_alert,
     save_org_master_columns,
     save_saved_view,
+    update_membership_role,
     update_record,
 )
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
@@ -47,6 +58,16 @@ from views._ui import (
     confirm_delete_button,
     render_unknown_columns_prompt,
 )
+
+
+def _current_role(memberships, org_id):
+    """Rôle du compte connecté sur cet environnement précis -- None si
+    aucune ligne memberships ne correspond (super-admin sans appartenance
+    explicite, cas normal). Pure, testée sans Streamlit."""
+    for m in memberships:
+        if m["org_id"] == org_id:
+            return m.get("role")
+    return None
 
 
 def render():
@@ -81,6 +102,13 @@ def render():
         key="db_org_select",
     )
 
+    # Accès en lecture seule (migration 0018) : la vraie barrière de
+    # sécurité est côté RLS (trieur_data.can_write) -- ceci n'adapte que
+    # l'interface, pour ne jamais proposer un bouton qui échouerait.
+    can_write = can_write_org(_current_role(ctx["memberships"], org_id), is_admin)
+    if not can_write:
+        st.caption("👁️ Accès en lecture seule à cet environnement : consultation uniquement.")
+
     # Calcules UNE fois par rendu, partages entre le tableau de bord et
     # les sections qui en ont deja besoin plus bas -- sans ca, le total
     # de clients et les alertes en attente etaient chacun refetches deux
@@ -89,10 +117,11 @@ def render():
     alerts = list_dedup_alerts(client, org_id, status="pending")
 
     _render_dashboard(client, org_id, total, alerts)
-    _render_alerts(client, org_id, user, alerts)
-    _render_client_list(client, org_id, org_labels[org_id], user, total)
-    _render_import(client, org_id, user, is_admin)
+    _render_alerts(client, org_id, user, alerts, can_write)
+    _render_client_list(client, org_id, org_labels[org_id], user, total, can_write)
+    _render_import(client, org_id, user, is_admin, can_write)
     _render_settings(client, org_id, is_admin)
+    _render_members(client, org_id, is_admin)
 
 
 def _render_dashboard(client, org_id, total, alerts):
@@ -144,7 +173,7 @@ def diff_rows(new_data, matched_data):
     return rows
 
 
-def _render_alerts(client, org_id, user, alerts):
+def _render_alerts(client, org_id, user, alerts, can_write):
     if not alerts:
         return
 
@@ -156,15 +185,18 @@ def _render_alerts(client, org_id, user, alerts):
                 use_container_width=True, hide_index=True,
             )
             st.caption(alert.get("note") or "")
-            col_dup, col_ok = st.columns(2)
-            with col_dup:
-                if st.button("C'est un doublon", key=f"dup_{alert['id']}"):
-                    resolve_dedup_alert(client, alert["id"], "confirmed_duplicate", user.id)
-                    st.rerun()
-            with col_ok:
-                if st.button("Ce sont 2 personnes différentes", key=f"ok_{alert['id']}"):
-                    resolve_dedup_alert(client, alert["id"], "confirmed_different", user.id)
-                    st.rerun()
+            if can_write:
+                col_dup, col_ok = st.columns(2)
+                with col_dup:
+                    if st.button("C'est un doublon", key=f"dup_{alert['id']}"):
+                        resolve_dedup_alert(client, alert["id"], "confirmed_duplicate", user.id)
+                        st.rerun()
+                with col_ok:
+                    if st.button("Ce sont 2 personnes différentes", key=f"ok_{alert['id']}"):
+                        resolve_dedup_alert(client, alert["id"], "confirmed_different", user.id)
+                        st.rerun()
+            else:
+                st.caption("🔒 Résolution réservée aux membres avec droit d'écriture.")
     st.divider()
 
 
@@ -225,6 +257,19 @@ def _resolve_modifier_names(client, rows):
         else:
             profile = profiles.get(uid)
             r["Modifié par"] = (profile or {}).get("full_name") or "quelqu'un"
+    return rows
+
+
+def _apply_tags(client, rows):
+    """Ajoute une colonne "Étiquettes" (jointes par virgule, triées) à
+    chaque ligne -- même principe que _resolve_modifier_names (appel
+    réseau séparé de _build_rows, qui reste pur). Une fois posée, cette
+    colonne profite gratuitement des filtres par colonne existants
+    (contient/vide/non vide...) : pas besoin d'un filtre dédié."""
+    ids = tuple(r["_id"] for r in rows)
+    tags_map = get_record_tags_map(client, ids)
+    for r in rows:
+        r["Étiquettes"] = ", ".join(tags_map.get(r["_id"], []))
     return rows
 
 
@@ -292,7 +337,7 @@ def _render_export(client, org_id, org_name, total, search, col_filters, all_col
             # sinon un fichier plus ancien avec une colonne non encore
             # decouverte perdrait cette donnee en silence a l'export.
             all_records = list_all_records(client, org_id)
-            rows = _resolve_modifier_names(client, _build_rows(all_records, master_cols))
+            rows = _apply_tags(client, _resolve_modifier_names(client, _build_rows(all_records, master_cols)))
             rows = _filter_by_columns(_filter_by_search(rows, search), col_filters)
             full_cols = []
             for row in rows:
@@ -427,6 +472,56 @@ def _render_edit_form(client, org_id, record_id, master_cols, user):
                 st.error("Ce client n'existe plus (supprimé entre-temps) : rien n'a été enregistré.")
 
 
+def _render_tags_editor(client, org_id, record_id, user, can_write):
+    """Étiquettes libres sur ce client (VIP, à recontacter...) -- ajout/
+    retrait immédiat, sans bouton "Enregistrer" séparé : contrairement
+    aux champs importés (_render_edit_form), une étiquette n'a pas
+    besoin d'une étape de confirmation groupée, et reste triviale à
+    défaire (un client sur "retirer" ou reposer l'étiquette). Visible en
+    lecture même pour un membre lecture seule (migration 0020) --
+    seuls l'ajout et le retrait sont réservés à l'écriture, comme la RLS
+    `trieur_data.can_write()` sur `record_tags`."""
+    current_tags = get_record_tags_map(client, (record_id,)).get(record_id, [])
+
+    st.caption("🏷️ Étiquettes")
+    if not current_tags:
+        st.caption("Aucune étiquette pour l'instant.")
+    elif not can_write:
+        st.write(", ".join(current_tags))
+    else:
+        tag_cols = st.columns(len(current_tags))
+        for tcol, tag in zip(tag_cols, current_tags):
+            with tcol:
+                if st.button(f"{tag} ✕", key=f"tag_del_{org_id}_{record_id}_{tag}"):
+                    remove_record_tag(client, record_id, tag)
+                    invalidate_client_list_cache(org_id)
+                    st.rerun()
+
+    if not can_write:
+        return
+
+    known_tags = [t for t in list_org_tags(client, org_id) if t not in current_tags]
+    c_pick, c_new, c_add = st.columns([2, 2, 1])
+    with c_pick:
+        picked = st.selectbox(
+            "Étiquette existante", options=["(choisir)"] + known_tags,
+            key=f"tag_pick_{org_id}_{record_id}", label_visibility="collapsed",
+        )
+    with c_new:
+        new_tag = st.text_input(
+            "Nouvelle étiquette", key=f"tag_new_{org_id}_{record_id}",
+            label_visibility="collapsed", placeholder="Ou une nouvelle étiquette",
+        )
+    with c_add:
+        if st.button("➕", key=f"tag_add_{org_id}_{record_id}"):
+            tag_to_add = new_tag.strip() or (picked if picked != "(choisir)" else "")
+            if tag_to_add:
+                add_record_tag(client, org_id, record_id, tag_to_add, user.id)
+                invalidate_client_list_cache(org_id)
+                clear_stale_widgets(f"tag_new_{org_id}_{record_id}")
+                st.rerun()
+
+
 def _render_saved_views(client, org_id, user, search, all_cols, visible_cols):
     """Enregistrer/rappeler une combinaison recherche + filtres par
     colonne + colonnes affichées, sous un nom -- même principe que les
@@ -479,7 +574,7 @@ def _render_saved_views(client, org_id, user, search, all_cols, visible_cols):
                 st.rerun()
 
 
-def _render_client_list(client, org_id, org_name, user, total):
+def _render_client_list(client, org_id, org_name, user, total, can_write):
     st.markdown(f"##### Clients importés ({total})")
 
     if total == 0:
@@ -523,7 +618,7 @@ def _render_client_list(client, org_id, org_name, user, total):
     search = st.text_input("🔎 Rechercher (nom, IBAN, email...)", key=f"search_{org_id}")
     master_cols = get_org_master_columns(client, org_id)
 
-    all_rows = _resolve_modifier_names(client, _build_rows(records, master_cols))
+    all_rows = _apply_tags(client, _resolve_modifier_names(client, _build_rows(records, master_cols)))
 
     # Colonnes connues sur ce lot charge -- calculees AVANT la recherche
     # texte et les filtres, pour que la liste de colonnes (et donc la
@@ -604,23 +699,30 @@ def _render_client_list(client, org_id, org_name, user, total):
         if selected_rows:
             selected_ids = [row_ids[i] for i in selected_rows]
             st.write(f"**{len(selected_ids)} ligne(s) sélectionnée(s).**")
-            if confirm_delete_button(f"🗑️ Supprimer la sélection ({len(selected_ids)})", key=f"bulk_delete_{org_id}"):
-                for rid in selected_ids:
-                    delete_record(client, rid)
-                st.success(f"{len(selected_ids)} client(s) supprimé(s).")
-                invalidate_client_list_cache(org_id)
-                # `selection_key` lui-meme : les positions selectionnees
-                # (ex: [7,8,9]) ne correspondent plus a rien apres la
-                # suppression -- sans ce nettoyage, IndexError au prochain
-                # rendu (row_ids plus court) ou pire, une selection
-                # fantome sur d'autres clients (voir clear_stale_widgets).
-                clear_stale_widgets(selection_key, f"_confirm_pending_bulk_delete_{org_id}")
-                st.rerun()
 
             if len(selected_ids) == 1:
-                _render_edit_form(client, org_id, selected_ids[0], master_cols, user)
-            elif len(selected_ids) >= 2:
-                _render_bulk_edit_form(client, org_id, selected_ids, master_cols, user, selection_key)
+                _render_tags_editor(client, org_id, selected_ids[0], user, can_write)
+
+            if not can_write:
+                st.caption("🔒 Modification et suppression réservées aux membres avec droit d'écriture.")
+            else:
+                if confirm_delete_button(f"🗑️ Supprimer la sélection ({len(selected_ids)})", key=f"bulk_delete_{org_id}"):
+                    for rid in selected_ids:
+                        delete_record(client, rid)
+                    st.success(f"{len(selected_ids)} client(s) supprimé(s).")
+                    invalidate_client_list_cache(org_id)
+                    # `selection_key` lui-meme : les positions selectionnees
+                    # (ex: [7,8,9]) ne correspondent plus a rien apres la
+                    # suppression -- sans ce nettoyage, IndexError au prochain
+                    # rendu (row_ids plus court) ou pire, une selection
+                    # fantome sur d'autres clients (voir clear_stale_widgets).
+                    clear_stale_widgets(selection_key, f"_confirm_pending_bulk_delete_{org_id}")
+                    st.rerun()
+
+                if len(selected_ids) == 1:
+                    _render_edit_form(client, org_id, selected_ids[0], master_cols, user)
+                elif len(selected_ids) >= 2:
+                    _render_bulk_edit_form(client, org_id, selected_ids, master_cols, user, selection_key)
 
     if len(records) < total:
         remaining = total - len(records)
@@ -634,8 +736,11 @@ def _render_client_list(client, org_id, org_name, user, total):
     st.divider()
 
 
-def _render_import(client, org_id, user, is_admin):
+def _render_import(client, org_id, user, is_admin, can_write):
     st.markdown("##### Importer un fichier dans la base")
+    if not can_write:
+        st.caption("🔒 Import réservé aux membres avec droit d'écriture sur cet environnement.")
+        return
     st.caption(
         "Si tu indiques une colonne IBAN ci-dessous, chaque ligne est comparée "
         "à TOUT l'historique déjà en base pour cet environnement (pas juste ce "
@@ -678,6 +783,37 @@ def _render_import(client, org_id, user, is_admin):
         st.success(f"{n_imported} lignes importées, {n_alerts} alerte(s) de doublon IBAN créée(s).")
         invalidate_client_list_cache(org_id)
         st.rerun()
+
+    _render_import_history(client, org_id)
+
+
+def _render_import_history(client, org_id):
+    """Annuler un import entier en un clic -- retire toutes les lignes
+    d'un lot récent (et leurs alertes/étiquettes, en cascade -- voir
+    trieur/db.py:cancel_import_batch), sans repasser par une suppression
+    ligne par ligne. Volontairement limité aux imports RÉCENTS (voir
+    RECENT_IMPORT_BATCHES_LIMIT), pas un historique complet illimité."""
+    batches = list_recent_import_batches(client, org_id)
+    if not batches:
+        return
+
+    with st.expander("🗂️ Imports récents (annuler)"):
+        st.caption(
+            "Annuler un import retire d'un coup TOUTES les lignes qu'il a "
+            "ajoutées à cet environnement, ainsi que leurs alertes de "
+            "doublon et étiquettes -- une action irréversible."
+        )
+        for batch in batches:
+            c_name, c_del = st.columns([4, 1.3])
+            with c_name:
+                st.write(f"{batch['source_filename']} — {batch['row_count']} ligne(s), le {batch['imported_at']}")
+            with c_del:
+                if confirm_delete_button("🗑️ Annuler", key=f"cancel_import_{org_id}_{batch['id']}"):
+                    cancel_import_batch(client, batch["id"])
+                    st.success(f"Import « {batch['source_filename']} » annulé.")
+                    invalidate_client_list_cache(org_id)
+                    clear_stale_widgets(f"_confirm_pending_cancel_import_{org_id}_{batch['id']}")
+                    st.rerun()
 
 
 def _render_settings(client, org_id, is_admin):
@@ -737,3 +873,49 @@ def _render_settings(client, org_id, is_admin):
                 cols.append(name)
                 save_org_master_columns(client, org_id, cols)
                 st.rerun()
+
+
+def _render_members(client, org_id, is_admin):
+    """Rôles des membres déjà présents sur cet environnement (migration
+    0018) -- réservé aux administrateurs, même gate que les colonnes
+    maîtres. Ajouter un tout PREMIER accès pour un nouveau compte reste
+    manuel (aucun flux d'invitation n'existe pour personne aujourd'hui,
+    pas seulement pour ce rôle) : demande-le si besoin, la ligne
+    memberships est créée une fois, puis le rôle est modifiable ici sans
+    repasser par une demande."""
+    if not is_admin:
+        return
+
+    with st.expander("👥 Membres de cet environnement"):
+        st.caption(
+            "Change le rôle d'un membre déjà présent, ou retire son accès à "
+            "cet environnement. « Lecture seule » : consultation uniquement, "
+            "aucun import/modification/suppression possible."
+        )
+        members = list_org_memberships(client, org_id)
+        if not members:
+            st.caption("Aucun membre pour l'instant.")
+            return
+
+        default_options = ["member", "lecture_seule"]
+        for m in members:
+            options = sorted({*default_options, m["role"]})
+            c_name, c_role, c_del = st.columns([3, 2.5, 1.3])
+            with c_name:
+                st.write(m.get("full_name") or "(nom inconnu)")
+            with c_role:
+                new_role = st.selectbox(
+                    "Rôle", options=options, index=options.index(m["role"]),
+                    format_func=lambda r: ROLE_LABELS.get(r, r),
+                    key=f"member_role_{org_id}_{m['user_id']}",
+                    label_visibility="collapsed",
+                )
+                if new_role != m["role"]:
+                    update_membership_role(client, m["user_id"], org_id, new_role)
+                    st.success("Rôle mis à jour.")
+                    st.rerun()
+            with c_del:
+                if confirm_delete_button("Retirer", key=f"member_del_{org_id}_{m['user_id']}"):
+                    remove_membership(client, m["user_id"], org_id)
+                    st.success("Accès retiré.")
+                    st.rerun()

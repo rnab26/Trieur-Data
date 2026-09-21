@@ -87,6 +87,52 @@ def list_organizations(_client: Client) -> list[dict]:
     return res.data or []
 
 
+WRITE_ROLES = ("member", "org_admin")
+ROLE_LABELS = {"member": "Membre", "org_admin": "Administrateur", "lecture_seule": "Lecture seule"}
+
+
+def can_write_org(role: str | None, is_super_admin: bool) -> bool:
+    """Un membre 'lecture_seule' peut consulter mais jamais écrire (import,
+    modification, suppression, résolution d'alerte) -- voir migration 0018,
+    `trieur_data.can_write()` (même règle appliquée côté RLS, la vraie
+    barrière de sécurité ; ceci ne sert qu'à adapter l'interface). Un
+    super-admin ou un membre sans rôle reconnu (donnée future) garde
+    l'accès en écriture par défaut."""
+    return is_super_admin or role in WRITE_ROLES or role is None
+
+
+def list_org_memberships(client: Client, org_id: str) -> list[dict]:
+    """Membres d'un environnement (admin uniquement, voir migration 0018 --
+    la RLS `memberships_select` ne renvoie toutes les lignes qu'à un
+    super-admin). Noms résolus séparément via get_profiles_map (pas de
+    relation PostgREST directe entre memberships et profiles -- toutes
+    deux référencent auth.users, mais pas l'une l'autre)."""
+    res = (
+        _td(client, "memberships")
+        .select("user_id, role, created_at")
+        .eq("org_id", org_id)
+        .order("created_at")
+        .execute()
+    )
+    rows = res.data or []
+    profiles = get_profiles_map(client, tuple(r["user_id"] for r in rows))
+    for r in rows:
+        r["full_name"] = (profiles.get(r["user_id"]) or {}).get("full_name")
+    return rows
+
+
+def update_membership_role(client: Client, user_id: str, org_id: str, role: str) -> None:
+    _td(client, "memberships").update({"role": role}).eq("user_id", user_id).eq("org_id", org_id).execute()
+    get_my_memberships.clear()
+
+
+def remove_membership(client: Client, user_id: str, org_id: str) -> None:
+    """Retire l'accès d'un membre à cet environnement -- ne supprime pas
+    son compte ni son profil, seulement cette appartenance."""
+    _td(client, "memberships").delete().eq("user_id", user_id).eq("org_id", org_id).execute()
+    get_my_memberships.clear()
+
+
 def list_chantiers(client: Client, org_id: str) -> list[dict]:
     res = (
         _td(client, "chantiers")
@@ -353,6 +399,56 @@ def add_org_master_columns(client: Client, org_id: str, new_cols: list[str]) -> 
 
 
 # ---------------------------------------------------------------
+# Étiquettes libres sur un client (ex: VIP, à recontacter) -- table à
+# part, indépendante des colonnes importées (voir migration 0021).
+# Partagées par l'organisation entière (pas liées à un compte, contrairement
+# aux vues enregistrées ci-dessous) : une étiquette posée par quelqu'un
+# doit être visible par tous les membres de cet environnement.
+# ---------------------------------------------------------------
+
+@st.cache_data(ttl=30, show_spinner=False)
+def list_org_tags(_client: Client, org_id: str) -> list[str]:
+    """Étiquettes déjà utilisées dans cet environnement, triées -- sert à
+    proposer les étiquettes existantes plutôt que de forcer à retaper un
+    nom déjà utilisé ailleurs (évite "VIP" et "vip" en doublon)."""
+    res = _td(_client, "record_tags").select("tag").eq("org_id", org_id).execute()
+    return sorted({r["tag"] for r in (res.data or [])})
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_record_tags_map(_client: Client, record_ids: tuple[str, ...]) -> dict[str, list[str]]:
+    """Étiquettes par client, pour affichage/filtre dans la liste --
+    même principe que get_profiles_map (un seul appel réseau pour tout
+    le lot affiché, jamais un appel par ligne)."""
+    ids = tuple(sorted({i for i in record_ids if i}))
+    if not ids:
+        return {}
+    res = _td(_client, "record_tags").select("record_id, tag").in_("record_id", ids).execute()
+    tags_by_record: dict[str, list[str]] = {}
+    for r in res.data or []:
+        tags_by_record.setdefault(r["record_id"], []).append(r["tag"])
+    for tags in tags_by_record.values():
+        tags.sort()
+    return tags_by_record
+
+
+def add_record_tag(client: Client, org_id: str, record_id: str, tag: str, user_id: str) -> None:
+    """`upsert` sur (record_id, tag) -- reposer une étiquette déjà présente
+    ne crée jamais de doublon (contrainte unique, migration 0021)."""
+    _td(client, "record_tags").upsert(
+        {"org_id": org_id, "record_id": record_id, "tag": tag, "created_by": user_id},
+        on_conflict="record_id,tag",
+    ).execute()
+    list_org_tags.clear()
+    get_record_tags_map.clear()
+
+
+def remove_record_tag(client: Client, record_id: str, tag: str) -> None:
+    _td(client, "record_tags").delete().eq("record_id", record_id).eq("tag", tag).execute()
+    get_record_tags_map.clear()
+
+
+# ---------------------------------------------------------------
 # Vues enregistrées, nommées (recherche + filtres par colonne + colonnes
 # affichées de la Base de données) -- liées au compte, comme les jeux de
 # colonnes maîtres (voir user_master_column_sets), pas à l'organisation.
@@ -430,6 +526,33 @@ def get_last_import_batch(client: Client, org_id: str) -> dict | None:
         .execute()
     )
     return res.data[0] if res.data else None
+
+
+RECENT_IMPORT_BATCHES_LIMIT = 15
+
+
+def list_recent_import_batches(client: Client, org_id: str) -> list[dict]:
+    """Imports les plus récents de cet environnement -- pour proposer
+    d'annuler un import entier (voir cancel_import_batch), pas un
+    historique complet illimité."""
+    res = (
+        _td(client, "import_batches")
+        .select("id, source_filename, imported_at, row_count")
+        .eq("org_id", org_id)
+        .order("imported_at", desc=True)
+        .limit(RECENT_IMPORT_BATCHES_LIMIT)
+        .execute()
+    )
+    return res.data or []
+
+
+def cancel_import_batch(client: Client, batch_id: str) -> None:
+    """Annule un import entier : supprime le lot -- les clients importés
+    par ce lot (records.batch_id, on delete cascade -- migration 0001)
+    partent avec, ainsi que leurs alertes de doublon et étiquettes
+    (elles aussi en cascade depuis records). Un seul geste, pas une
+    suppression ligne par ligne côté application."""
+    _td(client, "import_batches").delete().eq("id", batch_id).execute()
 
 
 def find_iban_matches(client: Client, org_id: str, iban: str) -> list[dict]:

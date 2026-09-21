@@ -36,6 +36,7 @@ from trieur.db import (
     add_org_master_columns,
     adjust_pipeline_row_count,
     append_pipeline_rows,
+    can_write_org,
     claim_pipeline_session_for_mapping,
     count_records,
     create_chantier,
@@ -64,12 +65,14 @@ from trieur.db import (
     list_chantier_todos,
     list_chantiers,
     list_dedup_alerts,
+    list_org_memberships,
     list_pipeline_rows,
     list_pipeline_rows_for_sheet,
     list_records,
     list_saved_views,
     list_sections,
     list_user_column_sets,
+    remove_membership,
     resolve_dedup_alert,
     save_org_master_columns,
     save_prelevement_rules,
@@ -80,6 +83,7 @@ from trieur.db import (
     try_lock_pipeline_dedupe,
     unlock_pipeline_dedupe,
     update_chantier_status,
+    update_membership_role,
     update_pipeline_row_data,
     update_record,
 )
@@ -217,6 +221,27 @@ def require_cockpit_access(ctx: AuthCtx = Depends(require_org_access)) -> AuthCt
     que views/tab_cockpit.py:render()."""
     if not ctx.profile.get("is_super_admin"):
         raise HTTPException(status_code=403, detail="Le Cockpit est réservé aux administrateurs.")
+    return ctx
+
+
+def require_write_access(org_id: str, ctx: AuthCtx = Depends(require_org_access)) -> AuthCtx:
+    """Comme require_org_access, mais refuse en plus un membre
+    'lecture_seule' (migration 0018) -- même règle que
+    views/tab_database.py:can_write_org, en plus de la RLS Supabase
+    (trieur_data.can_write) qui reste la vraie barrière de sécurité."""
+    role = next((m["role"] for m in ctx.memberships if m["org_id"] == org_id), None)
+    if not can_write_org(role, ctx.profile.get("is_super_admin")):
+        raise HTTPException(
+            status_code=403, detail="Accès en lecture seule à cet environnement : action non autorisée.",
+        )
+    return ctx
+
+
+def require_admin_access(ctx: AuthCtx = Depends(require_org_access)) -> AuthCtx:
+    """Réservé aux administrateurs -- même règle que la gestion des
+    colonnes maîtres (POST .../master-columns)."""
+    if not ctx.profile.get("is_super_admin"):
+        raise HTTPException(status_code=403, detail="Réservé aux administrateurs.")
     return ctx
 
 
@@ -446,7 +471,7 @@ class BulkDelete(BaseModel):
 
 
 @app.delete("/orgs/{org_id}/records")
-def bulk_delete_records(org_id: str, body: BulkDelete, ctx: AuthCtx = Depends(require_org_access)):
+def bulk_delete_records(org_id: str, body: BulkDelete, ctx: AuthCtx = Depends(require_write_access)):
     """Suppression groupée -- même logique que la sélection multiple de
     views/tab_database.py:_render_client_list (boucle sur delete_record,
     pas de nouvelle requête SQL en masse : une seule fonction de
@@ -470,7 +495,7 @@ class BulkUpdate(BaseModel):
 
 
 @app.patch("/orgs/{org_id}/records/bulk")
-def bulk_update_records(org_id: str, body: BulkUpdate, ctx: AuthCtx = Depends(require_org_access)):
+def bulk_update_records(org_id: str, body: BulkUpdate, ctx: AuthCtx = Depends(require_write_access)):
     """Modification en masse d'UN SEUL champ pour toute la sélection --
     même limite que côté Streamlit (pas d'édition multi-champs en masse :
     des valeurs différentes par ligne n'ont pas de "nouvelle valeur"
@@ -519,7 +544,7 @@ class DedupAlertResolve(BaseModel):
 
 @app.post("/orgs/{org_id}/dedup-alerts/{alert_id}/resolve")
 def resolve_dedup_alert_endpoint(
-    org_id: str, alert_id: str, body: DedupAlertResolve, ctx: AuthCtx = Depends(require_org_access),
+    org_id: str, alert_id: str, body: DedupAlertResolve, ctx: AuthCtx = Depends(require_write_access),
 ):
     if body.status not in ("confirmed_duplicate", "confirmed_different"):
         raise HTTPException(status_code=400, detail="Statut invalide.")
@@ -622,7 +647,7 @@ class RecordUpdate(BaseModel):
 
 
 @app.patch("/orgs/{org_id}/records/{record_id}")
-def patch_org_record(org_id: str, record_id: str, body: RecordUpdate, ctx: AuthCtx = Depends(require_org_access)):
+def patch_org_record(org_id: str, record_id: str, body: RecordUpdate, ctx: AuthCtx = Depends(require_write_access)):
     ok = update_record(ctx.client, record_id, body.data, ctx.user.id)
     if not ok:
         raise HTTPException(status_code=404, detail="Client introuvable (déjà supprimé ?).")
@@ -692,6 +717,12 @@ async def import_records(
             "preview_rows": preview.to_dict(orient="records"),
             "row_count": len(df),
         }
+
+    role = next((m["role"] for m in ctx.memberships if m["org_id"] == org_id), None)
+    if not can_write_org(role, ctx.profile.get("is_super_admin")):
+        raise HTTPException(
+            status_code=403, detail="Accès en lecture seule à cet environnement : import non autorisé.",
+        )
 
     added: list[str] = []
     if unknown and add_unknown_columns:
@@ -1978,6 +2009,40 @@ def set_master_columns(org_id: str, body: MasterColumnsUpdate, ctx: AuthCtx = De
         raise HTTPException(status_code=403, detail="Réservé aux administrateurs.")
     save_org_master_columns(ctx.client, org_id, body.columns)
     return {"columns": body.columns}
+
+
+# ---------------------------------------------------------------
+# Membres (rôles par environnement, migration 0018) -- réservé aux
+# administrateurs, mirroir de views/tab_database.py:_render_members.
+# Ajouter un tout premier accès pour un nouveau compte reste manuel
+# (aucun flux d'invitation, hors périmètre de ce chantier) : ces routes
+# ne permettent que de changer le rôle d'un membre déjà présent, ou de
+# retirer son accès.
+# ---------------------------------------------------------------
+
+@app.get("/orgs/{org_id}/members")
+def get_org_members(org_id: str, ctx: AuthCtx = Depends(require_admin_access)):
+    return list_org_memberships(ctx.client, org_id)
+
+
+class MembershipRoleUpdate(BaseModel):
+    role: str
+
+
+@app.patch("/orgs/{org_id}/members/{user_id}")
+def patch_org_member(
+    org_id: str, user_id: str, body: MembershipRoleUpdate, ctx: AuthCtx = Depends(require_admin_access),
+):
+    if body.role not in ("member", "org_admin", "lecture_seule"):
+        raise HTTPException(status_code=400, detail="Rôle invalide.")
+    update_membership_role(ctx.client, user_id, org_id, body.role)
+    return {"user_id": user_id, "org_id": org_id, "role": body.role}
+
+
+@app.delete("/orgs/{org_id}/members/{user_id}")
+def delete_org_member(org_id: str, user_id: str, ctx: AuthCtx = Depends(require_admin_access)):
+    remove_membership(ctx.client, user_id, org_id)
+    return {"user_id": user_id, "org_id": org_id, "removed": True}
 
 
 # ---------------------------------------------------------------

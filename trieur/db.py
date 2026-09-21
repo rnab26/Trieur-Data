@@ -87,6 +87,52 @@ def list_organizations(_client: Client) -> list[dict]:
     return res.data or []
 
 
+WRITE_ROLES = ("member", "org_admin")
+ROLE_LABELS = {"member": "Membre", "org_admin": "Administrateur", "lecture_seule": "Lecture seule"}
+
+
+def can_write_org(role: str | None, is_super_admin: bool) -> bool:
+    """Un membre 'lecture_seule' peut consulter mais jamais écrire (import,
+    modification, suppression, résolution d'alerte) -- voir migration 0018,
+    `trieur_data.can_write()` (même règle appliquée côté RLS, la vraie
+    barrière de sécurité ; ceci ne sert qu'à adapter l'interface). Un
+    super-admin ou un membre sans rôle reconnu (donnée future) garde
+    l'accès en écriture par défaut."""
+    return is_super_admin or role in WRITE_ROLES or role is None
+
+
+def list_org_memberships(client: Client, org_id: str) -> list[dict]:
+    """Membres d'un environnement (admin uniquement, voir migration 0018 --
+    la RLS `memberships_select` ne renvoie toutes les lignes qu'à un
+    super-admin). Noms résolus séparément via get_profiles_map (pas de
+    relation PostgREST directe entre memberships et profiles -- toutes
+    deux référencent auth.users, mais pas l'une l'autre)."""
+    res = (
+        _td(client, "memberships")
+        .select("user_id, role, created_at")
+        .eq("org_id", org_id)
+        .order("created_at")
+        .execute()
+    )
+    rows = res.data or []
+    profiles = get_profiles_map(client, tuple(r["user_id"] for r in rows))
+    for r in rows:
+        r["full_name"] = (profiles.get(r["user_id"]) or {}).get("full_name")
+    return rows
+
+
+def update_membership_role(client: Client, user_id: str, org_id: str, role: str) -> None:
+    _td(client, "memberships").update({"role": role}).eq("user_id", user_id).eq("org_id", org_id).execute()
+    get_my_memberships.clear()
+
+
+def remove_membership(client: Client, user_id: str, org_id: str) -> None:
+    """Retire l'accès d'un membre à cet environnement -- ne supprime pas
+    son compte ni son profil, seulement cette appartenance."""
+    _td(client, "memberships").delete().eq("user_id", user_id).eq("org_id", org_id).execute()
+    get_my_memberships.clear()
+
+
 def list_chantiers(client: Client, org_id: str) -> list[dict]:
     res = (
         _td(client, "chantiers")

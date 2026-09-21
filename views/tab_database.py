@@ -23,6 +23,7 @@ from trieur.db import (
     LIST_PAGE_SIZE,
     ROLE_LABELS,
     add_org_master_columns,
+    add_record_tag,
     can_write_org,
     count_records,
     delete_record,
@@ -31,13 +32,16 @@ from trieur.db import (
     get_org_master_columns,
     get_profiles_map,
     get_record,
+    get_record_tags_map,
     import_dataframe,
     list_all_records,
     list_dedup_alerts,
     list_org_memberships,
+    list_org_tags,
     list_records,
     list_saved_views,
     remove_membership,
+    remove_record_tag,
     resolve_dedup_alert,
     save_org_master_columns,
     save_saved_view,
@@ -254,6 +258,19 @@ def _resolve_modifier_names(client, rows):
     return rows
 
 
+def _apply_tags(client, rows):
+    """Ajoute une colonne "Étiquettes" (jointes par virgule, triées) à
+    chaque ligne -- même principe que _resolve_modifier_names (appel
+    réseau séparé de _build_rows, qui reste pur). Une fois posée, cette
+    colonne profite gratuitement des filtres par colonne existants
+    (contient/vide/non vide...) : pas besoin d'un filtre dédié."""
+    ids = tuple(r["_id"] for r in rows)
+    tags_map = get_record_tags_map(client, ids)
+    for r in rows:
+        r["Étiquettes"] = ", ".join(tags_map.get(r["_id"], []))
+    return rows
+
+
 def _filter_by_search(rows, search):
     if not search:
         return rows
@@ -318,7 +335,7 @@ def _render_export(client, org_id, org_name, total, search, col_filters, all_col
             # sinon un fichier plus ancien avec une colonne non encore
             # decouverte perdrait cette donnee en silence a l'export.
             all_records = list_all_records(client, org_id)
-            rows = _resolve_modifier_names(client, _build_rows(all_records, master_cols))
+            rows = _apply_tags(client, _resolve_modifier_names(client, _build_rows(all_records, master_cols)))
             rows = _filter_by_columns(_filter_by_search(rows, search), col_filters)
             full_cols = []
             for row in rows:
@@ -453,6 +470,56 @@ def _render_edit_form(client, org_id, record_id, master_cols, user):
                 st.error("Ce client n'existe plus (supprimé entre-temps) : rien n'a été enregistré.")
 
 
+def _render_tags_editor(client, org_id, record_id, user, can_write):
+    """Étiquettes libres sur ce client (VIP, à recontacter...) -- ajout/
+    retrait immédiat, sans bouton "Enregistrer" séparé : contrairement
+    aux champs importés (_render_edit_form), une étiquette n'a pas
+    besoin d'une étape de confirmation groupée, et reste triviale à
+    défaire (un client sur "retirer" ou reposer l'étiquette). Visible en
+    lecture même pour un membre lecture seule (migration 0020) --
+    seuls l'ajout et le retrait sont réservés à l'écriture, comme la RLS
+    `trieur_data.can_write()` sur `record_tags`."""
+    current_tags = get_record_tags_map(client, (record_id,)).get(record_id, [])
+
+    st.caption("🏷️ Étiquettes")
+    if not current_tags:
+        st.caption("Aucune étiquette pour l'instant.")
+    elif not can_write:
+        st.write(", ".join(current_tags))
+    else:
+        tag_cols = st.columns(len(current_tags))
+        for tcol, tag in zip(tag_cols, current_tags):
+            with tcol:
+                if st.button(f"{tag} ✕", key=f"tag_del_{org_id}_{record_id}_{tag}"):
+                    remove_record_tag(client, record_id, tag)
+                    invalidate_client_list_cache(org_id)
+                    st.rerun()
+
+    if not can_write:
+        return
+
+    known_tags = [t for t in list_org_tags(client, org_id) if t not in current_tags]
+    c_pick, c_new, c_add = st.columns([2, 2, 1])
+    with c_pick:
+        picked = st.selectbox(
+            "Étiquette existante", options=["(choisir)"] + known_tags,
+            key=f"tag_pick_{org_id}_{record_id}", label_visibility="collapsed",
+        )
+    with c_new:
+        new_tag = st.text_input(
+            "Nouvelle étiquette", key=f"tag_new_{org_id}_{record_id}",
+            label_visibility="collapsed", placeholder="Ou une nouvelle étiquette",
+        )
+    with c_add:
+        if st.button("➕", key=f"tag_add_{org_id}_{record_id}"):
+            tag_to_add = new_tag.strip() or (picked if picked != "(choisir)" else "")
+            if tag_to_add:
+                add_record_tag(client, org_id, record_id, tag_to_add, user.id)
+                invalidate_client_list_cache(org_id)
+                clear_stale_widgets(f"tag_new_{org_id}_{record_id}")
+                st.rerun()
+
+
 def _render_saved_views(client, org_id, user, search, all_cols, visible_cols):
     """Enregistrer/rappeler une combinaison recherche + filtres par
     colonne + colonnes affichées, sous un nom -- même principe que les
@@ -549,7 +616,7 @@ def _render_client_list(client, org_id, org_name, user, total, can_write):
     search = st.text_input("🔎 Rechercher (nom, IBAN, email...)", key=f"search_{org_id}")
     master_cols = get_org_master_columns(client, org_id)
 
-    all_rows = _resolve_modifier_names(client, _build_rows(records, master_cols))
+    all_rows = _apply_tags(client, _resolve_modifier_names(client, _build_rows(records, master_cols)))
 
     # Colonnes connues sur ce lot charge -- calculees AVANT la recherche
     # texte et les filtres, pour que la liste de colonnes (et donc la
@@ -630,6 +697,10 @@ def _render_client_list(client, org_id, org_name, user, total, can_write):
         if selected_rows:
             selected_ids = [row_ids[i] for i in selected_rows]
             st.write(f"**{len(selected_ids)} ligne(s) sélectionnée(s).**")
+
+            if len(selected_ids) == 1:
+                _render_tags_editor(client, org_id, selected_ids[0], user, can_write)
+
             if not can_write:
                 st.caption("🔒 Modification et suppression réservées aux membres avec droit d'écriture.")
             else:

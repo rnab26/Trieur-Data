@@ -1202,6 +1202,91 @@ def test_create_chantier_without_theme_falls_back_to_general(client_factory):
     assert res.json()["theme"] == "Général"
 
 
+def test_prelevement_rules_defaults_when_never_saved(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.get("/orgs/org-1/prelevement/rules", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 200
+    assert res.json() == {"org_id": "org-1", "ics": None, "nature": "CORE", "delay_days": 3}
+
+
+def test_prelevement_rules_roundtrip(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+
+    res = tc.post(
+        "/orgs/org-1/prelevement/rules",
+        json={"ics": "FR12ZZZ123456", "nature": "CORE", "delay_days": 5},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    assert res.json()["ics"] == "FR12ZZZ123456"
+    assert res.json()["delay_days"] == 5
+
+    res = tc.get("/orgs/org-1/prelevement/rules", headers=headers)
+    assert res.json()["ics"] == "FR12ZZZ123456"
+
+
+def test_prelevement_rules_rejects_invalid_nature(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/prelevement/rules",
+        json={"nature": "AUTRE"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_prelevement_rules_forbidden_for_non_admin(client_factory):
+    fake = _make_client()  # profil par défaut : is_super_admin=False
+    tc = client_factory(fake)
+    res = tc.get("/orgs/org-1/prelevement/rules", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 403
+
+
+_PRELEVEMENT_CSV = (
+    "Référence du client,Nom complet,RUM,Statut,Type de prélèvement,"
+    "Périodicité (Mensuel/trimestre/annuel),IBAN,BIC,Date de premier prélèvement,"
+    "Adresse,Ville,Code postal,Email,Téléphone,"
+    "Optilife,Optivie,Carte MGS,MYJURIS & MYHOSPI,Admin & Aide a dom,Auditif,IMMO,"
+    "Total cotisation MYMO VETO SUR,Total frais de dossier,Total cotisation et frais de dossier\n"
+    "MGS-1,CLIENT UN,RUM1,Sepa validé par le client,Prélèvement,Mensuelle,"
+    "FR7615589228070085438594040,CMBRFR2B,24/09/2026,1 rue Test,Paris,75001,a@example.com,+33600000000,"
+    "99,0,0,0,0,0,0,0,40,139\n"
+    "MGS-2,CLIENT DEUX,RUM2,Sepa validé par le client,Prélèvement,Mensuelle,"
+    "IBAN-INVALIDE,CMBRFR2B,24/09/2026,2 rue Test,Paris,75001,b@example.com,+33600000001,"
+    "0,0,0,0,0,0,0,0,0,0\n"
+).encode("utf-8")
+
+
+def test_prelevement_generate_returns_ooff_rcur_and_exclus(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/prelevement/generate",
+        files={"file": ("export.csv", _PRELEVEMENT_CSV, "text/csv")},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.headers["x-ooff-count"] == "1"
+    assert res.headers["x-rcur-count"] == "0"
+    assert res.headers["x-exclus-count"] == "1"
+    assert res.headers["content-type"].startswith("application/vnd.openxmlformats")
+
+
+def test_prelevement_generate_forbidden_for_non_admin(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/prelevement/generate",
+        files={"file": ("export.csv", _PRELEVEMENT_CSV, "text/csv")},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 403
+
+
 def test_create_and_list_sections(client_factory):
     fake = _make_client(profiles=[ADMIN_PROFILE])
     tc = client_factory(fake)

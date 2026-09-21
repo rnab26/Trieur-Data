@@ -935,3 +935,76 @@ export function applyPipelineDedupe(orgId: string, sessionId: string, body: Pipe
     },
   )
 }
+
+// ---------------------------------------------------------------
+// Génération des mandats de prélèvement (environnement Prélèvement) --
+// voir trieur/prelevement.py pour les règles métier. Réservé aux
+// administrateurs, comme le Cockpit.
+// ---------------------------------------------------------------
+
+export type PrelevementRules = {
+  org_id: string
+  ics: string | null
+  nature: 'CORE' | 'B2B'
+  delay_days: number
+}
+
+export function getPrelevementRules(orgId: string) {
+  return request<PrelevementRules>(`/orgs/${orgId}/prelevement/rules`)
+}
+
+export function savePrelevementRules(
+  orgId: string,
+  body: { ics: string | null; nature: 'CORE' | 'B2B'; delayDays: number },
+) {
+  return request<PrelevementRules>(`/orgs/${orgId}/prelevement/rules`, {
+    method: 'POST',
+    body: JSON.stringify({ ics: body.ics, nature: body.nature, delay_days: body.delayDays }),
+  })
+}
+
+export type PrelevementGenerateResult = {
+  ooffCount: number
+  rcurCount: number
+  exclusCount: number
+}
+
+// Envoie le fichier CRM brut, déclenche le téléchargement automatique
+// du classeur généré (3 onglets : OOFF/RCUR/Exclus), et renvoie les
+// compteurs (en-têtes de la réponse) pour que l'écran affiche un résumé
+// sans avoir à rouvrir le fichier téléchargé.
+export async function generatePrelevementMandats(
+  orgId: string,
+  file: File,
+): Promise<PrelevementGenerateResult> {
+  const headers = await authHeader()
+  const form = new FormData()
+  form.set('file', file)
+  const res = await safeFetch(`${API_URL}/orgs/${orgId}/prelevement/generate`, {
+    method: 'POST',
+    headers,
+    body: form,
+  })
+  if (!res.ok) {
+    return throwForErrorResponse(res)
+  }
+  const blob = await safeReadBlob(res)
+  const disposition = res.headers.get('content-disposition') ?? ''
+  const match = /filename="?([^"]+)"?/.exec(disposition)
+  const filename = match ? match[1] : 'mandats.xlsx'
+
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+
+  return {
+    ooffCount: Number(res.headers.get('x-ooff-count') ?? 0),
+    rcurCount: Number(res.headers.get('x-rcur-count') ?? 0),
+    exclusCount: Number(res.headers.get('x-exclus-count') ?? 0),
+  }
+}

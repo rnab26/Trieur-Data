@@ -3232,3 +3232,41 @@ corriger** plutôt que de continuer à le contourner. Piste déjà notée :
 manque d'isolation entre tests e2e (l'état trouvé au moment de l'échec
 ressemble aux colonnes maîtres laissées par un AUTRE test e2e de la
 même session pytest, pas les valeurs par défaut attendues).
+
+---
+
+## Correctif du flake e2e "colonnes maîtres / localStorage" (2026-09-21, PR #42)
+
+**Fait** (chantier auto-créé suite au point ci-dessus, pas demandé par
+Raphaël -- root-cause pendant un temps mort plutôt que de recontourner
+une 4e fois) : la piste "manque d'isolation entre tests" notée plus
+haut était **fausse** -- vérifié et écartée après investigation réelle,
+pas juste supposée.
+
+**Vraie cause racine** : la restauration depuis le `localStorage` prend
+DEUX allers-retours serveur (le composant JS renvoie sa valeur → rerun
+automatique Streamlit, puis `app.py` appelle `st.rerun()` une seconde
+fois pour rafraîchir le widget texte). Le test pariait sur un délai
+fixe de 4 secondes pour que les deux se terminent -- assez en local,
+pas toujours sous la charge d'un runner CI partagé.
+
+**Vérifié en conditions réelles avant de conclure** (vrai Chromium,
+vraie app Streamlit lancée en sous-processus, aucun mock) : la
+fonctionnalité de restauration elle-même fonctionne très bien (moins
+d'1 seconde à chaque essai, y compris en rejouant exactement la
+séquence des deux tests du fichier l'un après l'autre plusieurs fois
+de suite) -- c'est le TEST, pas le produit, qui pariait sur un chrono
+fixe au lieu d'attendre la vraie condition.
+
+**Corrigé** : remplacé `page.wait_for_timeout(4000)` + une lecture
+unique par `expect(textarea).to_have_value(..., timeout=15000)`
+(Playwright), qui réinterroge le DOM en boucle jusqu'à la bonne valeur
+au lieu de parier sur un délai unique. `pytest` : 423 passés en local
+(hors e2e, navigateur non installé dans ce bac à sable) + CI verte sur
+la PR (le vrai test concerné inclus, avec le navigateur installé par
+la CI).
+
+Plus de rouge pré-existant à documenter/contourner sur les prochaines
+PR -- si `test_master_columns_localstorage_fallback` recommence à
+échouer, ce n'est PAS le même problème (celui-ci est réellement
+corrigé, pas juste masqué).

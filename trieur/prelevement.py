@@ -207,8 +207,21 @@ def to_amount(raw: object) -> float:
     `SUBSTITUTE(valeur,".",",")* 1` pour forcer la conversion). Une
     valeur vide/invalide vaut 0, jamais une erreur bloquante : un
     montant manquant sur UN produit ne doit pas faire échouer toute la
-    ligne du client."""
+    ligne du client.
+
+    Bug réel trouvé le 2026-09-21 (client MACEDO ANNIE / MGS-18397,
+    signalé par Raphaël) : `pandas.DataFrame.where(pd.notnull(df), None)`
+    ne remplace PAS toujours une cellule vide par `None` sur une colonne
+    de nombres (repli connu de pandas -- une colonne float ne peut pas
+    contenir `None`, donc `where()` la recase discrètement en NaN). Le
+    "vide" arrive alors ici comme `float('nan')`, PAS `None` -- sans ce
+    contrôle, `49.9 + nan = nan`, et `nan > 0` vaut `False` : un client
+    avec un vrai produit actif (Optilife 49,90€) était exclu à tort
+    ("aucun produit actif") juste parce qu'une AUTRE colonne produit
+    (Optivie) avait une cellule vide plutôt qu'un 0 explicite."""
     if raw is None or raw == "":
+        return 0.0
+    if isinstance(raw, float) and raw != raw:  # NaN (jamais égal à lui-même)
         return 0.0
     if isinstance(raw, (int, float)):
         return float(raw)

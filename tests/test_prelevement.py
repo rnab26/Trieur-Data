@@ -61,6 +61,17 @@ def test_to_amount_missing_is_zero_not_error():
     assert to_amount("n'importe quoi") == 0.0
 
 
+def test_to_amount_nan_is_zero_not_contagious():
+    """Bug réel (2026-09-21, client MACEDO ANNIE/MGS-18397) :
+    pandas.DataFrame.where(pd.notnull(df), None) ne remplace pas
+    toujours une cellule vide par None sur une colonne de nombres --
+    elle arrive ici en float('nan'). Sans ce contrôle, 49.9 + nan = nan,
+    et un client avec un vrai produit actif était exclu à tort."""
+    nan = float("nan")
+    assert to_amount(nan) == 0.0
+    assert 49.9 + to_amount(nan) == 49.9  # ne doit jamais "contaminer" une somme
+
+
 def test_compute_first_prelevement_date_never_before_delay():
     today = date(2026, 9, 21)
     # Prévue trop tôt (demain) -> repoussée au plancher (aujourd'hui + 3 jours)

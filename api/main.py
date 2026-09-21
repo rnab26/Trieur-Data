@@ -2140,28 +2140,38 @@ def post_prelevement_rules(
 
 @app.post("/orgs/{org_id}/prelevement/generate")
 async def post_prelevement_generate(
-    org_id: str, file: UploadFile = File(...), ctx: AuthCtx = Depends(require_cockpit_access),
+    org_id: str, files: list[UploadFile] = File(...), ctx: AuthCtx = Depends(require_cockpit_access),
 ):
-    """Prend l'export CRM brut (mêmes colonnes que le fichier Excel de
-    référence) et renvoie un classeur avec 4 onglets : Mandat (tout,
+    """Prend un ou plusieurs exports CRM bruts (mêmes colonnes que le
+    fichier Excel de référence), les fusionne en une seule liste de
+    lignes, et renvoie un classeur avec 4 onglets : Mandat (tout,
     FRST+RCUR mélangés), First, RCUR (mêmes mandats en détail par type),
     Exclus (avec la raison de chaque exclusion) -- rien n'est écrit en
-    base, ce endpoint ne fait que transformer un fichier en un autre,
-    comme l'export du Trieur de Data."""
-    if file.size is None or file.size > PIPELINE_MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Fichier trop volumineux ou taille indéterminable (max {PIPELINE_MAX_UPLOAD_BYTES / 1_048_576:.0f} Mo).",
-        )
-    content = await file.read()
-    filename = file.filename or "export"
-    try:
-        if filename.lower().endswith(".csv"):
-            df = pd.read_csv(io.BytesIO(content))
-        else:
-            df = pd.read_excel(io.BytesIO(content))
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Impossible de lire le fichier : {exc}")
+    base, ce endpoint ne fait que transformer des fichiers en un autre,
+    comme l'import multi-fichiers du Trieur de Data. Plusieurs fichiers
+    = simplement plusieurs lots de clients à traiter en un seul export
+    (ex. un export par mois) -- pas de dédoublonnage entre eux ici."""
+    dfs = []
+    for file in files:
+        if file.size is None or file.size > PIPELINE_MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"Fichier \"{file.filename}\" trop volumineux ou taille indéterminable "
+                    f"(max {PIPELINE_MAX_UPLOAD_BYTES / 1_048_576:.0f} Mo)."
+                ),
+            )
+        content = await file.read()
+        filename = file.filename or "export"
+        try:
+            if filename.lower().endswith(".csv"):
+                dfs.append(pd.read_csv(io.BytesIO(content)))
+            else:
+                dfs.append(pd.read_excel(io.BytesIO(content)))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Impossible de lire \"{filename}\" : {exc}")
+    df = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
+    filename = files[0].filename or "export"
 
     rules_row = get_prelevement_rules(ctx.client, org_id)
     rules = PrelevementRules(

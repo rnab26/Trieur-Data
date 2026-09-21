@@ -34,7 +34,7 @@ export function PrelevementScreen() {
   const [rulesSaved, setRulesSaved] = useState(false)
 
   const fileInputRef = useRef<HTMLInputElement | null>(null)
-  const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([])
   const [dragOver, setDragOver] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [generateError, setGenerateError] = useState<string | null>(null)
@@ -84,18 +84,25 @@ export function PrelevementScreen() {
     }
   }
 
-  function handleFileSelected(file: File | null) {
-    setSelectedFile(file)
+  function handleFilesSelected(files: File[]) {
+    if (!files.length) return
+    // Ajoute aux fichiers déjà choisis (pas de remplacement) -- permet de
+    // glisser plusieurs lots l'un après l'autre, demandé par Raphaël pour
+    // pouvoir importer plusieurs exports CRM d'un coup (ex. un par mois).
+    setSelectedFiles((prev) => [...prev, ...files])
     setResult(null)
     setGenerateError(null)
+  }
+
+  function handleRemoveFile(index: number) {
+    setSelectedFiles((prev) => prev.filter((_, i) => i !== index))
   }
 
   function handleDrop(e: React.DragEvent<HTMLDivElement>) {
     e.preventDefault()
     setDragOver(false)
     if (generating) return
-    const file = e.dataTransfer.files?.[0]
-    if (file) handleFileSelected(file)
+    handleFilesSelected(Array.from(e.dataTransfer.files ?? []))
   }
 
   function formatFileSize(bytes: number): string {
@@ -105,14 +112,14 @@ export function PrelevementScreen() {
   }
 
   async function handleGenerate() {
-    if (!orgId || !selectedFile) return
+    if (!orgId || selectedFiles.length === 0) return
     setGenerating(true)
     setGenerateError(null)
     setResult(null)
     try {
-      const counts = await generatePrelevementMandats(orgId, selectedFile)
+      const counts = await generatePrelevementMandats(orgId, selectedFiles)
       setResult(counts)
-      setSelectedFile(null) // vide la sélection, pour ne pas relancer par erreur sur le même fichier
+      setSelectedFiles([]) // vide la sélection, pour ne pas relancer par erreur sur les mêmes fichiers
       if (fileInputRef.current) fileInputRef.current.value = ''
     } catch (err) {
       setGenerateError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
@@ -249,13 +256,14 @@ export function PrelevementScreen() {
               <h2 className="text-sm font-semibold">Générer les mandats</h2>
               <div>
                 <p className="mb-1 text-sm text-[var(--muted)]">
-                  1. Choisis le fichier export CRM (.csv ou .xlsx)
+                  1. Choisis un ou plusieurs fichiers export CRM (.csv ou .xlsx)
                 </p>
                 <input
                   ref={fileInputRef}
                   type="file"
                   accept=".csv,.xlsx,.xls"
-                  onChange={(e) => handleFileSelected(e.target.files?.[0] ?? null)}
+                  multiple
+                  onChange={(e) => handleFilesSelected(Array.from(e.target.files ?? []))}
                   className="hidden"
                 />
                 <div
@@ -296,22 +304,37 @@ export function PrelevementScreen() {
                       strokeLinejoin="round"
                     />
                   </svg>
-                  {selectedFile ? (
-                    <p className="text-sm font-medium">
-                      {selectedFile.name}{' '}
-                      <span className="text-[var(--muted)]">({formatFileSize(selectedFile.size)})</span>
-                    </p>
-                  ) : (
-                    <p className="text-sm font-medium">
-                      Glisse le fichier ici, ou{' '}
-                      <span className="text-[var(--primary)] underline">clique pour choisir</span>
-                    </p>
-                  )}
-                  <p className="text-xs text-[var(--muted)]">Excel (.xlsx) ou CSV -- un seul fichier</p>
+                  <p className="text-sm font-medium">
+                    Glisse le/les fichier(s) ici, ou{' '}
+                    <span className="text-[var(--primary)] underline">clique pour choisir</span>
+                  </p>
+                  <p className="text-xs text-[var(--muted)]">Excel (.xlsx) ou CSV -- plusieurs fichiers possibles</p>
                 </div>
+                {selectedFiles.length > 0 && (
+                  <div className="mt-3 flex flex-col gap-2 rounded-md border border-[var(--border)] p-3">
+                    <p className="text-sm font-medium text-[var(--foreground)]">
+                      ✅ {selectedFiles.length} fichier{selectedFiles.length > 1 ? 's' : ''} sélectionné
+                      {selectedFiles.length > 1 ? 's' : ''}
+                    </p>
+                    {selectedFiles.map((f, i) => (
+                      <div key={`${f.name}-${i}`} className="flex items-center gap-2 text-sm">
+                        <span className="truncate">{f.name}</span>
+                        <span className="shrink-0 text-xs text-[var(--muted)]">({formatFileSize(f.size)})</span>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveFile(i)}
+                          disabled={generating}
+                          className="ml-auto shrink-0 text-xs text-[var(--danger)] underline disabled:opacity-60"
+                        >
+                          Retirer
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
               <div>
-                <Button onClick={() => void handleGenerate()} disabled={generating || !selectedFile}>
+                <Button onClick={() => void handleGenerate()} disabled={generating || selectedFiles.length === 0}>
                   {generating ? 'Génération…' : '2. Générer et télécharger'}
                 </Button>
               </div>

@@ -1625,7 +1625,7 @@ def test_prelevement_generate_returns_ooff_rcur_and_exclus(client_factory):
     tc = client_factory(fake)
     res = tc.post(
         "/orgs/org-1/prelevement/generate",
-        files={"file": ("export.csv", _PRELEVEMENT_CSV, "text/csv")},
+        files=[("files", ("export.csv", _PRELEVEMENT_CSV, "text/csv"))],
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 200
@@ -1646,7 +1646,7 @@ def test_prelevement_generate_sheets_are_mandat_first_rcur_exclus(client_factory
     tc = client_factory(fake)
     res = tc.post(
         "/orgs/org-1/prelevement/generate",
-        files={"file": ("export.csv", _PRELEVEMENT_CSV, "text/csv")},
+        files=[("files", ("export.csv", _PRELEVEMENT_CSV, "text/csv"))],
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 200
@@ -1668,7 +1668,7 @@ def test_prelevement_generate_exposes_count_headers_cross_origin(client_factory)
     tc = client_factory(fake)
     res = tc.post(
         "/orgs/org-1/prelevement/generate",
-        files={"file": ("export.csv", _PRELEVEMENT_CSV, "text/csv")},
+        files=[("files", ("export.csv", _PRELEVEMENT_CSV, "text/csv"))],
         headers={"Authorization": f"Bearer {TOKEN}", "Origin": "https://trieur-data-app-test.onrender.com"},
     )
     assert res.status_code == 200
@@ -1683,10 +1683,31 @@ def test_prelevement_generate_forbidden_for_non_admin(client_factory):
     tc = client_factory(fake)
     res = tc.post(
         "/orgs/org-1/prelevement/generate",
-        files={"file": ("export.csv", _PRELEVEMENT_CSV, "text/csv")},
+        files=[("files", ("export.csv", _PRELEVEMENT_CSV, "text/csv"))],
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 403
+
+
+def test_prelevement_generate_merges_multiple_files(client_factory):
+    """Plusieurs fichiers = fusionnés en un seul lot avant traitement --
+    demandé par Raphaël pour pouvoir importer plusieurs exports CRM
+    d'un coup (ex. un par mois)."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/prelevement/generate",
+        files=[
+            ("files", ("export1.csv", _PRELEVEMENT_CSV, "text/csv")),
+            ("files", ("export2.csv", _PRELEVEMENT_CSV, "text/csv")),
+        ],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    # Chaque fichier a 1 ligne valide (MGS-1) + 1 exclue (MGS-2) -- les
+    # deux fichiers réunis donnent donc le double de chaque.
+    assert res.headers["x-ooff-count"] == "2"
+    assert res.headers["x-exclus-count"] == "2"
 
 
 def test_create_and_list_sections(client_factory):

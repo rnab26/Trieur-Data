@@ -2985,3 +2985,95 @@ tests, voir PR #31).
 - [ ] Vérifier en conditions réelles dans le Cockpit : créer un
   chantier (section auto), cliquer un chiffre "Où j'en suis", répondre
   à une question si la Routine en pose une.
+
+---
+
+## Prélèvement : réglage clair/sombre + génération des mandats SEPA depuis l'export CRM (2026-09-21, PR #33 et #34)
+
+**Contexte** : Raphaël a fourni les 3 fichiers Excel de référence de
+son père (récupération CRM, tri/nettoyage, création des mandats) +
+un classeur Drive historique (11 onglets, 5,5 Mo), pour comprendre le
+processus manuel actuel de remise bancaire (prélèvements SEPA MGS,
+banques CAIXA/Sabadell) et l'automatiser dans l'environnement
+Prélèvement -- domaine explicitement "zéro droit à l'erreur".
+
+**Analyse menée avant tout code** (fichiers copiés dans le scratchpad
+de session, pas dans le dépôt -- données clients réelles) : formules
+Excel lues onglet par onglet (`INDIRECT`, `MATCH`, calcul IBAN mod-97,
+lookup tarifs...), compréhension confirmée avec Raphaël par plusieurs
+séries de questions simples (fiches à choix). Règles retenues :
+- Optivie et Optilife sont le même produit -> fusionnés en un seul
+  montant.
+- "Contrat MYMO casse & perte appareil auditif" : délibérément ignoré
+  pour l'instant (demande explicite).
+- Correctif IBAN : espaces retirés, "fr" -> "FR". IBAN inexistant ->
+  ligne ignorée. Carte bleue -> jamais en prélèvement.
+- Date du 1er prélèvement : jamais avant aujourd'hui + 3 jours (délai
+  fixe).
+- OOFF (1er prélèvement, avec frais de dossier) vs RCUR (récurrent,
+  sans frais) : le montant diffère, pas juste un indicateur.
+- Tableau de tarifs : quasi fixe, sert à un code de suivi interne, pas
+  au calcul du montant (déjà fourni par le CRM).
+- ICS (identifiant créancier SEPA) : laissé vide pour l'instant
+  (Raphaël n'avait pas le numéro sous la main).
+
+**Portée volontairement limitée à ce que Raphaël a demandé de traiter
+en premier** : nettoyer un export CRM brut -> classeur prêt pour la
+banque (OOFF/RCUR/Exclus). L'historique des remises passées, la
+détection de doublons/noms inversés, le suivi des impayés et la
+réconciliation du relevé bancaire (classeur Drive) sont un chantier
+séparé, créé dans le Cockpit pour ne pas l'oublier : **"Historique,
+doublons, impayés et relevé bancaire"** (org Prélèvement).
+
+**Fait (PR #34)** :
+- `trieur/prelevement.py` : moteur pur (aucune dépendance réseau/DB,
+  testable en isolation) -- IBAN nettoyé ET vérifié par un vrai calcul
+  mod-97 (`iban_checksum_valid`, ISO 7064 MOD 97-10), BIC 8 caractères
+  complété à 11 avec "XXX", montants robustes au séparateur décimal
+  ("," ou "."), date du 1er prélèvement via `MAX(aujourd'hui+3,
+  prévue)`, motif de virement reconstruit (`MGS-{RUM}` + suffixe par
+  produit facturé), classement OOFF/RCUR sur la présence de frais de
+  dossier. Une ligne cassée est exclue AVEC LA RAISON (`ExclusionRow`),
+  jamais une exception qui ferait échouer tout le lot.
+- Migration `0019_prelevement_rules.sql` + `trieur/db.py` : réglages
+  ajustables par organisation (ICS, nature CORE/B2B, délai en jours) --
+  rien codé en dur, demande explicite de Raphaël ("qu'on puisse les
+  ajuster par la suite, pas que tout le code s'implémente dedans en
+  vrac").
+- `api/main.py` : `GET/POST /orgs/{org}/prelevement/rules`, `POST
+  /orgs/{org}/prelevement/generate` (upload l'export CRM en CSV/xlsx,
+  renvoie un classeur à 3 onglets OOFF/RCUR/Exclus). Réservé aux
+  administrateurs (`require_cockpit_access`) -- données bancaires de
+  clients, pas un export ordinaire de la Base de données.
+- Nouvel onglet "Prélèvement" dans l'appli (`PrelevementScreen.tsx`,
+  visible seulement pour les admins) : réglages + dépôt de fichier +
+  téléchargement direct du résultat avec un résumé (nombre de OOFF/
+  RCUR/exclus).
+- PR #33 (mergée avant celle-ci, sans lien direct) : réglage de thème
+  clair/sombre/auto pour toute l'appli, demandé par Raphaël en pleine
+  nuit sur le Cockpit -- voir entrée dédiée plus haut si besoin, pas
+  détaillé ici.
+
+**Vérifié, pas juste testé sur des données inventées** : moteur validé
+sur le VRAI fichier CRM de référence (291 lignes) -- 287 mandats
+générés, 4 exclusions légitimes (3 clients sans aucun montant, 1 carte
+bleue). Trouvaille notable en validant : 5 IBAN que le CRM d'origine
+n'avait jamais marqués "validés" (juste jamais vérifiés, pas
+réellement invalides) passent correctement le calcul mod-97 -- le
+moteur est donc plus fiable que le drapeau d'origine sur ce point
+précis, pas moins. `pytest` : 380 passed (31 nouveaux tests : 25 sur
+le moteur pur avec un IBAN réel du fichier de référence, 6 sur les
+2 endpoints), hors le flake e2e déjà documenté. `npm run build`/`npm
+run lint` : aucune nouvelle erreur.
+
+**Reste à faire côté Raphaël, IMPORTANT avant tout usage réel** :
+- [ ] Tester avec un vrai fichier et comparer le résultat **ligne par
+  ligne** à ce que produit le fichier Excel actuel, avant de faire
+  confiance à ce module pour une vraie remise en banque. Aucune
+  automatisation bancaire ne doit partir en production sans cette
+  vérification humaine, même si tous les tests automatisés passent.
+- [ ] Donner le numéro ICS quand il sera disponible (réglage dans
+  l'onglet Prélèvement, pas besoin de redemander à Claude).
+- [ ] Chantier séparé déjà noté dans le Cockpit pour la suite :
+  historique/doublons/impayés/relevé bancaire -- à ne prendre qu'une
+  fois celui-ci validé en conditions réelles.

@@ -3066,12 +3066,34 @@ le moteur pur avec un IBAN réel du fichier de référence, 6 sur les
 2 endpoints), hors le flake e2e déjà documenté. `npm run build`/`npm
 run lint` : aucune nouvelle erreur.
 
+**Comparaison ligne par ligne faite par Claude (2026-09-21, PR #36)** :
+Raphaël a demandé la comparaison au fichier Excel actuel -- faite
+directement contre les onglets calculés du classeur de référence
+("3 Sheet1"/"Mandats CAIXA"), sur le seul vrai client encore présent
+dans ce classeur au moment de l'analyse (`MGS-20230`, RUM `1422647`,
+les autres lignes du classeur n'étaient que des restes de formules
+vides malgré un `max_row` élevé -- vérifié cellule par cellule avant
+de conclure). 5 champs sur 7 correspondaient déjà exactement (montant,
+motif, BIC, IBAN, type de séquence). 2 ne correspondaient pas, corrigés
+dans la foulée :
+- `date_signature_mandat` repartait de la date du jour au lieu de la
+  date de création du contrat dans le CRM.
+- `explication_periodicite` restait remplie pour un 1er prélèvement
+  (FRST), alors que le fichier de référence la laisse vide.
+
+Re-testé sur le fichier CRM complet (291 lignes) après correctif :
+toujours 287 OOFF / 0 RCUR / 4 exclus, identique à avant -- confirme
+que le correctif ne change que les 2 champs erronés, rien d'autre.
+
 **Reste à faire côté Raphaël, IMPORTANT avant tout usage réel** :
-- [ ] Tester avec un vrai fichier et comparer le résultat **ligne par
-  ligne** à ce que produit le fichier Excel actuel, avant de faire
-  confiance à ce module pour une vraie remise en banque. Aucune
-  automatisation bancaire ne doit partir en production sans cette
-  vérification humaine, même si tous les tests automatisés passent.
+- [ ] Comparer un lot COMPLET (pas juste 1 ligne comme ci-dessus, faute
+  de plus de vraies lignes disponibles dans le classeur de référence
+  au moment de la vérification) au résultat de son père sur le même
+  lot, avant de faire confiance à ce module pour une vraie remise en
+  banque. Aucune automatisation bancaire ne doit partir en production
+  sans cette vérification humaine à plus grande échelle, même si tous
+  les tests automatisés passent et que le seul exemple disponible
+  correspond.
 - [ ] Donner le numéro ICS quand il sera disponible (réglage dans
   l'onglet Prélèvement, pas besoin de redemander à Claude).
 - [ ] Chantier séparé déjà noté dans le Cockpit pour la suite :

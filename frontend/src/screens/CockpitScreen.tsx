@@ -37,30 +37,44 @@ function isToday(iso: string | null | undefined): boolean {
 /** Le résumé "où j'en suis" -- quatre nombres, jamais cinq : un
  * chantier "abandonne" ne compte dans AUCUNE colonne plutôt que de
  * forcer une case qui mentirait sur son vrai état (même règle que
- * views/tab_cockpit.py:_render_ou_jen_suis). */
-function OuJenSuis({ chantiers }: { chantiers: Chantier[] }) {
+ * views/tab_cockpit.py:_render_ou_jen_suis). Chaque nombre est cliquable
+ * (Raphaël, 2026-09-21 : "je vois écrit 2 mais je sais pas où ils sont")
+ * -- ça filtre la liste juste en dessous sur ce statut précis. */
+function OuJenSuis({ chantiers, onPick }: { chantiers: Chantier[]; onPick: (status: ChantierStatus) => void }) {
   const bouge = chantiers.filter((c) => c.status === 'en_cours').length
   const livre = chantiers.filter((c) => c.status === 'termine' && isToday(c.updated_at)).length
   const pourToi = chantiers.filter((c) => c.status === 'attente_retour').length
   const dort = chantiers.filter((c) => c.status === 'a_faire').length
 
-  const tiles: { label: string; value: number; accent?: boolean }[] = [
-    { label: 'Bouge', value: bouge },
-    { label: "Livré aujourd'hui", value: livre },
-    { label: 'Pour toi', value: pourToi, accent: pourToi > 0 },
-    { label: 'Dort', value: dort },
+  const tiles: { label: string; value: number; status: ChantierStatus; accent?: boolean }[] = [
+    { label: 'Bouge', value: bouge, status: 'en_cours' },
+    { label: "Livré aujourd'hui", value: livre, status: 'termine' },
+    { label: 'Pour toi', value: pourToi, status: 'attente_retour', accent: pourToi > 0 },
+    { label: 'Dort', value: dort, status: 'a_faire' },
   ]
 
   return (
     <Card>
       <CardContent className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         {tiles.map((t) => (
-          <div key={t.label} className="flex flex-col gap-0.5">
+          <button
+            key={t.label}
+            type="button"
+            disabled={t.value === 0}
+            onClick={() => onPick(t.status)}
+            className="flex flex-col gap-0.5 text-left disabled:cursor-default"
+          >
             <span className="text-xs text-[var(--muted)]">{t.label}</span>
-            <span className={'text-2xl font-semibold ' + (t.accent ? 'text-[var(--danger)]' : 'text-[var(--foreground)]')}>
+            <span
+              className={
+                'text-2xl font-semibold ' +
+                (t.accent ? 'text-[var(--danger)]' : 'text-[var(--foreground)]') +
+                (t.value > 0 ? ' underline decoration-dotted underline-offset-4' : '')
+              }
+            >
               {t.value}
             </span>
-          </div>
+          </button>
         ))}
       </CardContent>
     </Card>
@@ -84,6 +98,21 @@ export function CockpitScreen() {
   const [filtreStatut, setFiltreStatut] = useState<'tous' | ChantierStatus>('tous')
 
   const [archivesOuvertes, setArchivesOuvertes] = useState(false)
+  const listeRef = useRef<HTMLDivElement | null>(null)
+  const archivesRef = useRef<HTMLDivElement | null>(null)
+
+  function handlePickStatus(status: ChantierStatus) {
+    if (status === 'termine') {
+      setArchivesOuvertes(true)
+      // Laisse le temps au DOM d'afficher la liste d'archives avant de
+      // défiler dessus (elle n'existe pas tant que archivesOuvertes est
+      // false).
+      setTimeout(() => archivesRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0)
+      return
+    }
+    setFiltreStatut(status)
+    setTimeout(() => listeRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0)
+  }
 
   const [formOpen, setFormOpen] = useState(false)
   const [newTitle, setNewTitle] = useState('')
@@ -255,22 +284,31 @@ export function CockpitScreen() {
         )}
 
         {orgs && orgs.length > 0 && (
-          <div className="mb-4 flex flex-wrap items-center gap-3">
-            <label htmlFor="cockpit-org-switcher" className="text-sm text-[var(--muted)]">
-              Environnement
-            </label>
-            <select
-              id="cockpit-org-switcher"
-              className="rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)]"
-              value={orgId ?? ''}
-              onChange={(e) => setOrgId(e.target.value)}
-            >
-              {orgs.map((org) => (
-                <option key={org.id} value={org.id}>
-                  {org.name}
-                </option>
-              ))}
-            </select>
+          <div className="mb-4 flex flex-col gap-1">
+            <div className="flex flex-wrap items-center gap-3">
+              <label htmlFor="cockpit-org-switcher" className="text-sm text-[var(--muted)]">
+                Environnement
+              </label>
+              <select
+                id="cockpit-org-switcher"
+                className="rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)]"
+                value={orgId ?? ''}
+                onChange={(e) => setOrgId(e.target.value)}
+              >
+                {orgs.map((org) => (
+                  <option key={org.id} value={org.id}>
+                    {org.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <p className="text-xs text-[var(--muted)]">
+              Ce menu filtre les chantiers affichés en dessous : « Global (transverse) » montre les
+              chantiers qui concernent le logiciel entier (ex. le Cockpit lui-même), les autres
+              (« Prélèvement », « Leads »...) montrent seulement les chantiers propres à cette
+              activité-là. Un chantier créé ici est toujours rangé dans l'environnement actuellement
+              sélectionné.
+            </p>
           </div>
         )}
 
@@ -282,7 +320,7 @@ export function CockpitScreen() {
           <p className="text-sm text-[var(--muted)]">Chargement…</p>
         ) : (
           <div className="flex flex-col gap-4">
-            <OuJenSuis chantiers={chantiers ?? []} />
+            <OuJenSuis chantiers={chantiers ?? []} onPick={handlePickStatus} />
 
             <Card>
               <CardContent className="flex flex-col gap-2">
@@ -368,7 +406,7 @@ export function CockpitScreen() {
             )}
 
             {((chantiers ?? []).length > 0 || sections.length > 0) && (
-              <div className="flex flex-wrap items-center gap-2">
+              <div ref={listeRef} className="flex flex-wrap items-center gap-2">
                 <Input
                   className="max-w-xs"
                   placeholder="Chercher un chantier…"
@@ -413,6 +451,7 @@ export function CockpitScreen() {
             ))}
 
             {archives.length > 0 && (
+              <div ref={archivesRef}>
               <Card>
                 <CardContent className="flex flex-col gap-2">
                   <button
@@ -431,6 +470,7 @@ export function CockpitScreen() {
                   )}
                 </CardContent>
               </Card>
+              </div>
             )}
           </div>
         )}

@@ -28,6 +28,7 @@ class _FakeTable:
     # (voir tests/test_db_pipeline.py, même besoin pour ces deux tables).
     _DEFAULTS = {
         "pipeline_sessions": {"status": "importing", "row_count": 0},
+        "chantier_questions": {"answer": None, "comment": None, "answered_at": None},
     }
 
     def __init__(self, store, name=None):
@@ -1338,6 +1339,70 @@ def test_chantier_todo_unknown_id_is_404(client_factory):
     tc = client_factory(fake)
     res = tc.patch(
         "/orgs/org-1/chantiers/ch-1/todos/todo-inconnu", json={"done": True},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 404
+
+
+def test_chantier_questions_roundtrip_and_answer(client_factory):
+    """Raphaël (2026-09-21) : la fiche de questions doit vivre dans le
+    Cockpit lui-même, pas sur une page à part -- une question créée ici
+    doit être lisible et répondable directement via l'API du Cockpit."""
+    fake = _make_client(
+        profiles=[ADMIN_PROFILE],
+        chantiers=[{"id": "ch-1", "org_id": "org-1", "title": "X", "status": "attente_retour"}],
+    )
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+
+    res = tc.post(
+        "/orgs/org-1/chantiers/ch-1/questions",
+        json={"question": "On garde l'ancien fichier ou pas ?", "options": ["Le garder", "Le supprimer"]},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    questions = res.json()
+    assert [q["question"] for q in questions] == ["On garde l'ancien fichier ou pas ?"]
+    assert questions[0]["options"] == ["Le garder", "Le supprimer"]
+    assert questions[0]["answer"] is None
+    question_id = questions[0]["id"]
+
+    res = tc.patch(
+        f"/orgs/org-1/chantiers/ch-1/questions/{question_id}",
+        json={"answer": "Le garder", "comment": "au cas où"},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    answered = res.json()[0]
+    assert answered["answer"] == "Le garder"
+    assert answered["comment"] == "au cas où"
+    assert answered["answered_at"] is not None
+
+    res = tc.get("/orgs/org-1/chantiers/ch-1/questions", headers=headers)
+    assert res.json()[0]["answer"] == "Le garder"
+
+
+def test_chantier_question_empty_is_400(client_factory):
+    fake = _make_client(
+        profiles=[ADMIN_PROFILE],
+        chantiers=[{"id": "ch-1", "org_id": "org-1", "title": "X", "status": "a_faire"}],
+    )
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/chantiers/ch-1/questions", json={"question": "   "},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_chantier_question_unknown_id_is_404(client_factory):
+    fake = _make_client(
+        profiles=[ADMIN_PROFILE],
+        chantiers=[{"id": "ch-1", "org_id": "org-1", "title": "X", "status": "a_faire"}],
+    )
+    tc = client_factory(fake)
+    res = tc.patch(
+        "/orgs/org-1/chantiers/ch-1/questions/question-inconnue", json={"answer": "Oui"},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 404

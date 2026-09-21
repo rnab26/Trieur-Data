@@ -503,6 +503,21 @@ export type ChantierTodo = {
   done_at: string | null
 }
 
+// Question à choix cliquables posée sur un chantier -- remplace la
+// fiche Artifact séparée du Cockpit (Raphaël, 2026-09-21) : elle vit
+// dans la même base que le reste du Cockpit, une réponse donnée ici est
+// visible telle quelle par n'importe quelle session Claude ensuite.
+export type ChantierQuestion = {
+  id: string
+  chantier_id: string
+  question: string
+  options: string[]
+  answer: string | null
+  comment: string | null
+  created_at: string
+  answered_at: string | null
+}
+
 export function listChantiers(orgId: string) {
   return request<Chantier[]>(`/orgs/${orgId}/chantiers`)
 }
@@ -561,6 +576,23 @@ export function setChantierTodoDone(orgId: string, chantierId: string, todoId: s
   return request<{ id: string; done: boolean }>(
     `/orgs/${orgId}/chantiers/${chantierId}/todos/${todoId}`,
     { method: 'PATCH', body: JSON.stringify({ done }) },
+  )
+}
+
+export function listChantierQuestions(orgId: string, chantierId: string) {
+  return request<ChantierQuestion[]>(`/orgs/${orgId}/chantiers/${chantierId}/questions`)
+}
+
+export function answerChantierQuestion(
+  orgId: string,
+  chantierId: string,
+  questionId: string,
+  answer: string,
+  comment: string | null,
+) {
+  return request<ChantierQuestion[]>(
+    `/orgs/${orgId}/chantiers/${chantierId}/questions/${questionId}`,
+    { method: 'PATCH', body: JSON.stringify({ answer, comment }) },
   )
 }
 

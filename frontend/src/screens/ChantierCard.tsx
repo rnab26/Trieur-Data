@@ -6,12 +6,15 @@ import {
   CHANTIER_STATUSES,
   addChantierMessage,
   addChantierTodo,
+  answerChantierQuestion,
   listChantierMessages,
+  listChantierQuestions,
   listChantierTodos,
   setChantierTodoDone,
   updateChantierStatus,
   type Chantier,
   type ChantierMessage,
+  type ChantierQuestion,
   type ChantierStatus,
   type ChantierTodo,
 } from '@/lib/api'
@@ -63,6 +66,79 @@ function LinkifiedText({ text }: { text: string }) {
   )
 }
 
+// Une question à choix cliquables, posée par une session Claude sur un
+// chantier ambigu (Raphaël, 2026-09-21 -- remplace la fiche Artifact à
+// part, perdue d'une session à l'autre : ici la réponse vit dans le
+// Cockpit lui-même, visible par la prochaine session automatiquement).
+function QuestionBlock({
+  orgId,
+  chantierId,
+  question,
+  onAnswered,
+}: {
+  orgId: string
+  chantierId: string
+  question: ChantierQuestion
+  onAnswered: (updated: ChantierQuestion[]) => void
+}) {
+  const [comment, setComment] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function handleChoose(option: string) {
+    setSubmitting(true)
+    setError(null)
+    try {
+      const updated = await answerChantierQuestion(
+        orgId, chantierId, question.id, option, comment.trim() || null,
+      )
+      onAnswered(updated)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  if (question.answered_at) {
+    return (
+      <div className="rounded-md border border-[var(--border)] bg-[var(--muted-bg)] p-2 text-sm">
+        <p className="text-[var(--muted)]">{question.question}</p>
+        <p className="mt-1">
+          Ta réponse : <span className="font-medium">{question.answer}</span>
+          {question.comment && <span className="text-[var(--muted)]"> — {question.comment}</span>}
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="rounded-md border border-[var(--primary)] bg-[var(--muted-bg)] p-3 text-sm">
+      <p className="font-medium">{question.question}</p>
+      <div className="mt-2 flex flex-wrap gap-2">
+        {question.options.map((option) => (
+          <Button
+            key={option}
+            type="button"
+            variant="secondary"
+            disabled={submitting}
+            onClick={() => void handleChoose(option)}
+          >
+            {option}
+          </Button>
+        ))}
+      </div>
+      <Input
+        className="mt-2"
+        placeholder="Préciser ta réponse (optionnel)…"
+        value={comment}
+        onChange={(e) => setComment(e.target.value)}
+      />
+      {error && <p className="mt-1 text-xs text-[var(--danger)]">{error}</p>}
+    </div>
+  )
+}
+
 export function ChantierCard({
   orgId,
   chantier,
@@ -88,6 +164,9 @@ export function ChantierCard({
   const [newTodo, setNewTodo] = useState('')
   const [addingTodo, setAddingTodo] = useState(false)
 
+  const [questions, setQuestions] = useState<ChantierQuestion[] | null>(null)
+  const [questionsError, setQuestionsError] = useState<string | null>(null)
+
   useEffect(() => {
     let cancelled = false
     listChantierTodos(orgId, chantier.id)
@@ -96,6 +175,23 @@ export function ChantierCard({
       })
       .catch((err: unknown) => {
         if (!cancelled) setTodosError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [orgId, chantier.id])
+
+  // Chargées inconditionnellement (pas seulement quand le fil est ouvert)
+  // -- une question sans réponse est ce qui explique le statut "Attente
+  // de ta réponse", elle doit être visible sans un clic de plus.
+  useEffect(() => {
+    let cancelled = false
+    listChantierQuestions(orgId, chantier.id)
+      .then((data) => {
+        if (!cancelled) setQuestions(data)
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setQuestionsError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
       })
     return () => {
       cancelled = true
@@ -195,6 +291,23 @@ export function ChantierCard({
       </div>
 
       {statusError && <p className="mt-1 text-xs text-[var(--danger)]">{statusError}</p>}
+
+      {questionsError && <p className="mt-1 text-xs text-[var(--danger)]">{questionsError}</p>}
+      {questions && questions.some((q) => !q.answered_at) && (
+        <div className="mt-2 flex flex-col gap-2">
+          {questions
+            .filter((q) => !q.answered_at)
+            .map((q) => (
+              <QuestionBlock
+                key={q.id}
+                orgId={orgId}
+                chantierId={chantier.id}
+                question={q}
+                onAnswered={setQuestions}
+              />
+            ))}
+        </div>
+      )}
 
       {todos && todos.length > 0 && (
         <div className="mt-2">

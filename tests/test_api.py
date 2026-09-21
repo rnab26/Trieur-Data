@@ -1292,18 +1292,20 @@ def _upload_csv(tc, org_id, content: bytes, filename="clients.csv"):
 
 
 def test_pipeline_session_create_rejects_oversized_upload_before_parsing(client_factory, monkeypatch):
-    """Un .xlsx de 8,5 Mo mesuré en conditions réelles (Render, plan
-    512 Mo) a fait grimper le process à ~490 Mo de RAM au parsing
-    pandas/openpyxl et déclenché un OOM-kill en cours de requête --
-    l'utilisateur ne voyait qu'une connexion coupée, rien côté serveur.
-    Rejeté maintenant AVANT tout parsing (413), plafond réduit ici pour
+    """Au-delà de PIPELINE_MAX_UPLOAD_BYTES (plafond ABSOLU même en mode
+    flux -- protège le disque/le temps de requête, pas la RAM, voir sa
+    docstring), rejeté en 413 AVANT tout parsing. Plafond réduit ici pour
     ne pas générer un vrai gros fichier de test.
 
     Trouvaille Copilot, PR #28 : un test qui ne vérifie QUE le code 413
     passerait encore si le contrôle de taille arrivait APRÈS un
     f.read()/parsing -- ne verrouille pas la propriété qui protège
     l'OOM. On fait donc explicitement planter le parsing s'il est
-    jamais atteint, pour prouver que le rejet a bien lieu avant."""
+    jamais atteint, pour prouver que le rejet a bien lieu avant. Message
+    ne suggère plus le CSV (contrairement à l'ancien plafond de #28) --
+    devenu inutile une fois le mode flux fusionné : un .xlsx volumineux
+    est désormais accepté nativement, seul un dépassement du plafond
+    absolu (550 Mo) est rejeté."""
     from api import main as api_main
 
     monkeypatch.setattr(api_main, "PIPELINE_MAX_UPLOAD_BYTES", 10)
@@ -1318,7 +1320,7 @@ def test_pipeline_session_create_rejects_oversized_upload_before_parsing(client_
     res = _upload_csv(tc, "org-1", b"NOM,EMAIL\nDupont,d@x.com\n")
 
     assert res.status_code == 413
-    assert "CSV" in res.json()["detail"]
+    assert "volumineux" in res.json()["detail"]
     assert not fake.postgrest.tables["pipeline_sessions"]
 
 

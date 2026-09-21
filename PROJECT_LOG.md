@@ -2736,3 +2736,112 @@ lint verts à chaque commit. Mergé sur `main` (commit `abac465`).
   test disponibles).
 - [ ] Décider si les 4 trouvailles Copilot non bloquantes ci-dessus
   valent un chantier dédié.
+
+---
+
+## Message réseau clair + gros fichiers xlsx en flux (PR #28 + #29, 2026-09-20/21)
+
+**Pourquoi** : Raphaël a signalé (capture d'écran) qu'en quittant la
+page pendant un import (bascule d'appli sur mobile), il revenait sur
+`Erreur : Erreur inconnue.` -- inexploitable. Root cause creusée avec
+les métriques Render RÉELLES au moment exact du signalement (pas
+supposée) : un .xlsx de 8,5 Mo a fait grimper le process de 123 à
+488 Mo de RAM en quelques secondes (pandas/openpyxl charge tout en
+mémoire, jamais en flux), juste sous la limite de 512 Mo du plan
+Render -- OOM-kill en pleine requête, d'où la connexion coupée sans
+réponse HTTP. Un correctif naïf (plafond bas, 8 Mo) aurait RÉGRESSÉ
+par rapport à l'usage réel de Raphaël ("avant je pouvais importer
+jusqu'à 500 Mo, je veux pas régresser") -- confirmé dans
+`.streamlit/config.toml` (`maxUploadSize=500` sur l'ancien Streamlit).
+
+**PR #28 -- message clair + garde-fous de taille** :
+- `safeFetch()`/`safeReadJson()`/`safeReadBlob()`/`throwForErrorResponse()`
+  (`frontend/src/lib/api.ts`) convertissent toute coupure réseau (avant
+  OU pendant la lecture du corps, réponse OK ou erreur) en message
+  explicite, plutôt que l'erreur brute du navigateur qui tombait dans
+  le `catch` générique de chaque écran. Séparent aussi lecture (réseau)
+  et parsing JSON (format) -- un JSON invalide/HTML de proxy ne
+  s'affiche plus comme "connexion interrompue".
+- Avertissement "ne quitte pas cette page" pendant l'import, sur LES
+  DEUX parcours qui envoient des fichiers (`Tab2ImportMapping.tsx` ET
+  `ImportPanel.tsx`, Base de données > Importer).
+- `PIPELINE_MAX_UPLOAD_BYTES` : plafond appliqué AVANT toute lecture
+  (`f.size`, jamais un `f.read()` préalable), sur les DEUX endpoints
+  d'import (`/pipeline/sessions` et `/orgs/{org_id}/import` --
+  celui-ci n'avait AUCUNE protection avant ce chantier).
+
+**PR #29 -- import et mapping réellement EN FLUX, jamais toute la
+session en mémoire** (au lieu de se contenter de rehausser le
+plafond) :
+1. **Import** (`trieur/io_excel.py:stream_excel_sheets`) -- openpyxl
+   en mode `read_only`, ligne par ligne, insertion par lots. Détection
+   d'en-tête reproduite à l'identique sur un échantillon borné (ces
+   fonctions n'en regardent de toute façon jamais plus). Mesuré : delta
+   mémoire quasi nul sur 50 000 lignes (sous-process isolé), contre
+   ~45x la taille du fichier en RAM par le chemin classique -- calamine
+   testé en parallèle : même pic mémoire qu'openpyxl, aucun gain réel
+   malgré le commentaire "plus économe" hérité du code d'origine.
+2. **Application du mapping** (`api/main.py:apply_pipeline_mapping`) --
+   chaque onglet traité PAR PAGES depuis la base plutôt que tout
+   chargé d'un coup : sans ce 2e volet, le même risque mémoire se
+   serait juste déplacé de l'import au mapping sur un gros fichier.
+3. Bascule automatique au-delà de `PIPELINE_STREAM_THRESHOLD_BYTES`
+   (8 Mo, mesuré) ; en dessous, chemin classique inchangé. Plafond
+   absolu (`PIPELINE_MAX_UPLOAD_BYTES`) relevé à **550 Mo** (marge
+   au-dessus du besoin réel de 500 Mo) -- un plafond plus bas aurait
+   juste déplacé la régression du "plante en RAM" au "rejeté en 413".
+
+**Revue Copilot, ~15 rounds cumulés sur les deux PR, tous les vrais
+bugs corrigés et testés avant merge** -- points notables :
+- Deux endroits distincts avaient le même bug `(f.size or 0)` :
+  UploadFile.size indisponible compté silencieusement à 0 octet,
+  contournant le plafond ET laissant passer `f.read()` sur un fichier
+  arbitrairement gros. Corrigé aux 3 endroits (chaque PR avait sa
+  propre copie indépendante du endpoint, créées avant qu'aucune ne
+  soit mergée).
+- **Traitement partiel silencieux en mode flux** : `apply_pipeline_mapping`
+  se basait entièrement sur `sheet_keys` fourni par le client -- une
+  liste désynchronisée laissait des lignes jamais traitées (ni
+  mises à jour ni exclues) alors que la session passait quand même à
+  `mapped`. Garde ajoutée : `n_updated + n_excluded` comparé au
+  `row_count` initial (capturé AVANT toute mutation -- `delete_pipeline_rows`
+  décrémente `row_count` sur le même dict en place côté client
+  Postgrest, donc le relire après coup aurait faussé la comparaison),
+  échec explicite + session supprimée sur mismatch.
+- **En-têtes vides/dupliquées écrasaient des colonnes** :
+  `dict(zip(columns, ...))` perdait silencieusement des données sur un
+  fichier avec une en-tête imparfaite (cellules vides, nom répété).
+  Vérifié contre le vrai comportement de pandas (pas supposé) et
+  reproduit à l'identique (`Unnamed: <index>`, suffixe `.1`/`.2`).
+- Une trouvaille répétée sur plusieurs rounds (conversion `None` en
+  chaîne `"None"` lors de l'inférence sans en-tête) a été
+  méthodiquement VÉRIFIÉE contre la version pandas réellement
+  installée (non reproductible, testé en conditions réelles) avant
+  d'être quand même rendue explicite dans le code par prudence,
+  plutôt que patchée à l'aveugle sur la seule foi de la review.
+- Test mémoire (`test_io_excel_streaming.py`) déplacé dans un
+  sous-process `spawn` isolé -- `ru_maxrss` est un maximum non
+  décroissant, le mesurer dans le process de test aurait pu masquer
+  une régression du streaming derrière le pic déjà atteint en
+  générant le fichier de test.
+- `.xls` (format binaire Excel 97-2003, différent de `.xlsx`) exclu
+  explicitement du mode flux -- `stream_excel_sheets` repose sur
+  openpyxl, qui ne le lit pas.
+
+**Fusion des deux PR** : #28 mergé en premier (`ec0e7ec`), conflit
+attendu résolu en gardant la version évoluée de #29 sur
+`api/main.py`/`tests/test_api.py` (seuil de flux + plafond 550 Mo +
+garde .xls + garde traitement-partiel, pas le simple rejet 8 Mo de
+#28) -- puis #29 mergé (`a3d86aa`). 343 tests backend verts (hors le
+test e2e Playwright `test_master_columns_localstorage_fallback`,
+préexistant et non lié, déjà connu instable en CI). Build et lint
+frontend verts. Déployé sur Render, service live et sain (logs
+vérifiés, aucune erreur).
+
+**Reste à faire côté Raphaël** :
+- [ ] Test réel avec un vrai fichier volumineux (300-550 Mo) après
+  déploiement -- cette échelle n'a jamais été vérifiée en conditions
+  réelles (temps de requête, délais proxy Render au-delà de quelques
+  dizaines de Mo).
+- [ ] Reproduire le scénario original (quitter la page pendant un
+  import) pour confirmer que le message est bien maintenant lisible.

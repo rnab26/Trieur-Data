@@ -4,8 +4,6 @@ vérifiée individuellement avant le test de bout en bout."""
 
 from datetime import date
 
-import pytest
-
 from trieur.prelevement import (
     GenerationResult,
     PrelevementRules,
@@ -80,22 +78,11 @@ def test_compute_first_prelevement_date_none_when_not_scheduled():
     assert compute_first_prelevement_date(None, date(2026, 9, 21), 3) is None
 
 
-def test_build_motif_one_product():
-    motif = build_motif("1422647", {"Optilife": 99.0})
-    assert motif == "MGS-1422647-O"
-
-
-def test_build_motif_several_products_in_fixed_order():
-    amounts = {
-        "IMMO": 5.9,
-        "Optilife": 99.0,
-        "Carte MGS": 20.0,
-    }
-    assert build_motif("42", amounts) == "MGS-42-O-M-IM"
-
-
-def test_build_motif_no_product_is_bare_rum():
-    assert build_motif("42", {}) == "MGS-42"
+def test_build_motif_one_mandate_one_suffix():
+    """Un mandat = UN produit = UN suffixe, jamais plusieurs combinés --
+    voir generate_mandats pour la règle d'éclatement."""
+    assert build_motif("1422647", "-O") == "MGS-1422647-O"
+    assert build_motif("42", "-J") == "MGS-42-J"
 
 
 def _base_row(**overrides) -> dict:
@@ -123,21 +110,24 @@ def _base_row(**overrides) -> dict:
         "Auditif": 0,
         "IMMO": 0,
         "Total cotisation MYMO VETO SUR ": 0,
-        "Total frais de dossier": 40.0,
-        "Total cotisation et frais de dossier": 139.0,
+        "Total frais de dossier": 20.0,
     }
     row.update(overrides)
     return row
 
 
 def test_generate_mandats_ooff_when_frais_present():
+    """FRST (1er prélèvement) = valeur du produit + frais de dossier
+    (20€ par défaut, réglable) -- PAS "Total cotisation et frais de
+    dossier" (colonne trouvée fausse le 2026-09-21 en croisant avec le
+    vrai fichier de remise bancaire du Drive, jamais réutilisée)."""
     result = generate_mandats([_base_row()], PrelevementRules(), today=date(2026, 9, 21))
     assert len(result.ooff) == 1
     assert len(result.rcur) == 0
     assert len(result.exclus) == 0
     mandat = result.ooff[0]
     assert mandat.type_sequence == "FRST"
-    assert mandat.montant_eur == 139.0
+    assert mandat.montant_eur == 119.0  # 99 (Optilife) + 20 (frais)
     assert mandat.iban == VALID_IBAN
     assert mandat.bic == "CMBRFR2BXXX"
     assert mandat.motif == "MGS-RUM000001-O"
@@ -149,15 +139,85 @@ def test_generate_mandats_ooff_when_frais_present():
     # Vide pour un 1er prélèvement -- ne décrit que la récurrence des
     # prélèvements SUIVANTS (vérifié contre le fichier de référence).
     assert mandat.explication_periodicite == ""
+    # Pas de colonne "date d'effet" dans cette ligne de test -> vide,
+    # jamais inventée.
+    assert mandat.date_effet == ""
 
 
 def test_generate_mandats_rcur_when_no_frais():
-    row = _base_row(**{"Total frais de dossier": 0.0, "Total cotisation et frais de dossier": 99.0})
+    """RCUR (récurrent) = valeur du produit TELLE QUELLE, jamais de
+    frais ajouté."""
+    row = _base_row(**{"Total frais de dossier": 0.0})
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
     assert len(result.rcur) == 1
     assert len(result.ooff) == 0
     assert result.rcur[0].type_sequence == "RCUR"
     assert result.rcur[0].montant_eur == 99.0
+
+
+def test_generate_mandats_frais_setup_eur_is_adjustable():
+    """Les frais de dossier sont un réglage, pas une valeur codée en
+    dur -- demande explicite de Raphaël dès le départ de ce chantier."""
+    result = generate_mandats(
+        [_base_row()], PrelevementRules(frais_setup_eur=15.0), today=date(2026, 9, 21),
+    )
+    assert result.ooff[0].montant_eur == 114.0  # 99 + 15
+
+
+def test_generate_mandats_splits_multi_product_client_into_separate_mandats():
+    """LA règle centrale trouvée le 2026-09-21 en croisant le fichier
+    CRM de référence avec le vrai fichier de remise bancaire du Drive
+    (lecture seule, RUM 1419267) : un client avec Optilife (49,90€) ET
+    MYJURIS (29,89€) génère DEUX mandats séparés -- jamais un mandat
+    combiné à 79,79€ (ce que l'ancien moteur faisait, et qui n'a jamais
+    correspondu à aucun montant réel envoyé en banque)."""
+    row = _base_row(**{
+        "RUM": "1419267",
+        "Optilife": 49.90,
+        "MYJURIS & MYHOSPI": 29.89,
+        "Total frais de dossier": 40.0,  # 20€ x 2 produits actifs
+    })
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    assert len(result.ooff) == 2
+    assert len(result.rcur) == 0
+    by_motif = {m.motif: m for m in result.ooff}
+    assert set(by_motif) == {"MGS-1419267-O", "MGS-1419267-J"}
+    # Montants réels vérifiés contre le vrai fichier de remise bancaire
+    # (onglet "remises CAIXA+Sabadell" du classeur Drive) : FRST
+    # Optilife = 69,90€, FRST MYJURIS = 49,89€.
+    assert by_motif["MGS-1419267-O"].montant_eur == 69.90
+    assert by_motif["MGS-1419267-J"].montant_eur == 49.89
+
+
+def test_generate_mandats_multi_product_rcur_matches_real_remise():
+    """Même client que ci-dessus, mais en récurrent (sans frais) --
+    montants RCUR vérifiés contre le vrai fichier de remise (49,90€ et
+    29,89€, exactement les valeurs brutes des colonnes produit)."""
+    row = _base_row(**{
+        "RUM": "1419267",
+        "Optilife": 49.90,
+        "MYJURIS & MYHOSPI": 29.89,
+        "Total frais de dossier": 0.0,
+    })
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    assert len(result.rcur) == 2
+    by_motif = {m.motif: m for m in result.rcur}
+    assert by_motif["MGS-1419267-O"].montant_eur == 49.90
+    assert by_motif["MGS-1419267-J"].montant_eur == 29.89
+
+
+def test_generate_mandats_mandats_list_combines_ooff_and_rcur():
+    """result.mandats (l'onglet "Mandat" combiné demandé par Raphaël)
+    contient bien tous les mandats générés, FRST et RCUR mélangés."""
+    row = _base_row(**{
+        "RUM": "1419267",
+        "Optilife": 49.90,
+        "MYJURIS & MYHOSPI": 29.89,
+        "Total frais de dossier": 40.0,
+    })
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    assert len(result.mandats) == 2
+    assert result.mandats == result.ooff
 
 
 def test_generate_mandats_excludes_carte_bleue():
@@ -188,6 +248,14 @@ def test_generate_mandats_excludes_missing_first_prelevement_date():
     assert "date" in result.exclus[0].raison.lower()
 
 
+def test_generate_mandats_excludes_when_no_product_active():
+    row = _base_row(**{"Optilife": 0})
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    assert result.ooff == [] and result.rcur == []
+    assert len(result.exclus) == 1
+    assert "produit" in result.exclus[0].raison.lower()
+
+
 def test_generate_mandats_merges_optivie_into_optilife_motif():
     row = _base_row(**{"Optilife": 0, "Optivie": 39.99})
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
@@ -198,11 +266,18 @@ def test_generate_mandats_merges_optivie_into_optilife_motif():
 def test_generate_mandats_ignores_casse_auditif_column_entirely():
     """Colonne "Contrat MYMO casse & perte appareil auditif" -- Raphaël
     (2026-09-21) : "je ne la prends pas en compte pour l'instant". Ne
-    doit influencer ni le montant ni le motif, même si présente dans le
+    doit générer aucun mandat, même présente et non-nulle dans le
     fichier importé."""
     row = _base_row(**{"Contrat MYMO casse & perte appareil auditif ": 15.0})
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
-    assert result.ooff[0].montant_eur == 139.0  # inchangé
+    assert len(result.ooff) == 1  # seulement Optilife, la casse est ignorée
+    assert result.ooff[0].montant_eur == 119.0  # inchangé (99 + 20)
+
+
+def test_generate_mandats_reads_date_effet_column():
+    row = _base_row(**{"Date d'effet du nouveau contrat (OPTILIFE)": "15/03/2026"})
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    assert result.ooff[0].date_effet == "15/03/2026"
 
 
 def test_generate_mandats_matches_real_reference_client():
@@ -232,7 +307,6 @@ def test_generate_mandats_matches_real_reference_client():
         "Téléphone": "+33600000000",
         "Optilife": 99.0,
         "Total frais de dossier": 20.0,
-        "Total cotisation et frais de dossier": 119.0,
     }
     # "today" volontairement différent de la date de création (mais
     # encore avant la date prévue + délai, pour ne pas interférer avec
@@ -243,7 +317,7 @@ def test_generate_mandats_matches_real_reference_client():
     assert len(result.ooff) == 1
     mandat = result.ooff[0]
     assert mandat.type_sequence == "FRST"
-    assert mandat.montant_eur == 119.0
+    assert mandat.montant_eur == 119.0  # 99 (Optilife) + 20 (frais)
     assert mandat.motif == "MGS-1422647-O"
     assert mandat.bic == "CMBRFR2BXXX"
     assert mandat.date_premiere_echeance == "10/09/2026"

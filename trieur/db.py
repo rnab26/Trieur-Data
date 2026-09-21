@@ -146,6 +146,55 @@ def create_section(client: Client, org_id: str, nom: str) -> dict:
     return res.data[0]
 
 
+# Familles de mots-clés du domaine (repris de PROJECT_LOG.md/CockpitScreen) --
+# ordre = priorité en cas de titre qui matcherait plusieurs familles.
+_THEME_KEYWORDS: list[tuple[str, list[str]]] = [
+    ("Import & mapping", ["import", "mapping", "fichier", "excel", "xlsx", "csv", "colonne", "upload"]),
+    ("Filtrage & doublons", ["doublon", "dedup", "quasi-doublon", "iban", "filtre"]),
+    ("Export", ["export", "telecharg", "xml", "sepa", "pain.008", "pain008"]),
+    ("Base de donnees", ["base de donnee", "client", "ligne", "enregistrement", "historique", "etiquette"]),
+    ("Cockpit & suivi", ["cockpit", "chantier", "routine", "journal"]),
+    ("Comptes & securite", ["role", "admin", "permission", "droit", "securite", "compte", "login", "connexion"]),
+    ("Interface & navigation", ["ecran", "onglet", "menu", "affichage", "bascule", "interface"]),
+    ("Performance & fiabilite", ["lent", "lenteur", "performance", "bug", "erreur", "plante", "crash", "timeout"]),
+    ("Deploiement & infra", ["render", "deploiement", "supabase", "migration"]),
+]
+
+
+def _normalize(text: str) -> str:
+    import unicodedata
+
+    nfkd = unicodedata.normalize("NFKD", text.lower())
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
+def infer_chantier_theme(existing_sections: list[dict], title: str) -> str:
+    """Devine la section d'un chantier créé sans thème explicite --
+    Raphaël (2026-09-21) veut que les sections se créent et se trient
+    seules, sans lui demander de choisir à chaque fois. Priorité aux
+    sections DÉJÀ existantes (son propre découpage passe avant nos
+    catégories par défaut, évite de dupliquer une section qu'il a déjà
+    faite) ; sinon une famille de mots-clés connue du domaine ; sinon
+    "Général" plutôt que de laisser un thème vide (qui retomberait dans
+    "À classer" côté CockpitScreen -- l'objectif est justement qu'il n'y
+    ait plus rien à classer à la main)."""
+    norm_title = _normalize(title)
+
+    for section in existing_sections:
+        nom = section.get("nom") or ""
+        if not nom:
+            continue
+        norm_nom = _normalize(nom)
+        if norm_nom in norm_title or norm_title in norm_nom:
+            return nom
+
+    for theme, keywords in _THEME_KEYWORDS:
+        if any(kw in norm_title for kw in keywords):
+            return theme
+
+    return "Général"
+
+
 def update_chantier_status(client: Client, chantier_id: str, status: str) -> None:
     _td(client, "chantiers").update({"status": status}).eq("id", chantier_id).execute()
 

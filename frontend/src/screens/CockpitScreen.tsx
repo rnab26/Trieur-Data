@@ -18,9 +18,6 @@ import {
 } from '@/lib/api'
 import { ChantierCard, STATUT_LABELS } from './ChantierCard'
 
-const SANS_SECTION = '— Sans section —'
-const NOUVELLE_SECTION = '+ Nouvelle section…'
-
 // Ordre d'affichage : ce qui a besoin de toi d'abord, ce qui est clos
 // en dernier -- même règle que views/tab_cockpit.py.
 const STATUT_ACTIFS: ChantierStatus[] = ['attente_retour', 'en_cours', 'a_faire']
@@ -91,8 +88,6 @@ export function CockpitScreen() {
   const [formOpen, setFormOpen] = useState(false)
   const [newTitle, setNewTitle] = useState('')
   const [newPriority, setNewPriority] = useState<ChantierPriority>('normale')
-  const [newSectionChoice, setNewSectionChoice] = useState(SANS_SECTION)
-  const [newSectionName, setNewSectionName] = useState('')
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
 
@@ -151,18 +146,12 @@ export function CockpitScreen() {
     setCreating(true)
     setCreateError(null)
     try {
-      let theme: string | null = null
-      if (newSectionChoice === NOUVELLE_SECTION && newSectionName.trim()) {
-        await createSection(orgId, newSectionName.trim())
-        theme = newSectionName.trim()
-      } else if (newSectionChoice !== SANS_SECTION) {
-        theme = newSectionChoice
-      }
-      await createChantier(orgId, { title: newTitle.trim(), priority: newPriority, theme })
+      // Pas de thème choisi ici : le serveur range seul le chantier dans
+      // une section existante ou en crée une (Raphaël, 2026-09-21 -- "les
+      // sections doivent se créer et se trier seules").
+      await createChantier(orgId, { title: newTitle.trim(), priority: newPriority, theme: null })
       setNewTitle('')
       setNewPriority('normale')
-      setNewSectionChoice(SANS_SECTION)
-      setNewSectionName('')
       setFormOpen(false)
       refresh()
     } catch (err) {
@@ -311,39 +300,21 @@ export function CockpitScreen() {
                       value={newTitle}
                       onChange={(e) => setNewTitle(e.target.value)}
                     />
-                    <div className="flex flex-wrap gap-2">
-                      <select
-                        className="rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)]"
-                        value={newPriority}
-                        onChange={(e) => setNewPriority(e.target.value as ChantierPriority)}
-                      >
-                        {CHANTIER_PRIORITIES.map((p) => (
-                          <option key={p} value={p}>
-                            Priorité {p}
-                          </option>
-                        ))}
-                      </select>
-                      <select
-                        className="min-w-[180px] flex-1 rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)]"
-                        value={newSectionChoice}
-                        onChange={(e) => setNewSectionChoice(e.target.value)}
-                      >
-                        <option value={SANS_SECTION}>{SANS_SECTION}</option>
-                        {sections.map((s) => (
-                          <option key={s.id} value={s.nom}>
-                            {s.nom}
-                          </option>
-                        ))}
-                        <option value={NOUVELLE_SECTION}>{NOUVELLE_SECTION}</option>
-                      </select>
-                    </div>
-                    {newSectionChoice === NOUVELLE_SECTION && (
-                      <Input
-                        placeholder="Nom de la nouvelle section"
-                        value={newSectionName}
-                        onChange={(e) => setNewSectionName(e.target.value)}
-                      />
-                    )}
+                    <select
+                      className="self-start rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)]"
+                      value={newPriority}
+                      onChange={(e) => setNewPriority(e.target.value as ChantierPriority)}
+                    >
+                      {CHANTIER_PRIORITIES.map((p) => (
+                        <option key={p} value={p}>
+                          Priorité {p}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-[var(--muted)]">
+                      Pas besoin de choisir une section : elle est trouvée automatiquement d'après le
+                      titre.
+                    </p>
                     {createError && <p className="text-sm text-[var(--danger)]">{createError}</p>}
                     <Button type="submit" disabled={creating || !newTitle.trim()}>
                       {creating ? 'Création…' : 'Créer'}

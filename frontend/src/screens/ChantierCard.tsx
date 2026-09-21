@@ -32,6 +32,37 @@ function formatDate(iso: string): string {
   }
 }
 
+const URL_PATTERN = /(https?:\/\/[^\s]+)/g
+
+// Un message de chantier peut contenir un lien vers une fiche de
+// questions (Artifact claude.ai) -- affiché en texte brut jusqu'ici, donc
+// impossible à taper au pouce sur téléphone (Raphaël, 2026-09-21).
+function LinkifiedText({ text }: { text: string }) {
+  // split() sur un pattern à groupe capturant intercale les URLs trouvées
+  // aux index impairs -- pas de `.test()` séparé, qui serait faux avec un
+  // regex global (son `lastIndex` change à chaque appel).
+  const parts = text.split(URL_PATTERN)
+  return (
+    <>
+      {parts.map((part, i) =>
+        i % 2 === 1 ? (
+          <a
+            key={i}
+            href={part}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[var(--primary)] underline break-all"
+          >
+            {part}
+          </a>
+        ) : (
+          <span key={i}>{part}</span>
+        ),
+      )}
+    </>
+  )
+}
+
 export function ChantierCard({
   orgId,
   chantier,
@@ -237,7 +268,9 @@ export function ChantierCard({
                   <p className="text-xs text-[var(--muted)]">
                     {msg.author_type === 'user' ? '🧑 Toi' : '🤖 Claude'} · {formatDate(msg.created_at)}
                   </p>
-                  <p className="whitespace-pre-wrap">{msg.body}</p>
+                  <p className="whitespace-pre-wrap">
+                    <LinkifiedText text={msg.body} />
+                  </p>
                 </div>
               ))}
               <form

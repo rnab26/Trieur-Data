@@ -288,12 +288,19 @@ def _clear_streamlit_caches():
     client exclu de la clé (paramètre `_client`) -- sans ce nettoyage,
     un test réutilise le résultat mis en cache par le test précédent
     pour le même user_id/org_id, même avec un faux client différent."""
-    from trieur.db import get_my_memberships, get_my_profile, get_org_master_columns, list_saved_views
+    from trieur.db import (
+        get_my_memberships,
+        get_my_profile,
+        get_org_master_columns,
+        list_saved_views,
+        list_sections,
+    )
 
     get_my_profile.clear()
     get_my_memberships.clear()
     get_org_master_columns.clear()
     list_saved_views.clear()
+    list_sections.clear()
     yield
 
 
@@ -1135,6 +1142,63 @@ def test_create_chantier_rejects_invalid_priority(client_factory):
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 400
+
+
+def test_create_chantier_without_theme_infers_and_creates_section(client_factory):
+    """Raphaël (2026-09-21) : plus de section à choisir à la main -- le
+    serveur doit deviner un thème d'après le titre ET créer la section
+    correspondante, sinon le chantier retomberait dans "À classer" côté
+    CockpitScreen malgré tout."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+
+    res = tc.post(
+        "/orgs/org-1/chantiers",
+        json={"title": "Export XML SEPA (pain.008)"},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    assert res.json()["theme"] == "Export"
+
+    res = tc.get("/orgs/org-1/sections", headers=headers)
+    assert [s["nom"] for s in res.json()] == ["Export"]
+
+
+def test_create_chantier_without_theme_reuses_existing_section(client_factory):
+    """Une section déjà créée par Raphaël (ex. le nom de son activité)
+    passe avant nos familles de mots-clés génériques."""
+    fake = _make_client(
+        profiles=[ADMIN_PROFILE],
+        sections=[{"id": "s-1", "org_id": "org-1", "nom": "Prélèvement", "position": 0}],
+    )
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+
+    res = tc.post(
+        "/orgs/org-1/chantiers",
+        json={"title": "Export XML SEPA pour le Prélèvement"},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    assert res.json()["theme"] == "Prélèvement"
+
+    res = tc.get("/orgs/org-1/sections", headers=headers)
+    assert [s["nom"] for s in res.json()] == ["Prélèvement"]
+
+
+def test_create_chantier_without_theme_falls_back_to_general(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+
+    res = tc.post(
+        "/orgs/org-1/chantiers",
+        json={"title": "Truc vague sans mot-clé connu"},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    assert res.json()["theme"] == "Général"
 
 
 def test_create_and_list_sections(client_factory):

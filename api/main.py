@@ -52,6 +52,7 @@ from trieur.db import (
     get_pipeline_session,
     get_record,
     import_dataframe,
+    infer_chantier_theme,
     insert_pipeline_rows_only,
     is_pipeline_dedupe_lock_owner,
     list_all_records,
@@ -2052,9 +2053,16 @@ def post_chantier(org_id: str, body: ChantierCreate, ctx: AuthCtx = Depends(requ
         raise HTTPException(status_code=400, detail="Le titre du chantier est obligatoire.")
     if body.priority not in ("basse", "normale", "haute"):
         raise HTTPException(status_code=400, detail="Priorité invalide.")
+    theme = body.theme.strip() if body.theme and body.theme.strip() else None
+    if theme is None:
+        # Raphaël (2026-09-21) : les sections doivent se créer et se
+        # trier seules -- plus de choix manuel à la création.
+        existing_sections = list_sections(ctx.client, org_id)
+        theme = infer_chantier_theme(existing_sections, body.title)
+        if not any(s["nom"] == theme for s in existing_sections):
+            create_section(ctx.client, org_id, theme)
     chantier = create_chantier(
-        ctx.client, org_id, body.title.strip(), body.priority, ctx.user.id,
-        theme=body.theme.strip() if body.theme and body.theme.strip() else None,
+        ctx.client, org_id, body.title.strip(), body.priority, ctx.user.id, theme=theme,
     )
     return chantier
 

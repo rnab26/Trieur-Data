@@ -38,7 +38,8 @@ la suite, en intégrant ces réponses et leurs commentaires :
    arrivant").
 7. [x] Étiquettes libres sur un client (n1) — livré, voir section
    ci-dessous.
-8. [ ] Annuler un import entier en un clic (n3).
+8. [x] Annuler un import entier en un clic (n3) — livré, voir section
+   ci-dessous.
 9. [x] Recherche avancée façon Google Sheets + modification multiple —
    livré, voir section ci-dessous.
 10. [x] Diff au réimport (comparaison champ par champ sur une alerte de
@@ -3196,3 +3197,38 @@ d'isolation entre tests e2e, pas encore diagnostiqué en détail.
 
 **Pas encore vérifié** : rendu réel dans l'app (pas de compte Supabase
 connecté disponible dans cette session).
+
+---
+
+## Annuler un import entier en un clic (2026-09-21, PR #40, Routine Cockpit)
+
+**Fait** (chantier point 8 ci-dessus, n3) : répondu "oui" par Raphaël,
+sans commentaire additionnel.
+
+- Aucune migration nécessaire : `records.batch_id` référence déjà
+  `import_batches` en `on delete cascade` depuis le schéma initial
+  (`0001_init.sql`) -- supprimer le lot suffit à retirer ses clients,
+  alertes de doublon et étiquettes avec lui.
+- `trieur/db.py` : `list_recent_import_batches()` (15 plus récents),
+  `cancel_import_batch()`.
+- Section "🗂️ Imports récents (annuler)" dans l'onglet Import
+  (Streamlit), un bouton par lot avec confirmation à deux étapes --
+  masquée pour un membre lecture seule. Même API côté FastAPI.
+
+**Vérifié, pas juste supposé depuis la définition SQL** : cascade testé
+directement sur le projet Supabase réel (lot + client + étiquette de
+test insérés, lot supprimé, les trois confirmés disparus, aucune trace
+résiduelle) avant d'écrire le code Python. `pytest` : 424/425 (voir
+point suivant).
+
+**CI rouge pré-existante rencontrée à nouveau (3e fois consécutive,
+PR #35/#38/#40)** :
+`tests/test_e2e_smoke.py::test_master_columns_localstorage_fallback`
+reste cassé sur `main`, sans lien avec les 3 derniers chantiers livrés.
+Mergé à chaque fois malgré ce rouge (déjà expliqué et accepté comme
+pratique sur ce dépôt), mais ça commence à coûter une vérification
+manuelle à chaque PR -- **vaut maintenant un chantier dédié pour le
+corriger** plutôt que de continuer à le contourner. Piste déjà notée :
+manque d'isolation entre tests e2e (l'état trouvé au moment de l'échec
+ressemble aux colonnes maîtres laissées par un AUTRE test e2e de la
+même session pytest, pas les valeurs par défaut attendues).

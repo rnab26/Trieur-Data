@@ -1710,6 +1710,30 @@ def test_prelevement_generate_merges_multiple_files(client_factory):
     assert res.headers["x-exclus-count"] == "2"
 
 
+def test_prelevement_generate_steps_header_describes_processing(client_factory):
+    """Résumé des étapes demandé par Raphaël (2026-09-21) : voir ce qui
+    a été fait sur le fichier (lignes lues, exclusions, mandats), pas
+    seulement les compteurs finaux -- encodé en base64 (en-têtes HTTP en
+    ASCII uniquement)."""
+    import base64
+    import json
+
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/prelevement/generate",
+        files=[("files", ("export.csv", _PRELEVEMENT_CSV, "text/csv"))],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    steps = json.loads(base64.b64decode(res.headers["x-steps-b64"]).decode("utf-8"))
+    assert isinstance(steps, list) and len(steps) >= 3
+    joined = " ".join(steps)
+    assert "1 fichier lu" in joined
+    assert "exclue" in joined
+    assert "mandat" in joined.lower()
+
+
 def test_create_and_list_sections(client_factory):
     fake = _make_client(profiles=[ADMIN_PROFILE])
     tc = client_factory(fake)

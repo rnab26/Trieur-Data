@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import json
 import os
@@ -132,7 +133,7 @@ app.add_middleware(
     # frontend même si le fichier généré contient de vraies données
     # (confirmé : Raphaël a eu "0/0/0" affiché avec un classeur de 66
     # mandats OOFF réels dedans -- CORS, pas un bug du moteur).
-    expose_headers=["X-Ooff-Count", "X-Rcur-Count", "X-Exclus-Count"],
+    expose_headers=["X-Ooff-Count", "X-Rcur-Count", "X-Exclus-Count", "X-Steps-B64"],
 )
 
 
@@ -2233,6 +2234,36 @@ async def post_prelevement_generate(
         )
     buffer.seek(0)
 
+    # Résumé des étapes de traitement, lisible par Raphaël -- demande
+    # explicite (2026-09-21) : voir CE QUI A ÉTÉ FAIT sur le fichier,
+    # pas seulement le nombre final de mandats. Encodé en base64 dans un
+    # en-tête (les en-têtes HTTP n'acceptent que de l'ASCII, jamais les
+    # accents en clair) -- décodé côté frontend.
+    n_lignes = len(rows)
+    n_fichiers = len(files)
+    raisons_exclusion: dict[str, int] = {}
+    for e in result.exclus:
+        raisons_exclusion[e.raison] = raisons_exclusion.get(e.raison, 0) + 1
+    n_fusions = sum(1 for m in result.mandats if m.motif.endswith("-J-AU"))
+    steps = [
+        f"{n_fichiers} fichier(s) lu(s) et fusionné(s)" if n_fichiers > 1 else "1 fichier lu",
+        f"{n_lignes} ligne(s) client au total",
+    ]
+    if raisons_exclusion:
+        detail = ", ".join(f"{v} × {k}" for k, v in raisons_exclusion.items())
+        steps.append(f"{len(result.exclus)} ligne(s) exclue(s) : {detail}")
+    else:
+        steps.append("Aucune ligne exclue")
+    steps.append(
+        f"{len(result.mandats)} mandat(s) généré(s) : {len(result.ooff)} en 1er "
+        f"prélèvement (First), {len(result.rcur)} récurrent(s) (RCUR)"
+    )
+    if n_fusions:
+        steps.append(
+            f"{n_fusions} mandat(s) MYJURIS+IMMO fusionné(s) en un seul (règle -J-AU)"
+        )
+    steps_b64 = base64.b64encode(json.dumps(steps, ensure_ascii=False).encode("utf-8")).decode("ascii")
+
     file_base = sanitize_filename(filename, default="mandats_prelevement")
     return StreamingResponse(
         buffer,
@@ -2242,6 +2273,7 @@ async def post_prelevement_generate(
             "X-Ooff-Count": str(len(result.ooff)),
             "X-Rcur-Count": str(len(result.rcur)),
             "X-Exclus-Count": str(len(result.exclus)),
+            "X-Steps-B64": steps_b64,
         },
     )
 

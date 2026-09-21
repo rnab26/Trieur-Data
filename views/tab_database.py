@@ -25,6 +25,7 @@ from trieur.db import (
     add_org_master_columns,
     add_record_tag,
     can_write_org,
+    cancel_import_batch,
     count_records,
     delete_record,
     delete_saved_view,
@@ -38,6 +39,7 @@ from trieur.db import (
     list_dedup_alerts,
     list_org_memberships,
     list_org_tags,
+    list_recent_import_batches,
     list_records,
     list_saved_views,
     remove_membership,
@@ -781,6 +783,37 @@ def _render_import(client, org_id, user, is_admin, can_write):
         st.success(f"{n_imported} lignes importées, {n_alerts} alerte(s) de doublon IBAN créée(s).")
         invalidate_client_list_cache(org_id)
         st.rerun()
+
+    _render_import_history(client, org_id)
+
+
+def _render_import_history(client, org_id):
+    """Annuler un import entier en un clic -- retire toutes les lignes
+    d'un lot récent (et leurs alertes/étiquettes, en cascade -- voir
+    trieur/db.py:cancel_import_batch), sans repasser par une suppression
+    ligne par ligne. Volontairement limité aux imports RÉCENTS (voir
+    RECENT_IMPORT_BATCHES_LIMIT), pas un historique complet illimité."""
+    batches = list_recent_import_batches(client, org_id)
+    if not batches:
+        return
+
+    with st.expander("🗂️ Imports récents (annuler)"):
+        st.caption(
+            "Annuler un import retire d'un coup TOUTES les lignes qu'il a "
+            "ajoutées à cet environnement, ainsi que leurs alertes de "
+            "doublon et étiquettes -- une action irréversible."
+        )
+        for batch in batches:
+            c_name, c_del = st.columns([4, 1.3])
+            with c_name:
+                st.write(f"{batch['source_filename']} — {batch['row_count']} ligne(s), le {batch['imported_at']}")
+            with c_del:
+                if confirm_delete_button("🗑️ Annuler", key=f"cancel_import_{org_id}_{batch['id']}"):
+                    cancel_import_batch(client, batch["id"])
+                    st.success(f"Import « {batch['source_filename']} » annulé.")
+                    invalidate_client_list_cache(org_id)
+                    clear_stale_widgets(f"_confirm_pending_cancel_import_{org_id}_{batch['id']}")
+                    st.rerun()
 
 
 def _render_settings(client, org_id, is_admin):

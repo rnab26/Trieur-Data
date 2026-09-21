@@ -38,6 +38,7 @@ from trieur.db import (
     adjust_pipeline_row_count,
     append_pipeline_rows,
     can_write_org,
+    cancel_import_batch,
     claim_pipeline_session_for_mapping,
     count_records,
     create_chantier,
@@ -71,6 +72,7 @@ from trieur.db import (
     list_org_tags,
     list_pipeline_rows,
     list_pipeline_rows_for_sheet,
+    list_recent_import_batches,
     list_records,
     list_saved_views,
     list_sections,
@@ -778,6 +780,23 @@ async def import_records(
         "unknown_columns": unknown,
         "added_to_master_columns": added,
     }
+
+
+# ---------------------------------------------------------------
+# Imports récents / annulation d'un import entier (migration -- aucune,
+# repose sur les cascades déjà en place, voir trieur/db.py:cancel_import_batch)
+# -- mirroir de views/tab_database.py:_render_import_history.
+# ---------------------------------------------------------------
+
+@app.get("/orgs/{org_id}/import-batches")
+def get_import_batches(org_id: str, ctx: AuthCtx = Depends(require_org_access)):
+    return {"batches": list_recent_import_batches(ctx.client, org_id)}
+
+
+@app.delete("/orgs/{org_id}/import-batches/{batch_id}")
+def delete_import_batch(org_id: str, batch_id: str, ctx: AuthCtx = Depends(require_write_access)):
+    cancel_import_batch(ctx.client, batch_id)
+    return {"id": batch_id, "cancelled": True}
 
 
 # ---------------------------------------------------------------

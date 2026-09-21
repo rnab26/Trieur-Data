@@ -127,6 +127,12 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Sans ça, le navigateur reçoit bien les en-têtes personnalisés mais les
+    # cache au JS -- res.headers.get('x-ooff-count') renvoie null côté
+    # frontend même si le fichier généré contient de vraies données
+    # (confirmé : Raphaël a eu "0/0/0" affiché avec un classeur de 66
+    # mandats OOFF réels dedans -- CORS, pas un bug du moteur).
+    expose_headers=["X-Ooff-Count", "X-Rcur-Count", "X-Exclus-Count"],
 )
 
 

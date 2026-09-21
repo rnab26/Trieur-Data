@@ -52,6 +52,7 @@ from trieur.db import (
     get_my_profile,
     get_org_master_columns,
     get_pipeline_session,
+    get_prelevement_rules,
     get_record,
     import_dataframe,
     infer_chantier_theme,
@@ -71,6 +72,7 @@ from trieur.db import (
     list_user_column_sets,
     resolve_dedup_alert,
     save_org_master_columns,
+    save_prelevement_rules,
     save_saved_view,
     save_user_column_set,
     set_active_column_set,
@@ -82,6 +84,7 @@ from trieur.db import (
     update_record,
 )
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
+from trieur.prelevement import PrelevementRules, generate_mandats
 from trieur.io_excel import read_csv_file, read_excel_all_sheets_from_file, stream_excel_sheets
 from trieur.io_pdf import read_pdf_sepa
 from trieur.matching import apply_header_inference_excel, auto_assign_columns_fast, iban_is_valid
@@ -1975,6 +1978,127 @@ def set_master_columns(org_id: str, body: MasterColumnsUpdate, ctx: AuthCtx = De
         raise HTTPException(status_code=403, detail="Réservé aux administrateurs.")
     save_org_master_columns(ctx.client, org_id, body.columns)
     return {"columns": body.columns}
+
+
+# ---------------------------------------------------------------
+# Génération des mandats de prélèvement (environnement Prélèvement) --
+# voir trieur/prelevement.py pour les règles métier. Réservé aux
+# administrateurs (require_cockpit_access) : ce sont des données
+# bancaires de clients, pas un simple export de la Base de données.
+# ---------------------------------------------------------------
+
+@app.get("/orgs/{org_id}/prelevement/rules")
+def get_prelevement_rules_endpoint(org_id: str, ctx: AuthCtx = Depends(require_cockpit_access)):
+    return get_prelevement_rules(ctx.client, org_id)
+
+
+class PrelevementRulesUpdate(BaseModel):
+    ics: Optional[str] = None
+    nature: str = "CORE"
+    delay_days: int = 3
+
+
+@app.post("/orgs/{org_id}/prelevement/rules")
+def post_prelevement_rules(
+    org_id: str, body: PrelevementRulesUpdate, ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    if body.nature not in ("CORE", "B2B"):
+        raise HTTPException(status_code=400, detail="Nature invalide (CORE ou B2B).")
+    if body.delay_days < 0:
+        raise HTTPException(status_code=400, detail="Le délai ne peut pas être négatif.")
+    return save_prelevement_rules(
+        ctx.client, org_id, body.ics, body.nature, body.delay_days, ctx.user.id,
+    )
+
+
+@app.post("/orgs/{org_id}/prelevement/generate")
+async def post_prelevement_generate(
+    org_id: str, file: UploadFile = File(...), ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    """Prend l'export CRM brut (mêmes colonnes que le fichier Excel de
+    référence) et renvoie un classeur avec 3 onglets : OOFF, RCUR,
+    Exclus (avec la raison de chaque exclusion) -- rien n'est écrit en
+    base, ce endpoint ne fait que transformer un fichier en un autre,
+    comme l'export du Trieur de Data."""
+    if file.size is None or file.size > PIPELINE_MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Fichier trop volumineux ou taille indéterminable (max {PIPELINE_MAX_UPLOAD_BYTES / 1_048_576:.0f} Mo).",
+        )
+    content = await file.read()
+    filename = file.filename or "export"
+    try:
+        if filename.lower().endswith(".csv"):
+            df = pd.read_csv(io.BytesIO(content))
+        else:
+            df = pd.read_excel(io.BytesIO(content))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Impossible de lire le fichier : {exc}")
+
+    rules_row = get_prelevement_rules(ctx.client, org_id)
+    rules = PrelevementRules(
+        ics=rules_row.get("ics"),
+        nature=rules_row.get("nature") or "CORE",
+        delay_days=rules_row.get("delay_days") if rules_row.get("delay_days") is not None else 3,
+    )
+    rows = df.where(pd.notnull(df), None).to_dict(orient="records")
+    result = generate_mandats(rows, rules)
+
+    def _mandat_dict(m):
+        return {
+            "Référence client": m.reference_client,
+            "Nom": m.nom,
+            "RUM": m.rum,
+            "IBAN": m.iban,
+            "BIC": m.bic,
+            "Adresse": m.adresse,
+            "Ville": m.ville,
+            "Code postal": m.code_postal,
+            "Pays": m.pays,
+            "Email": m.email,
+            "Téléphone": m.telephone,
+            "Type séquence": m.type_sequence,
+            "Montant EUR": m.montant_eur,
+            "Devise": m.devise,
+            "Date signature mandat": m.date_signature_mandat,
+            "Date première échéance": m.date_premiere_echeance,
+            "Périodicité": m.periodicite,
+            "Explication périodicité": m.explication_periodicite,
+            "Motif": m.motif,
+            "ICS": rules.ics or "",
+            "Nature": rules.nature,
+        }
+
+    df_ooff = pd.DataFrame([_mandat_dict(m) for m in result.ooff])
+    df_rcur = pd.DataFrame([_mandat_dict(m) for m in result.rcur])
+    df_exclus = pd.DataFrame(
+        [{"Référence client": e.reference_client, "Nom": e.nom, "Raison": e.raison} for e in result.exclus]
+    )
+
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        (df_ooff if not df_ooff.empty else pd.DataFrame(columns=["Aucun mandat OOFF"])).to_excel(
+            writer, index=False, sheet_name="OOFF",
+        )
+        (df_rcur if not df_rcur.empty else pd.DataFrame(columns=["Aucun mandat RCUR"])).to_excel(
+            writer, index=False, sheet_name="RCUR",
+        )
+        (df_exclus if not df_exclus.empty else pd.DataFrame(columns=["Aucune ligne exclue"])).to_excel(
+            writer, index=False, sheet_name="Exclus",
+        )
+    buffer.seek(0)
+
+    file_base = sanitize_filename(filename, default="mandats_prelevement")
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="mandats_{file_base}.xlsx"',
+            "X-Ooff-Count": str(len(result.ooff)),
+            "X-Rcur-Count": str(len(result.rcur)),
+            "X-Exclus-Count": str(len(result.exclus)),
+        },
+    )
 
 
 # ---------------------------------------------------------------

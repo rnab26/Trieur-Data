@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 import type { Session } from '@supabase/supabase-js'
+import { clearAccountCache } from './useAccount'
 import { supabase } from './supabase'
 
 type AuthState = {
@@ -32,6 +33,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   async function signOut() {
+    // Pas de rechargement de page ici -- sans ce nettoyage, une connexion
+    // avec un AUTRE compte dans le même onglet verrait un instant les
+    // environnements/le statut admin du compte précédent (cache
+    // module-level, voir useAccount.ts).
+    clearAccountCache()
     await supabase.auth.signOut()
   }
 

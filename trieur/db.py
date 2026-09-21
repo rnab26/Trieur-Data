@@ -528,6 +528,33 @@ def get_last_import_batch(client: Client, org_id: str) -> dict | None:
     return res.data[0] if res.data else None
 
 
+RECENT_IMPORT_BATCHES_LIMIT = 15
+
+
+def list_recent_import_batches(client: Client, org_id: str) -> list[dict]:
+    """Imports les plus récents de cet environnement -- pour proposer
+    d'annuler un import entier (voir cancel_import_batch), pas un
+    historique complet illimité."""
+    res = (
+        _td(client, "import_batches")
+        .select("id, source_filename, imported_at, row_count")
+        .eq("org_id", org_id)
+        .order("imported_at", desc=True)
+        .limit(RECENT_IMPORT_BATCHES_LIMIT)
+        .execute()
+    )
+    return res.data or []
+
+
+def cancel_import_batch(client: Client, batch_id: str) -> None:
+    """Annule un import entier : supprime le lot -- les clients importés
+    par ce lot (records.batch_id, on delete cascade -- migration 0001)
+    partent avec, ainsi que leurs alertes de doublon et étiquettes
+    (elles aussi en cascade depuis records). Un seul geste, pas une
+    suppression ligne par ligne côté application."""
+    _td(client, "import_batches").delete().eq("id", batch_id).execute()
+
+
 def find_iban_matches(client: Client, org_id: str, iban: str) -> list[dict]:
     """Historique complet des lignes déjà en base avec ce même IBAN,
     quel que soit le fichier ou la date d'import -- détecte les mandats

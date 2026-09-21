@@ -904,6 +904,49 @@ def test_import_add_unknown_columns_allowed_for_admin(client_factory):
 
 
 # ---------------------------------------------------------------
+# Imports récents / annulation d'un import entier
+# ---------------------------------------------------------------
+
+def _batch(i, org_id="org-1"):
+    return {
+        "id": f"batch-{i}",
+        "org_id": org_id,
+        "source_filename": f"fichier{i}.csv",
+        "imported_at": f"2026-01-{i:02d}T00:00:00Z",
+        "row_count": i,
+    }
+
+
+def test_list_import_batches_most_recent_first(client_factory):
+    fake = _make_client(import_batches=[_batch(1), _batch(2)])
+    tc = client_factory(fake)
+
+    res = tc.get("/orgs/org-1/import-batches", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 200
+    assert [b["id"] for b in res.json()["batches"]] == ["batch-2", "batch-1"]
+
+
+def test_cancel_import_batch_removes_it(client_factory):
+    fake = _make_client(import_batches=[_batch(1), _batch(2)])
+    tc = client_factory(fake)
+
+    res = tc.delete("/orgs/org-1/import-batches/batch-1", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 200
+    assert res.json() == {"id": "batch-1", "cancelled": True}
+    remaining = {b["id"] for b in fake.postgrest.tables["import_batches"]}
+    assert remaining == {"batch-2"}
+
+
+def test_read_only_member_cannot_cancel_import_batch(client_factory):
+    fake = _make_client(import_batches=[_batch(1)], memberships=READ_ONLY_MEMBERSHIP)
+    tc = client_factory(fake)
+
+    res = tc.delete("/orgs/org-1/import-batches/batch-1", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 403
+    assert len(fake.postgrest.tables["import_batches"]) == 1
+
+
+# ---------------------------------------------------------------
 # Tableau de bord
 # ---------------------------------------------------------------
 

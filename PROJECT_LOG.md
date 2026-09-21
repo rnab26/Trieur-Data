@@ -3466,3 +3466,31 @@ e2e) : 436 passés, aucune régression.
 Cette fois, si `test_master_columns_localstorage_fallback` recommence
 à échouer, ce sera un problème différent -- la cause connue jusqu'ici
 est réellement éliminée, pas juste masquée une deuxième fois.
+
+### Validation en lot réel (2026-09-21, après PR #46) + PR #48 : environnement verrouillé
+
+Raphaël a généré un lot complet (87 mandats) avec le correctif NaN et
+l'a croisé contre l'historique du Drive (lecture seule, `export CRM` de
+`4_drive_final.xlsx`) : **87/87 RUM connus, 87/87 motifs identiques,
+87/87 montants identiques** à une valeur déjà enregistrée dans
+l'historique pour ce motif. Envoyé à son père pour avis. Aucun écart
+détecté.
+
+En marge de cette validation, Raphaël a signalé ne pas comprendre le
+sélecteur "Environnement" affiché dans l'onglet Prélèvement (capture
+avec Leads/Prélèvement/Global) : confusion entre les onglets du haut
+(les outils) et ce sélecteur (quel espace de données l'outil utilise).
+Vérifié en base : seul l'environnement "Prélèvement" a des réglages
+enregistrés (ICS, frais, nature, délai) ; les valeurs vues sur "Global"
+étaient de simples valeurs par défaut serveur (coïncidence trompeuse
+avec les vraies valeurs de "Prélèvement"). Risque réel de créer
+silencieusement un second jeu de réglages en éditant au mauvais
+endroit.
+
+**PR #48** : l'onglet Prélèvement ne propose plus de sélecteur --
+il cherche automatiquement l'org nommée "Prélèvement" et s'y limite,
+avec un message d'erreur explicite si cet environnement n'existe pas
+pour l'utilisateur. Le panneau "Réglages" déjà existant (ICS, nature,
+délai, frais) reste la vue complète, visible et modifiable de ces
+réglages -- inchangé, mais désormais sans ambiguïté. Mergée, CI verte
+du premier coup.

@@ -1126,13 +1126,19 @@ def get_prelevement_rules(client: Client, org_id: str) -> dict:
         return res.data[0]
     # Pas encore de réglage enregistré pour cet environnement -- les
     # valeurs par défaut du module trieur.prelevement (ICS vide, CORE,
-    # 3 jours), jamais une ligne vide qui forcerait l'appelant à gérer
-    # un cas particulier.
-    return {"org_id": org_id, "ics": None, "nature": "CORE", "delay_days": 3}
+    # 3 jours, 20€ de frais de dossier par produit), jamais une ligne
+    # vide qui forcerait l'appelant à gérer un cas particulier.
+    return {"org_id": org_id, "ics": None, "nature": "CORE", "delay_days": 3, "frais_setup_eur": 20.0}
 
 
 def save_prelevement_rules(
-    client: Client, org_id: str, ics: str | None, nature: str, delay_days: int, user_id: str,
+    client: Client,
+    org_id: str,
+    ics: str | None,
+    nature: str,
+    delay_days: int,
+    frais_setup_eur: float,
+    user_id: str,
 ) -> dict:
     from datetime import datetime, timezone
 
@@ -1144,6 +1150,7 @@ def save_prelevement_rules(
                 "ics": ics,
                 "nature": nature,
                 "delay_days": delay_days,
+                "frais_setup_eur": frais_setup_eur,
                 "updated_by": user_id,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             },

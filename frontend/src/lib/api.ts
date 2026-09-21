@@ -947,6 +947,7 @@ export type PrelevementRules = {
   ics: string | null
   nature: 'CORE' | 'B2B'
   delay_days: number
+  frais_setup_eur: number
 }
 
 export function getPrelevementRules(orgId: string) {
@@ -955,11 +956,16 @@ export function getPrelevementRules(orgId: string) {
 
 export function savePrelevementRules(
   orgId: string,
-  body: { ics: string | null; nature: 'CORE' | 'B2B'; delayDays: number },
+  body: { ics: string | null; nature: 'CORE' | 'B2B'; delayDays: number; fraisSetupEur: number },
 ) {
   return request<PrelevementRules>(`/orgs/${orgId}/prelevement/rules`, {
     method: 'POST',
-    body: JSON.stringify({ ics: body.ics, nature: body.nature, delay_days: body.delayDays }),
+    body: JSON.stringify({
+      ics: body.ics,
+      nature: body.nature,
+      delay_days: body.delayDays,
+      frais_setup_eur: body.fraisSetupEur,
+    }),
   })
 }
 

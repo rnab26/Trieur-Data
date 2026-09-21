@@ -2120,6 +2120,7 @@ class PrelevementRulesUpdate(BaseModel):
     ics: Optional[str] = None
     nature: str = "CORE"
     delay_days: int = 3
+    frais_setup_eur: float = 20.0
 
 
 @app.post("/orgs/{org_id}/prelevement/rules")
@@ -2130,8 +2131,10 @@ def post_prelevement_rules(
         raise HTTPException(status_code=400, detail="Nature invalide (CORE ou B2B).")
     if body.delay_days < 0:
         raise HTTPException(status_code=400, detail="Le délai ne peut pas être négatif.")
+    if body.frais_setup_eur < 0:
+        raise HTTPException(status_code=400, detail="Les frais de dossier ne peuvent pas être négatifs.")
     return save_prelevement_rules(
-        ctx.client, org_id, body.ics, body.nature, body.delay_days, ctx.user.id,
+        ctx.client, org_id, body.ics, body.nature, body.delay_days, body.frais_setup_eur, ctx.user.id,
     )
 
 
@@ -2140,7 +2143,8 @@ async def post_prelevement_generate(
     org_id: str, file: UploadFile = File(...), ctx: AuthCtx = Depends(require_cockpit_access),
 ):
     """Prend l'export CRM brut (mêmes colonnes que le fichier Excel de
-    référence) et renvoie un classeur avec 3 onglets : OOFF, RCUR,
+    référence) et renvoie un classeur avec 4 onglets : Mandat (tout,
+    FRST+RCUR mélangés), First, RCUR (mêmes mandats en détail par type),
     Exclus (avec la raison de chaque exclusion) -- rien n'est écrit en
     base, ce endpoint ne fait que transformer un fichier en un autre,
     comme l'export du Trieur de Data."""
@@ -2164,6 +2168,9 @@ async def post_prelevement_generate(
         ics=rules_row.get("ics"),
         nature=rules_row.get("nature") or "CORE",
         delay_days=rules_row.get("delay_days") if rules_row.get("delay_days") is not None else 3,
+        frais_setup_eur=(
+            rules_row.get("frais_setup_eur") if rules_row.get("frais_setup_eur") is not None else 20.0
+        ),
     )
     rows = df.where(pd.notnull(df), None).to_dict(orient="records")
     result = generate_mandats(rows, rules)
@@ -2173,6 +2180,10 @@ async def post_prelevement_generate(
             "Référence client": m.reference_client,
             "Nom": m.nom,
             "RUM": m.rum,
+            "Type séquence": m.type_sequence,
+            "Motif": m.motif,
+            "Montant EUR": m.montant_eur,
+            "Devise": m.devise,
             "IBAN": m.iban,
             "BIC": m.bic,
             "Adresse": m.adresse,
@@ -2181,19 +2192,16 @@ async def post_prelevement_generate(
             "Pays": m.pays,
             "Email": m.email,
             "Téléphone": m.telephone,
-            "Type séquence": m.type_sequence,
-            "Montant EUR": m.montant_eur,
-            "Devise": m.devise,
             "Date signature mandat": m.date_signature_mandat,
             "Date première échéance": m.date_premiere_echeance,
+            "Date d'effet": m.date_effet,
             "Périodicité": m.periodicite,
             "Explication périodicité": m.explication_periodicite,
-            "Motif": m.motif,
             "ICS": rules.ics or "",
-            "Nature": rules.nature,
         }
 
-    df_ooff = pd.DataFrame([_mandat_dict(m) for m in result.ooff])
+    df_mandat = pd.DataFrame([_mandat_dict(m) for m in result.mandats])
+    df_first = pd.DataFrame([_mandat_dict(m) for m in result.ooff])
     df_rcur = pd.DataFrame([_mandat_dict(m) for m in result.rcur])
     df_exclus = pd.DataFrame(
         [{"Référence client": e.reference_client, "Nom": e.nom, "Raison": e.raison} for e in result.exclus]
@@ -2201,8 +2209,11 @@ async def post_prelevement_generate(
 
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        (df_ooff if not df_ooff.empty else pd.DataFrame(columns=["Aucun mandat OOFF"])).to_excel(
-            writer, index=False, sheet_name="OOFF",
+        (df_mandat if not df_mandat.empty else pd.DataFrame(columns=["Aucun mandat"])).to_excel(
+            writer, index=False, sheet_name="Mandat",
+        )
+        (df_first if not df_first.empty else pd.DataFrame(columns=["Aucun mandat First"])).to_excel(
+            writer, index=False, sheet_name="First",
         )
         (df_rcur if not df_rcur.empty else pd.DataFrame(columns=["Aucun mandat RCUR"])).to_excel(
             writer, index=False, sheet_name="RCUR",

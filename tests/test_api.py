@@ -3,6 +3,7 @@ même esprit que tests/test_db_saved_views.py, injecté via
 app.dependency_overrides plutôt qu'en remplaçant trieur.db lui-même :
 les endpoints appellent les VRAIES fonctions de trieur/db.py, avec un
 faux client Supabase en entrée."""
+import io
 import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -1551,7 +1552,9 @@ def test_prelevement_rules_defaults_when_never_saved(client_factory):
     tc = client_factory(fake)
     res = tc.get("/orgs/org-1/prelevement/rules", headers={"Authorization": f"Bearer {TOKEN}"})
     assert res.status_code == 200
-    assert res.json() == {"org_id": "org-1", "ics": None, "nature": "CORE", "delay_days": 3}
+    assert res.json() == {
+        "org_id": "org-1", "ics": None, "nature": "CORE", "delay_days": 3, "frais_setup_eur": 20.0,
+    }
 
 
 def test_prelevement_rules_roundtrip(client_factory):
@@ -1561,12 +1564,13 @@ def test_prelevement_rules_roundtrip(client_factory):
 
     res = tc.post(
         "/orgs/org-1/prelevement/rules",
-        json={"ics": "FR12ZZZ123456", "nature": "CORE", "delay_days": 5},
+        json={"ics": "FR12ZZZ123456", "nature": "CORE", "delay_days": 5, "frais_setup_eur": 15.0},
         headers=headers,
     )
     assert res.status_code == 200
     assert res.json()["ics"] == "FR12ZZZ123456"
     assert res.json()["delay_days"] == 5
+    assert res.json()["frais_setup_eur"] == 15.0
 
     res = tc.get("/orgs/org-1/prelevement/rules", headers=headers)
     assert res.json()["ics"] == "FR12ZZZ123456"
@@ -1578,6 +1582,17 @@ def test_prelevement_rules_rejects_invalid_nature(client_factory):
     res = tc.post(
         "/orgs/org-1/prelevement/rules",
         json={"nature": "AUTRE"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_prelevement_rules_rejects_negative_frais_setup(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/prelevement/rules",
+        json={"frais_setup_eur": -5.0},
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 400
@@ -1618,6 +1633,28 @@ def test_prelevement_generate_returns_ooff_rcur_and_exclus(client_factory):
     assert res.headers["x-rcur-count"] == "0"
     assert res.headers["x-exclus-count"] == "1"
     assert res.headers["content-type"].startswith("application/vnd.openxmlformats")
+
+
+def test_prelevement_generate_sheets_are_mandat_first_rcur_exclus(client_factory):
+    """Structure demandée par Raphaël (2026-09-21) après son premier
+    test réel : un onglet "Mandat" avec tout, PLUS "First"/"RCUR" en
+    détail -- jamais "OOFF" (renommé), jamais de colonne "Nature"
+    (réglage global, pas une donnée par ligne)."""
+    import openpyxl
+
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/prelevement/generate",
+        files={"file": ("export.csv", _PRELEVEMENT_CSV, "text/csv")},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    wb = openpyxl.load_workbook(io.BytesIO(res.content))
+    assert wb.sheetnames == ["Mandat", "First", "RCUR", "Exclus"]
+    mandat_header = [c.value for c in wb["Mandat"][1]]
+    assert "Nature" not in mandat_header
+    assert "Date d'effet" in mandat_header
 
 
 def test_prelevement_generate_exposes_count_headers_cross_origin(client_factory):

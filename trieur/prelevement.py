@@ -11,9 +11,12 @@ Portée de cette première version (Raphaël a explicitement demandé de
 NE PAS faire plus pour l'instant) :
 - prend un export CRM brut (mêmes colonnes que le fichier "1_récupération
   du CRM") ;
-- nettoie/valide chaque ligne, calcule les dates et le montant ;
-- classe chaque client en OOFF (1er prélèvement, avec frais de dossier)
-  ou RCUR (prélèvement récurrent, sans frais de dossier) ;
+- nettoie/valide chaque ligne, calcule les dates ;
+- ÉCLATE chaque client en un mandat PAR PRODUIT actif (pas un mandat
+  combiné) -- chaque produit garde son propre montant et son propre
+  motif "MGS-{RUM}-{suffixe}" ;
+- classe chaque mandat en OOFF (1er prélèvement, +frais de dossier fixe
+  par produit) ou RCUR (récurrent, sans frais) ;
 - exclut proprement (avec la raison) tout ce qui ne peut pas partir en
   banque.
 
@@ -69,18 +72,28 @@ COL_AUDITIF = "Auditif"
 COL_IMMO = "IMMO"
 COL_VETO = "Total cotisation MYMO VETO SUR"
 COL_TOTAL_FRAIS = "Total frais de dossier"
-COL_TOTAL_COTIS_FRAIS = "Total cotisation et frais de dossier"
+COL_DATE_EFFET = "Date d'effet du nouveau contrat (OPTILIFE)"
 
 # Suffixe du motif par produit -- ordre et lettres copiés de la formule
 # `="MGS-"&RUM&IF(Optilife>0,"-O","")&IF(CarteMGS>0,"-M","")&...` du
 # fichier "3_creations_des_mandats" (onglet "3 Sheet1", colonne Motif).
+# Sert aussi maintenant à ÉCLATER un client en plusieurs mandats -- voir
+# generate_mandats.
+# "-AU"/IMMO et non "-IM" -- corrigé le 2026-09-21 en croisant 5 clients
+# du CRM avec le vrai fichier de remise bancaire du Drive (lecture
+# seule) : la colonne IMMO correspond systématiquement au suffixe
+# "-AU" dans les vraies remises envoyées, jamais "-IM" (la formule
+# d'origine reverse-engineered avait les deux lettres inversées).
+# "Auditif" n'apparaît jamais rempli dans aucun fichier vu jusqu'ici --
+# suffixe "-IM" laissé par déduction, à revérifier le jour où elle sera
+# utilisée pour de vrai.
 _MOTIF_SUFFIXES: list[tuple[str, str]] = [
     (COL_OPTILIFE, "-O"),
     (COL_CARTE_MGS, "-M"),
     (COL_MYJURIS, "-J"),
     (COL_ADMIN_AIDE, "-AD"),
-    (COL_AUDITIF, "-AU"),
-    (COL_IMMO, "-IM"),
+    (COL_AUDITIF, "-IM"),
+    (COL_IMMO, "-AU"),
     (COL_VETO, "-V"),
 ]
 
@@ -102,6 +115,12 @@ class PrelevementRules:
     ics: str | None = None
     nature: str = "CORE"
     delay_days: int = 3
+    # Frais de dossier facturés UNE FOIS PAR PRODUIT au 1er prélèvement
+    # (jamais sur les suivants) -- confirmé à 20€/produit en croisant le
+    # fichier CRM de référence avec le vrai fichier de remise bancaire du
+    # Drive (2026-09-21) : un client avec 2 produits actifs a "Total
+    # frais de dossier"=40€ (2x20), pas un montant client indivis.
+    frais_setup_eur: float = 20.0
 
 
 @dataclass
@@ -122,6 +141,7 @@ class MandatRow:
     devise: str
     date_signature_mandat: str
     date_premiere_echeance: str
+    date_effet: str
     periodicite: str
     explication_periodicite: str
     motif: str
@@ -136,6 +156,11 @@ class ExclusionRow:
 
 @dataclass
 class GenerationResult:
+    # Tous les mandats (FRST + RCUR), dans l'ordre de génération -- pour
+    # l'onglet "Mandat" combiné demandé par Raphaël (2026-09-21) : "un
+    # onglet mandat où il y a tout dessus". ooff/rcur restent en plus
+    # pour le détail par type.
+    mandats: list[MandatRow] = field(default_factory=list)
     ooff: list[MandatRow] = field(default_factory=list)
     rcur: list[MandatRow] = field(default_factory=list)
     exclus: list[ExclusionRow] = field(default_factory=list)
@@ -233,14 +258,14 @@ def compute_first_prelevement_date(raw_scheduled: object, today: date, delay_day
     return max(plancher, scheduled)
 
 
-def build_motif(rum: str, amounts: dict[str, float]) -> str:
-    """"MGS-{RUM}" + un suffixe par produit facturé -- reproduit la
-    formule Motif du fichier de référence (onglet "3 Sheet1")."""
-    motif = f"MGS-{rum}"
-    for col, suffix in _MOTIF_SUFFIXES:
-        if amounts.get(col, 0.0) > 0:
-            motif += suffix
-    return motif
+def build_motif(rum: str, suffix: str) -> str:
+    """"MGS-{RUM}{suffixe du produit}" -- un mandat par produit, PAS un
+    motif combiné (ex. "MGS-42-O-M") : croisé avec le vrai fichier de
+    remise bancaire du Drive (2026-09-21), qui a bien une ligne "MGS-
+    {RUM}-O" ET une ligne séparée "MGS-{RUM}-J" pour un même client avec
+    2 produits, chacune avec SON PROPRE montant -- jamais un montant
+    total mélangeant plusieurs produits."""
+    return f"MGS-{rum}{suffix}"
 
 
 def _get(row: dict, col: str, keyed: dict[str, str]) -> object:
@@ -302,24 +327,32 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
             COL_IMMO: to_amount(_get(row, COL_IMMO, keyed)),
             COL_VETO: to_amount(_get(row, COL_VETO, keyed)),
         }
-
-        total_frais = to_amount(_get(row, COL_TOTAL_FRAIS, keyed))
-        total_cotis_frais = to_amount(_get(row, COL_TOTAL_COTIS_FRAIS, keyed))
-        if total_cotis_frais <= 0:
-            exclure("Montant à prélever nul ou absent")
+        produits_actifs = [(col, suffix) for col, suffix in _MOTIF_SUFFIXES if amounts[col] > 0]
+        if not produits_actifs:
+            exclure("Aucun produit actif (tous les montants produits sont à 0)")
             continue
 
-        # OOFF (1er prélèvement, avec frais de dossier) vs RCUR
-        # (récurrent, sans frais) -- règle donnée par Raphaël
-        # (2026-09-21) : "le montant est différent pour les autres
-        # prélèvements [...] moins élevé avec le montant des frais en
-        # moins".
-        if total_frais > 0:
-            type_sequence = "FRST"
-            montant = total_cotis_frais
+        # MYJURIS + IMMO fusionnés en UN SEUL mandat "-J-AU" quand les
+        # deux sont actifs -- seule exception à la règle "un mandat par
+        # produit" ci-dessous, trouvée le 2026-09-21 en croisant le vrai
+        # fichier de remise bancaire (2 clients confirmés : montant RCUR
+        # = somme exacte des deux colonnes, FRST = RCUR + 2x les frais
+        # de dossier -- jamais observé combiné avec un autre produit).
+        if amounts[COL_MYJURIS] > 0 and amounts[COL_IMMO] > 0:
+            reste = [(c, s) for c, s in produits_actifs if c not in (COL_MYJURIS, COL_IMMO)]
+            mandats_bundles: list[tuple[str, list[str]]] = [("-J-AU", [COL_MYJURIS, COL_IMMO])]
+            mandats_bundles += [(s, [c]) for c, s in reste]
         else:
-            type_sequence = "RCUR"
-            montant = total_cotis_frais - total_frais  # frais=0 ici, mais explicite plutôt que réutiliser total_cotis_frais
+            mandats_bundles = [(s, [c]) for c, s in produits_actifs]
+
+        # OOFF (1er prélèvement, avec frais de dossier) vs RCUR
+        # (récurrent, sans frais) -- "Total frais de dossier" > 0 veut
+        # dire que CE client vient d'activer ses produits actuels (ligne
+        # = instantané de signature), donc TOUS ses produits actifs de
+        # cette ligne sont en 1er prélèvement. Sert seulement à choisir
+        # FRST/RCUR, jamais comme montant (voir plus bas).
+        total_frais = to_amount(_get(row, COL_TOTAL_FRAIS, keyed))
+        type_sequence = "FRST" if total_frais > 0 else "RCUR"
 
         # Date de signature du mandat = la date de création du contrat
         # dans le CRM, PAS la date à laquelle ce fichier est généré --
@@ -327,6 +360,8 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
         # client créé le 21/08 garde cette date, même généré des
         # semaines après. Repli sur aujourd'hui seulement si absente.
         date_signature = _parse_date(_get(row, COL_DATE_CREATION, keyed)) or today
+        date_effet_raw = _parse_date(_get(row, COL_DATE_EFFET, keyed))
+        date_effet = date_effet_raw.strftime("%d/%m/%Y") if date_effet_raw else ""
 
         # "Explication périodicité" (ex. "Tous les 1 mois") : laissée
         # vide pour un 1er prélèvement (FRST) -- elle ne décrit que la
@@ -336,28 +371,47 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
             _get(row, COL_PERIODICITE, keyed),
         )
 
-        mandat = MandatRow(
-            reference_client=ref_client,
-            nom=nom,
-            rum=rum,
-            iban=iban,
-            bic=pad_bic(_get(row, COL_BIC, keyed)),
-            adresse=str(_get(row, COL_ADRESSE, keyed) or ""),
-            ville=str(_get(row, COL_VILLE, keyed) or ""),
-            code_postal=str(_get(row, COL_CODE_POSTAL, keyed) or ""),
-            pays="FR",
-            email=str(_get(row, COL_EMAIL, keyed) or ""),
-            telephone=str(_get(row, COL_TELEPHONE, keyed) or ""),
-            type_sequence=type_sequence,
-            montant_eur=round(montant, 2),
-            devise="EUR",
-            date_signature_mandat=date_signature.strftime("%d/%m/%Y"),
-            date_premiere_echeance=date_premiere.strftime("%d/%m/%Y"),
-            periodicite=str(_get(row, COL_PERIODICITE, keyed) or ""),
-            explication_periodicite=explication,
-            motif=build_motif(rum, amounts),
-        )
-        (result.ooff if type_sequence == "FRST" else result.rcur).append(mandat)
+        # UN MANDAT PAR PRODUIT ACTIF (sauf le duo MYJURIS+IMMO ci-dessus),
+        # jamais un mandat unique combinant tous les produits -- règle
+        # trouvée le 2026-09-21 en croisant ce fichier CRM avec le vrai
+        # fichier de remise bancaire du Drive (lecture seule) : un
+        # client avec Optilife (49,90€) ET MYJURIS (29,89€) a DEUX
+        # lignes dans la vraie remise ("MGS-{RUM}-O" à 49,90€/69,90€ et
+        # "MGS-{RUM}-J" à 29,89€/49,89€), jamais une ligne unique à
+        # 79,79€. Le montant est la somme BRUTE des colonnes du/des
+        # produit(s) du mandat -- "Total cotisation et frais de dossier"
+        # ne sert plus à rien ici, il ne correspond à aucun montant réel
+        # (vérifié faux sur plus de 10 clients croisés). Les frais de
+        # dossier sont comptés une fois PAR PRODUIT du mandat (2x pour
+        # le duo MYJURIS+IMMO, confirmé sur le vrai fichier).
+        for suffix, cols in mandats_bundles:
+            montant_produits = sum(amounts[c] for c in cols)
+            frais = rules.frais_setup_eur * len(cols) if type_sequence == "FRST" else 0.0
+            montant = montant_produits + frais
+            mandat = MandatRow(
+                reference_client=ref_client,
+                nom=nom,
+                rum=rum,
+                iban=iban,
+                bic=pad_bic(_get(row, COL_BIC, keyed)),
+                adresse=str(_get(row, COL_ADRESSE, keyed) or ""),
+                ville=str(_get(row, COL_VILLE, keyed) or ""),
+                code_postal=str(_get(row, COL_CODE_POSTAL, keyed) or ""),
+                pays="FR",
+                email=str(_get(row, COL_EMAIL, keyed) or ""),
+                telephone=str(_get(row, COL_TELEPHONE, keyed) or ""),
+                type_sequence=type_sequence,
+                montant_eur=round(montant, 2),
+                devise="EUR",
+                date_signature_mandat=date_signature.strftime("%d/%m/%Y"),
+                date_premiere_echeance=date_premiere.strftime("%d/%m/%Y"),
+                date_effet=date_effet,
+                periodicite=str(_get(row, COL_PERIODICITE, keyed) or ""),
+                explication_periodicite=explication,
+                motif=build_motif(rum, suffix),
+            )
+            result.mandats.append(mandat)
+            (result.ooff if type_sequence == "FRST" else result.rcur).append(mandat)
 
     return result
 

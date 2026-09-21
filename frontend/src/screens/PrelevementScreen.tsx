@@ -29,6 +29,7 @@ export function PrelevementScreen() {
   const [ics, setIcs] = useState('')
   const [nature, setNature] = useState<'CORE' | 'B2B'>('CORE')
   const [delayDays, setDelayDays] = useState(3)
+  const [fraisSetupEur, setFraisSetupEur] = useState(20)
   const [savingRules, setSavingRules] = useState(false)
   const [rulesSaved, setRulesSaved] = useState(false)
 
@@ -52,6 +53,7 @@ export function PrelevementScreen() {
         setIcs(data.ics ?? '')
         setNature(data.nature)
         setDelayDays(data.delay_days)
+        setFraisSetupEur(data.frais_setup_eur)
       })
       .catch((err: unknown) => {
         if (!cancelled) setRulesError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
@@ -67,7 +69,12 @@ export function PrelevementScreen() {
     setRulesError(null)
     setRulesSaved(false)
     try {
-      const updated = await savePrelevementRules(orgId, { ics: ics.trim() || null, nature, delayDays })
+      const updated = await savePrelevementRules(orgId, {
+        ics: ics.trim() || null,
+        nature,
+        delayDays,
+        fraisSetupEur,
+      })
       setRules(updated)
       setRulesSaved(true)
     } catch (err) {
@@ -127,9 +134,10 @@ export function PrelevementScreen() {
       </header>
 
       <p className="mb-4 text-sm text-[var(--muted)]">
-        Dépose l'export CRM brut, télécharge un classeur prêt (3 onglets : OOFF, RCUR, Exclus avec la
-        raison). Ne couvre pas encore l'historique/les doublons/les impayés/le relevé bancaire — voir
-        le chantier séparé dans le Cockpit.
+        Dépose l'export CRM brut, télécharge un classeur prêt (4 onglets : Mandat avec tout, First et
+        RCUR en détail, Exclus avec la raison). Un mandat par produit actif du client, jamais un
+        montant groupé. Ne couvre pas encore l'historique/les doublons/les impayés/le relevé bancaire
+        — voir le chantier séparé dans le Cockpit.
       </p>
 
       {orgsError && (
@@ -206,6 +214,20 @@ export function PrelevementScreen() {
                         className="w-24"
                         value={delayDays}
                         onChange={(e) => setDelayDays(Number(e.target.value) || 0)}
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="prelevement-frais" className="mb-1 block text-sm text-[var(--muted)]">
+                        Frais de dossier par produit, au 1er prélèvement (€)
+                      </label>
+                      <Input
+                        id="prelevement-frais"
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        className="w-24"
+                        value={fraisSetupEur}
+                        onChange={(e) => setFraisSetupEur(Number(e.target.value) || 0)}
                       />
                     </div>
                   </div>
@@ -296,7 +318,7 @@ export function PrelevementScreen() {
               {generateError && <p className="text-sm text-[var(--danger)]">{generateError}</p>}
               {result && (
                 <p className="text-sm text-[var(--foreground)]">
-                  ✅ {result.ooffCount} mandat(s) OOFF, {result.rcurCount} mandat(s) RCUR,{' '}
+                  ✅ {result.ooffCount} mandat(s) First, {result.rcurCount} mandat(s) RCUR,{' '}
                   {result.exclusCount} ligne(s) exclue(s) (voir l'onglet "Exclus" du fichier
                   téléchargé pour la raison de chacune).
                 </p>

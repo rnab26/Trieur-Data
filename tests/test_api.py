@@ -277,6 +277,7 @@ def _make_client(**tables):
         "pipeline_sessions": [],
         "pipeline_rows": [],
         "user_master_column_sets": [],
+        "record_tags": [],
     }
     default_tables.update(tables)
     return _FakeClient(default_tables, users_by_token={TOKEN: USER})
@@ -293,6 +294,8 @@ def _clear_streamlit_caches():
         get_my_memberships,
         get_my_profile,
         get_org_master_columns,
+        get_record_tags_map,
+        list_org_tags,
         list_saved_views,
         list_sections,
     )
@@ -302,6 +305,8 @@ def _clear_streamlit_caches():
     get_org_master_columns.clear()
     list_saved_views.clear()
     list_sections.clear()
+    list_org_tags.clear()
+    get_record_tags_map.clear()
     yield
 
 
@@ -558,6 +563,77 @@ def test_get_missing_record_is_404(client_factory):
 
     res = tc.get("/orgs/org-1/records/nope", headers={"Authorization": f"Bearer {TOKEN}"})
     assert res.status_code == 404
+
+
+# ---------------------------------------------------------------
+# Étiquettes libres sur un client (migration 0021)
+# ---------------------------------------------------------------
+
+def test_add_tag_then_it_appears_in_org_tags_and_record_list(client_factory):
+    records = [_record(1)]
+    fake = _make_client(records=records)
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+
+    res = tc.post("/orgs/org-1/records/rec-1/tags", json={"tag": "VIP"}, headers=headers)
+    assert res.status_code == 200
+    assert res.json() == {"record_id": "rec-1", "tag": "VIP"}
+
+    tags = tc.get("/orgs/org-1/tags", headers=headers)
+    assert tags.json() == {"tags": ["VIP"]}
+
+    listed = tc.get("/orgs/org-1/records", headers=headers)
+    row = next(r for r in listed.json()["rows"] if r["_id"] == "rec-1")
+    assert row["Étiquettes"] == "VIP"
+
+
+def test_add_same_tag_twice_does_not_duplicate(client_factory):
+    fake = _make_client(records=[_record(1)])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+
+    tc.post("/orgs/org-1/records/rec-1/tags", json={"tag": "VIP"}, headers=headers)
+    tc.post("/orgs/org-1/records/rec-1/tags", json={"tag": "VIP"}, headers=headers)
+
+    assert len(fake.postgrest.tables["record_tags"]) == 1
+
+
+def test_add_blank_tag_is_400(client_factory):
+    fake = _make_client(records=[_record(1)])
+    tc = client_factory(fake)
+
+    res = tc.post(
+        "/orgs/org-1/records/rec-1/tags", json={"tag": "   "},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+    assert fake.postgrest.tables["record_tags"] == []
+
+
+def test_remove_tag_drops_only_that_one(client_factory):
+    fake = _make_client(records=[_record(1)])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+
+    tc.post("/orgs/org-1/records/rec-1/tags", json={"tag": "VIP"}, headers=headers)
+    tc.post("/orgs/org-1/records/rec-1/tags", json={"tag": "litige"}, headers=headers)
+
+    res = tc.delete("/orgs/org-1/records/rec-1/tags/VIP", headers=headers)
+    assert res.status_code == 200
+
+    remaining = {t["tag"] for t in fake.postgrest.tables["record_tags"]}
+    assert remaining == {"litige"}
+
+
+def test_export_includes_tags_column(client_factory):
+    fake = _make_client(records=[_record(1)])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    tc.post("/orgs/org-1/records/rec-1/tags", json={"tag": "VIP"}, headers=headers)
+
+    res = tc.get("/orgs/org-1/records/export", params={"format": "csv"}, headers=headers)
+    assert res.status_code == 200
+    assert "VIP" in res.text
 
 
 # ---------------------------------------------------------------

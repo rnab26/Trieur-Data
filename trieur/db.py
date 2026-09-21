@@ -353,6 +353,56 @@ def add_org_master_columns(client: Client, org_id: str, new_cols: list[str]) -> 
 
 
 # ---------------------------------------------------------------
+# Étiquettes libres sur un client (ex: VIP, à recontacter) -- table à
+# part, indépendante des colonnes importées (voir migration 0021).
+# Partagées par l'organisation entière (pas liées à un compte, contrairement
+# aux vues enregistrées ci-dessous) : une étiquette posée par quelqu'un
+# doit être visible par tous les membres de cet environnement.
+# ---------------------------------------------------------------
+
+@st.cache_data(ttl=30, show_spinner=False)
+def list_org_tags(_client: Client, org_id: str) -> list[str]:
+    """Étiquettes déjà utilisées dans cet environnement, triées -- sert à
+    proposer les étiquettes existantes plutôt que de forcer à retaper un
+    nom déjà utilisé ailleurs (évite "VIP" et "vip" en doublon)."""
+    res = _td(_client, "record_tags").select("tag").eq("org_id", org_id).execute()
+    return sorted({r["tag"] for r in (res.data or [])})
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_record_tags_map(_client: Client, record_ids: tuple[str, ...]) -> dict[str, list[str]]:
+    """Étiquettes par client, pour affichage/filtre dans la liste --
+    même principe que get_profiles_map (un seul appel réseau pour tout
+    le lot affiché, jamais un appel par ligne)."""
+    ids = tuple(sorted({i for i in record_ids if i}))
+    if not ids:
+        return {}
+    res = _td(_client, "record_tags").select("record_id, tag").in_("record_id", ids).execute()
+    tags_by_record: dict[str, list[str]] = {}
+    for r in res.data or []:
+        tags_by_record.setdefault(r["record_id"], []).append(r["tag"])
+    for tags in tags_by_record.values():
+        tags.sort()
+    return tags_by_record
+
+
+def add_record_tag(client: Client, org_id: str, record_id: str, tag: str, user_id: str) -> None:
+    """`upsert` sur (record_id, tag) -- reposer une étiquette déjà présente
+    ne crée jamais de doublon (contrainte unique, migration 0021)."""
+    _td(client, "record_tags").upsert(
+        {"org_id": org_id, "record_id": record_id, "tag": tag, "created_by": user_id},
+        on_conflict="record_id,tag",
+    ).execute()
+    list_org_tags.clear()
+    get_record_tags_map.clear()
+
+
+def remove_record_tag(client: Client, record_id: str, tag: str) -> None:
+    _td(client, "record_tags").delete().eq("record_id", record_id).eq("tag", tag).execute()
+    get_record_tags_map.clear()
+
+
+# ---------------------------------------------------------------
 # Vues enregistrées, nommées (recherche + filtres par colonne + colonnes
 # affichées de la Base de données) -- liées au compte, comme les jeux de
 # colonnes maîtres (voir user_master_column_sets), pas à l'organisation.

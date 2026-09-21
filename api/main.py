@@ -34,6 +34,7 @@ from trieur.db import (
     add_chantier_todo,
     answer_chantier_question,
     add_org_master_columns,
+    add_record_tag,
     adjust_pipeline_row_count,
     append_pipeline_rows,
     claim_pipeline_session_for_mapping,
@@ -54,6 +55,7 @@ from trieur.db import (
     get_pipeline_session,
     get_prelevement_rules,
     get_record,
+    get_record_tags_map,
     import_dataframe,
     infer_chantier_theme,
     insert_pipeline_rows_only,
@@ -64,12 +66,14 @@ from trieur.db import (
     list_chantier_todos,
     list_chantiers,
     list_dedup_alerts,
+    list_org_tags,
     list_pipeline_rows,
     list_pipeline_rows_for_sheet,
     list_records,
     list_saved_views,
     list_sections,
     list_user_column_sets,
+    remove_record_tag,
     resolve_dedup_alert,
     save_org_master_columns,
     save_prelevement_rules,
@@ -91,6 +95,7 @@ from trieur.matching import apply_header_inference_excel, auto_assign_columns_fa
 from views._auth import accessible_organizations
 from views._ui import unknown_columns
 from views.tab_database import (
+    _apply_tags,
     _build_rows,
     _filter_by_columns,
     _filter_by_search,
@@ -428,7 +433,7 @@ def list_org_records(
     total = count_records(ctx.client, org_id)
     records = list_records(ctx.client, org_id, limit=page_size, offset=(page - 1) * page_size)
 
-    rows = _resolve_modifier_names(ctx.client, _build_rows(records, master_cols))
+    rows = _apply_tags(ctx.client, _resolve_modifier_names(ctx.client, _build_rows(records, master_cols)))
     rows = _filter_by_search(rows, search)
     rows = _filter_by_columns(rows, parsed_filters)
 
@@ -565,7 +570,7 @@ def export_org_records(
 
     master_cols = get_org_master_columns(ctx.client, org_id)
     all_records = list_all_records(ctx.client, org_id)
-    rows = _resolve_modifier_names(ctx.client, _build_rows(all_records, master_cols))
+    rows = _apply_tags(ctx.client, _resolve_modifier_names(ctx.client, _build_rows(all_records, master_cols)))
     rows = _filter_by_search(rows, search)
     rows = _filter_by_columns(rows, parsed_filters)
 
@@ -627,6 +632,35 @@ def patch_org_record(org_id: str, record_id: str, body: RecordUpdate, ctx: AuthC
     if not ok:
         raise HTTPException(status_code=404, detail="Client introuvable (déjà supprimé ?).")
     return {"id": record_id, "data": body.data, "updated": True}
+
+
+# ---------------------------------------------------------------
+# Étiquettes libres sur un client (migration 0021) -- mirroir de
+# views/tab_database.py:_render_tags_editor.
+# ---------------------------------------------------------------
+
+@app.get("/orgs/{org_id}/tags")
+def get_org_tags(org_id: str, ctx: AuthCtx = Depends(require_org_access)):
+    return {"tags": list_org_tags(ctx.client, org_id)}
+
+
+class RecordTagCreate(BaseModel):
+    tag: str
+
+
+@app.post("/orgs/{org_id}/records/{record_id}/tags")
+def post_record_tag(org_id: str, record_id: str, body: RecordTagCreate, ctx: AuthCtx = Depends(require_org_access)):
+    tag = body.tag.strip()
+    if not tag:
+        raise HTTPException(status_code=400, detail="Étiquette vide.")
+    add_record_tag(ctx.client, org_id, record_id, tag, ctx.user.id)
+    return {"record_id": record_id, "tag": tag}
+
+
+@app.delete("/orgs/{org_id}/records/{record_id}/tags/{tag}")
+def delete_record_tag(org_id: str, record_id: str, tag: str, ctx: AuthCtx = Depends(require_org_access)):
+    remove_record_tag(ctx.client, record_id, tag)
+    return {"record_id": record_id, "tag": tag, "removed": True}
 
 
 # ---------------------------------------------------------------

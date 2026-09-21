@@ -2,6 +2,7 @@ import { lazy, Suspense, useState } from 'react'
 import { AuthProvider, useAuth } from '@/lib/AuthContext'
 import { useIsAdmin } from '@/lib/useAccount'
 import { LoginScreen } from '@/screens/LoginScreen'
+import { ThemeToggle } from '@/components/ThemeToggle'
 
 // Chargement à la demande, un chunk par écran (audit bundle-size) : la
 // plupart des comptes ne chargent jamais le Cockpit (réservé aux admins),
@@ -59,21 +60,26 @@ function AppContent() {
 
   return (
     <div>
-      <nav className="flex gap-1 border-b border-[var(--border)] bg-[var(--card)] px-4 pt-2">
-        {onglets.map(([key, label]) => (
-          <button
-            key={key}
-            onClick={() => setEcran(key)}
-            className={
-              'rounded-t-md px-3 py-2 text-sm font-medium ' +
-              (ecran === key
-                ? 'bg-[var(--background)] text-[var(--foreground)]'
-                : 'text-[var(--muted)] hover:text-[var(--foreground)]')
-            }
-          >
-            {label}
-          </button>
-        ))}
+      <nav className="flex items-center justify-between gap-1 border-b border-[var(--border)] bg-[var(--card)] px-4 pt-2">
+        <div className="flex gap-1">
+          {onglets.map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setEcran(key)}
+              className={
+                'rounded-t-md px-3 py-2 text-sm font-medium ' +
+                (ecran === key
+                  ? 'bg-[var(--background)] text-[var(--foreground)]'
+                  : 'text-[var(--muted)] hover:text-[var(--foreground)]')
+              }
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <div className="pb-2">
+          <ThemeToggle />
+        </div>
       </nav>
       <Suspense fallback={<EcranFallback />}>
         {ecran === 'cockpit' && isAdmin && <CockpitScreen />}

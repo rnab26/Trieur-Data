@@ -259,8 +259,7 @@ export function CockpitScreen() {
   const archives = useMemo(() => STATUT_ARCHIVES.flatMap((s) => byStatus[s] ?? []), [byStatus])
 
   return (
-    <div className="cockpit-dark">
-      <div className="mx-auto max-w-6xl p-4">
+    <div className="mx-auto max-w-6xl p-4">
         <header className="mb-4 flex flex-wrap items-center justify-between gap-2">
           <h1 className="text-lg font-semibold">Cockpit</h1>
           <div className="flex items-center gap-2 text-sm text-[var(--muted)]">
@@ -474,7 +473,6 @@ export function CockpitScreen() {
             )}
           </div>
         )}
-      </div>
     </div>
   )
 }

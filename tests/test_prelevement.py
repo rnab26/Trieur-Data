@@ -206,6 +206,50 @@ def test_generate_mandats_multi_product_rcur_matches_real_remise():
     assert by_motif["MGS-1419267-J"].montant_eur == 29.89
 
 
+def test_generate_mandats_immo_column_uses_au_suffix_not_im():
+    """La colonne IMMO correspond au suffixe "-AU" dans les vraies
+    remises bancaires, jamais "-IM" -- trouvé le 2026-09-21 en croisant
+    5 clients du CRM avec le vrai fichier de remise du Drive (le
+    mapping d'origine, reverse-engineered depuis une formule Excel,
+    avait les deux lettres inversées)."""
+    row = _base_row(**{"Optilife": 0, "IMMO": 5.90, "Total frais de dossier": 20.0})
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    assert len(result.ooff) == 1
+    assert result.ooff[0].motif.endswith("-AU")
+    assert result.ooff[0].montant_eur == 25.90  # 5.90 + 20
+
+
+def test_generate_mandats_myjuris_and_immo_bundle_into_one_mandat():
+    """MYJURIS + IMMO actifs ensemble = UN SEUL mandat "-J-AU" (montants
+    additionnés, frais comptés 2 fois) -- seule exception à la règle
+    "un mandat par produit", confirmée sur 2 clients réels croisés avec
+    le vrai fichier de remise (RCUR = somme exacte des 2 colonnes, FRST
+    = RCUR + 2x les frais de dossier)."""
+    row = _base_row(**{
+        "RUM": "1425316",
+        "Optilife": 99.0,
+        "MYJURIS & MYHOSPI": 19.90,
+        "IMMO": 5.90,
+        "Total frais de dossier": 60.0,  # 3 produits actifs x 20€
+    })
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    assert len(result.ooff) == 2  # Optilife seul + le duo MYJURIS/IMMO fusionné
+    by_motif = {m.motif: m for m in result.ooff}
+    assert set(by_motif) == {"MGS-1425316-O", "MGS-1425316-J-AU"}
+    assert by_motif["MGS-1425316-O"].montant_eur == 119.0  # 99 + 20
+    assert by_motif["MGS-1425316-J-AU"].montant_eur == 65.80  # (19.90+5.90) + 2x20
+
+
+def test_generate_mandats_myjuris_alone_stays_standalone():
+    """MYJURIS actif SEUL (sans IMMO) reste un mandat "-J" normal --
+    la fusion ne s'applique que si les DEUX sont actifs ensemble."""
+    row = _base_row(**{"Optilife": 0, "MYJURIS & MYHOSPI": 19.90, "Total frais de dossier": 20.0})
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    assert len(result.ooff) == 1
+    assert result.ooff[0].motif.endswith("-J")
+    assert not result.ooff[0].motif.endswith("-AU")
+
+
 def test_generate_mandats_mandats_list_combines_ooff_and_rcur():
     """result.mandats (l'onglet "Mandat" combiné demandé par Raphaël)
     contient bien tous les mandats générés, FRST et RCUR mélangés."""

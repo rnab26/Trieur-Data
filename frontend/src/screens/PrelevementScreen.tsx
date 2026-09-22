@@ -62,6 +62,11 @@ export function PrelevementScreen() {
   const [savingRules, setSavingRules] = useState(false)
   const [rulesSaved, setRulesSaved] = useState(false)
   const [rulesExplainOpen, setRulesExplainOpen] = useState(false)
+  // Titre pré-rempli dans "Demandes de modification de règles" quand on
+  // clique "✏️ Demander une modification" sur une règle du panneau
+  // ci-dessous (Raphaël, 2026-09-22) -- évite de retaper le nom de la
+  // règle à la main.
+  const [ruleRequestPrefill, setRuleRequestPrefill] = useState<string | null>(null)
 
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [selectedFiles, setSelectedFiles] = useState<File[]>([])
@@ -475,7 +480,16 @@ export function PrelevementScreen() {
                   </p>
                   {rules.explication.map((r, i) => (
                     <div key={i}>
-                      <p className="text-sm font-medium text-[var(--foreground)]">{r.titre}</p>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-sm font-medium text-[var(--foreground)]">{r.titre}</p>
+                        <button
+                          type="button"
+                          onClick={() => setRuleRequestPrefill(r.titre)}
+                          className="text-xs text-[var(--primary)] hover:underline"
+                        >
+                          ✏️ Demander une modification
+                        </button>
+                      </div>
                       <p className="text-sm text-[var(--muted)]">{r.detail}</p>
                     </div>
                   ))}
@@ -484,7 +498,11 @@ export function PrelevementScreen() {
             </div>
           )}
 
-          <PrelevementRuleRequests orgId={orgId} />
+          <PrelevementRuleRequests
+            orgId={orgId}
+            prefillTitre={ruleRequestPrefill}
+            onPrefillConsumed={() => setRuleRequestPrefill(null)}
+          />
 
           <Card>
             <CardContent className="flex flex-col gap-3">

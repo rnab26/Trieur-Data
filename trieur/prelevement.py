@@ -119,6 +119,14 @@ _MOTIF_SUFFIXES: list[tuple[str, str]] = [
     (COL_VETO, "-V"),
 ]
 
+# Produits connus du moteur -- SEULE source de vérité pour le réglage
+# "Frais de dossier par produit" (voir PrelevementRules.frais_par_produit
+# ci-dessous) : la liste des produits elle-même reste codée en dur
+# (couplée à la fusion spéciale MYJURIS+IMMO et au nom exact des colonnes
+# de l'export CRM, décision de Raphaël 2026-09-22 de ne PAS la rendre
+# éditable en direct), mais le MONTANT de frais par produit, lui, l'est.
+PRODUITS_CONNUS: list[str] = [col for col, _ in _MOTIF_SUFFIXES]
+
 
 def _norm_key(s: str) -> str:
     """Espaces (y compris multiples/en fin de chaîne) et casse ignorés --
@@ -142,7 +150,24 @@ class PrelevementRules:
     # fichier CRM de référence avec le vrai fichier de remise bancaire du
     # Drive (2026-09-21) : un client avec 2 produits actifs a "Total
     # frais de dossier"=40€ (2x20), pas un montant client indivis.
+    # Valeur de REPLI seulement -- l'écran affiche désormais
+    # frais_par_produit (un montant par produit), ce champ ne sert plus
+    # qu'à amorcer ce réglage et à couvrir un produit qui n'y figurerait
+    # pas encore (voir api/main.py:get_prelevement_rules_endpoint).
     frais_setup_eur: float = 20.0
+    # {colonne produit (voir PRODUITS_CONNUS) -> montant en euros} --
+    # remplacement en masse (comme save_org_master_columns), jamais un
+    # correctif partiel : l'appelant renvoie toujours le dict complet.
+    # Demandé par Raphaël (2026-09-22) : les frais peuvent différer d'un
+    # produit à l'autre selon l'évolution de l'activité, sans devoir me
+    # redemander à chaque fois.
+    frais_par_produit: dict[str, float] = field(default_factory=dict)
+    # {périodicité normalisée (minuscule) -> explication affichée dans le
+    # mandat} -- remplace/étend _PERIODICITE_EXPLICATIONS ci-dessous.
+    # Vide = comportement par défaut inchangé (voir
+    # _explication_periodicite). Même règle de remplacement complet que
+    # frais_par_produit.
+    periodicites: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -449,7 +474,7 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
         # récurrence des prélèvements SUIVANTS, vérifié contre le
         # fichier de référence.
         explication = "" if type_sequence == "FRST" else _explication_periodicite(
-            _get(row, COL_PERIODICITE, keyed),
+            _get(row, COL_PERIODICITE, keyed), rules.periodicites,
         )
 
         # UN MANDAT PAR PRODUIT ACTIF (sauf le duo MYJURIS+IMMO ci-dessus),
@@ -467,7 +492,11 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
         # le duo MYJURIS+IMMO, confirmé sur le vrai fichier).
         for suffix, cols in mandats_bundles:
             montant_produits = sum(amounts[c] for c in cols)
-            frais = rules.frais_setup_eur * len(cols) if type_sequence == "FRST" else 0.0
+            frais = (
+                sum(rules.frais_par_produit.get(c, rules.frais_setup_eur) for c in cols)
+                if type_sequence == "FRST"
+                else 0.0
+            )
             montant = montant_produits + frais
             mandat = MandatRow(
                 reference_client=ref_client,
@@ -510,8 +539,9 @@ _PERIODICITE_EXPLICATIONS = {
 }
 
 
-def _explication_periodicite(raw: object) -> str:
-    return _PERIODICITE_EXPLICATIONS.get(str(raw or "").strip().lower(), "")
+def _explication_periodicite(raw: object, overrides: dict[str, str] | None = None) -> str:
+    table = overrides if overrides else _PERIODICITE_EXPLICATIONS
+    return table.get(str(raw or "").strip().lower(), "")
 
 
 def explain_rules(rules: PrelevementRules) -> list[dict[str, str]]:
@@ -555,12 +585,17 @@ def explain_rules(rules: PrelevementRules) -> list[dict[str, str]]:
         {
             "titre": "Montant du mandat",
             "detail": (
-                f"RCUR = valeur brute de la/les colonne(s) produit. First = "
-                f"valeur brute + {rules.frais_setup_eur:g}€ de frais de dossier "
-                f"PAR PRODUIT du mandat (réglable dans \"Réglages\" ci-dessus, "
-                f"jamais codé en dur). \"Total cotisation et frais de dossier\" "
-                f"du fichier source n'est jamais utilisé : vérifié qu'il ne "
-                f"correspond à aucun montant réel envoyé en banque."
+                "RCUR = valeur brute de la/les colonne(s) produit. First = "
+                "valeur brute + frais de dossier PAR PRODUIT du mandat (un "
+                "montant par produit, réglable dans \"Réglages\" ci-dessus, "
+                "jamais codé en dur) : "
+                + ", ".join(
+                    f"{p} {rules.frais_par_produit.get(p, rules.frais_setup_eur):g}€"
+                    for p in PRODUITS_CONNUS
+                )
+                + ". \"Total cotisation et frais de dossier\" du fichier source "
+                "n'est jamais utilisé : vérifié qu'il ne correspond à aucun "
+                "montant réel envoyé en banque."
             ),
         },
         {

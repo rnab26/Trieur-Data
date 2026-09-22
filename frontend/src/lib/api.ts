@@ -950,6 +950,19 @@ export type PrelevementRules = {
   nature: 'CORE' | 'B2B'
   delay_days: number
   frais_setup_eur: number
+  // Un montant par produit connu (voir produits_connus) -- toujours
+  // complet à l'affichage (pré-rempli par l'API avec frais_setup_eur
+  // tant que rien n'a été personnalisé), remplacement en masse à
+  // l'enregistrement, comme les colonnes maîtres.
+  frais_par_produit: Record<string, number>
+  // {code de périodicité normalisé -> explication affichée dans le
+  // mandat}, même convention (toujours complet, remplacement en masse).
+  periodicites: Record<string, string>
+  // Liste fixe des produits gérés par le moteur -- informative, jamais
+  // éditable depuis l'écran (voir PROJECT_LOG.md, 2026-09-22 : couplée
+  // à la fusion spéciale MYJURIS+IMMO et au nom des colonnes de
+  // l'export CRM).
+  produits_connus: string[]
   explication: PrelevementRuleExplanation[]
 }
 
@@ -959,7 +972,14 @@ export function getPrelevementRules(orgId: string) {
 
 export function savePrelevementRules(
   orgId: string,
-  body: { ics: string | null; nature: 'CORE' | 'B2B'; delayDays: number; fraisSetupEur: number },
+  body: {
+    ics: string | null
+    nature: 'CORE' | 'B2B'
+    delayDays: number
+    fraisSetupEur: number
+    fraisParProduit: Record<string, number>
+    periodicites: Record<string, string>
+  },
 ) {
   return request<PrelevementRules>(`/orgs/${orgId}/prelevement/rules`, {
     method: 'POST',
@@ -968,6 +988,8 @@ export function savePrelevementRules(
       nature: body.nature,
       delay_days: body.delayDays,
       frais_setup_eur: body.fraisSetupEur,
+      frais_par_produit: body.fraisParProduit,
+      periodicites: body.periodicites,
     }),
   })
 }

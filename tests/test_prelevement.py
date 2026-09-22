@@ -223,6 +223,46 @@ def test_generate_mandats_frais_setup_eur_is_adjustable():
     assert result.ooff[0].montant_eur == 114.0  # 99 + 15
 
 
+def test_generate_mandats_frais_par_produit_overrides_frais_setup_eur():
+    """Frais de dossier réglables PAR PRODUIT (Raphaël, 2026-09-22) --
+    un montant explicite pour "Optilife" prime sur le réglage global."""
+    result = generate_mandats(
+        [_base_row()],
+        PrelevementRules(frais_setup_eur=20.0, frais_par_produit={"Optilife": 30.0}),
+        today=date(2026, 9, 21),
+    )
+    assert result.ooff[0].montant_eur == 129.0  # 99 + 30 (override), pas 99 + 20
+
+
+def test_generate_mandats_frais_par_produit_falls_back_for_unlisted_product():
+    """Un produit absent de frais_par_produit retombe sur frais_setup_eur
+    -- jamais 0€ silencieux."""
+    row = _base_row(**{"Carte MGS": "50"})
+    result = generate_mandats(
+        [row],
+        PrelevementRules(frais_setup_eur=20.0, frais_par_produit={"Optilife": 30.0}),
+        today=date(2026, 9, 21),
+    )
+    montants = {m.motif[-2:]: m.montant_eur for m in result.ooff}
+    assert montants["-O"] == 129.0  # 99 + 30 (override Optilife)
+    assert montants["-M"] == 70.0  # 50 + 20 (repli sur frais_setup_eur, Carte MGS non listée)
+
+
+def test_generate_mandats_periodicites_override_defaults():
+    """Libellés de périodicité réglables (Raphaël, 2026-09-22) -- un
+    texte personnalisé remplace le libellé par défaut."""
+    row = _base_row(**{
+        "Statut agent IA": "Notifié le 10/09/26",
+        "Périodicité (Mensuel/trimestre/annuel)": "mensuelle",
+    })
+    result = generate_mandats(
+        [row],
+        PrelevementRules(periodicites={"mensuelle": "Chaque mois, le même jour"}),
+        today=date(2026, 9, 21),
+    )
+    assert result.rcur[0].explication_periodicite == "Chaque mois, le même jour"
+
+
 def test_generate_mandats_splits_multi_product_client_into_separate_mandats():
     """LA règle centrale trouvée le 2026-09-21 en croisant le fichier
     CRM de référence avec le vrai fichier de remise bancaire du Drive

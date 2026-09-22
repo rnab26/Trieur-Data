@@ -3883,3 +3883,13 @@ API (réservé admin), 7 nouveaux tests. CI verte, mergé.
 Prélèvement > Réglages > "Demandes de modification de règles" au
 début d'une conversation sur ce chantier -- des demandes peuvent y
 attendre sans passer par le chat.
+
+### PR #62 : bouton "Demander une modification" sur chaque règle (2026-09-22)
+
+Retour de Raphaël sur PR #61 (capture d'écran) : il ne voulait pas
+retaper le nom de la règle à la main dans le formulaire générique --
+chaque règle du panneau "📋 Règles appliquées par le moteur" affiche
+maintenant un lien "✏️ Demander une modification" qui pré-remplit le
+titre dans "Demandes de modification de règles" et amène le curseur
+directement dans le champ de texte. Purement frontend. CI verte,
+mergé.

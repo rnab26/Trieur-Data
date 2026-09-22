@@ -15,7 +15,7 @@ import { Input } from '@/components/ui/input'
 import { useAuth } from '@/lib/AuthContext'
 import { useOrgs } from '@/lib/useAccount'
 import { PrelevementMandatsPanel } from './PrelevementMandatsPanel'
-import { PrelevementRuleRequests, RuleQuestionBlock } from './PrelevementRuleRequests'
+import { PrelevementRuleRequests } from './PrelevementRuleRequests'
 import {
   ApiError,
   createPrelevementRuleRequest,
@@ -36,19 +36,8 @@ import {
   type PrelevementRules,
 } from '@/lib/api'
 
-// Libellés courts pour le badge sur chaque règle du panneau ci-dessous
-// -- une question en attente (voir pendingQuestions plus bas) prime
-// toujours sur ce statut, jamais affichés en même temps.
-const STATUT_BADGE: Record<PrelevementRuleRequest['statut'], string> = {
-  en_attente: '⏳ Pas encore examinée',
-  en_cours: '🔧 En cours de codage',
-  a_verifier: '🧪 Codée -- à valider',
-  valide: '✅ Certifiée',
-}
-
 // Version compacte (juste l'icône) -- utilisée sur les pastilles
-// d'attribution de règle par colonne (Modèles tableau, 2026-09-22) où
-// STATUT_BADGE serait trop long pour tenir dans une cellule de 168px.
+// d'attribution de règle par colonne (Modèles tableau, 2026-09-22).
 const RULE_STATUT_ICON: Record<PrelevementRuleRequest['statut'], string> = {
   en_attente: '⏳',
   en_cours: '🔧',
@@ -297,30 +286,9 @@ export function PrelevementScreen() {
   const [newPeriodiciteTexte, setNewPeriodiciteTexte] = useState('')
   const [savingRules, setSavingRules] = useState(false)
   const [rulesSaved, setRulesSaved] = useState(false)
-  const [rulesExplainOpen, setRulesExplainOpen] = useState(false)
-  // Formulaire de demande de modification directement SOUS la règle
-  // concernée (Raphaël, 2026-09-22 : "que ça repasse en bas, ça
-  // embrouille -- laisse-le juste en dessous, les demandes ne passent
-  // en bas [dans la liste] que pour de nouvelles règles"). `openRuleIdx`
-  // = index dans rules.explication du formulaire actuellement ouvert
-  // (un seul à la fois), le texte tapé et l'état d'envoi lui sont
-  // propres. `ruleRequestsRefreshKey` fait recharger la liste du
-  // dessous (PrelevementRuleRequests) après un ajout depuis ici, sans
+  // ruleRequestsRefreshKey fait recharger PrelevementRuleRequests après un
+  // ajout fait depuis "Modèles tableau" (submitNewRuleForColumn), sans
   // dupliquer sa logique de récupération.
-  const [openRuleIdx, setOpenRuleIdx] = useState<number | null>(null)
-  // Titre éditable (Raphaël, 2026-09-22 : "il faut pouvoir donner un
-  // titre en gras à cette règle") -- pré-rempli avec le nom de la règle
-  // modifiée, mais modifiable : utile dès qu'on demande une 2e/3e
-  // précision sur la même règle et qu'on veut la distinguer dans la
-  // liste ("Exclusions, 2e partie" par exemple).
-  const [ruleFormTitre, setRuleFormTitre] = useState('')
-  const [ruleFormText, setRuleFormText] = useState('')
-  const [ruleFormSubmitting, setRuleFormSubmitting] = useState(false)
-  const [ruleFormError, setRuleFormError] = useState<string | null>(null)
-  // Index de la règle dont la dernière demande envoyée affiche le
-  // message de succès -- un index (jamais le titre) : le titre envoyé
-  // peut maintenant différer de r.titre puisqu'il est modifiable.
-  const [ruleFormSentIdx, setRuleFormSentIdx] = useState<number | null>(null)
   const [ruleRequestsRefreshKey, setRuleRequestsRefreshKey] = useState(0)
   // Réglages repliés par défaut (Raphaël, 2026-09-22 : "ça pollue
   // visuellement") -- même bascule que "Règles appliquées par le
@@ -357,26 +325,6 @@ export function PrelevementScreen() {
       clearInterval(interval)
     }
   }, [orgId, ruleRequestsRefreshKey])
-
-  // Une question en attente est une ACTION à faire, jamais cachée
-  // derrière un panneau replié -- bug réel signalé par Raphaël (son
-  // père ne voyait rien du tout, y compris le badge rouge, parce que
-  // "Règles appliquées par le moteur" reste replié par défaut et qu'il
-  // fallait cliquer dessus AVANT même d'arriver à "Historique des
-  // demandes" en dessous). Déroule ce panneau tout seul dès qu'une
-  // question attend une réponse.
-  useEffect(() => {
-    if (ruleRequestsAll.some((r) => r.questions.some((q) => !q.answered_at))) {
-      setRulesExplainOpen(true)
-    }
-  }, [ruleRequestsAll])
-
-  function latestRuleRequestFor(titre: string): PrelevementRuleRequest | undefined {
-    const key = titre.trim().toLowerCase()
-    const matches = ruleRequestsAll.filter((r) => r.titre.trim().toLowerCase() === key)
-    if (matches.length === 0) return undefined
-    return matches.reduce((a, b) => (a.created_at > b.created_at ? a : b))
-  }
 
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [selectedFiles, setSelectedFiles] = useState<File[]>([])
@@ -696,33 +644,6 @@ export function PrelevementScreen() {
   function handleColonneMandatDragEnd(event: DragEndEvent) {
     const { active, over } = event
     if (over && active.id !== over.id) reorderColonneMandat(String(active.id), String(over.id))
-  }
-
-  function openRuleForm(index: number, titreParDefaut: string) {
-    setOpenRuleIdx((prev) => (prev === index ? null : index))
-    setRuleFormTitre(titreParDefaut)
-    setRuleFormText('')
-    setRuleFormError(null)
-  }
-
-  async function submitRuleForm(index: number) {
-    const titre = ruleFormTitre.trim()
-    const demande = ruleFormText.trim()
-    if (!orgId || !titre || !demande) return
-    setRuleFormSubmitting(true)
-    setRuleFormError(null)
-    try {
-      await createPrelevementRuleRequest(orgId, titre, demande)
-      setOpenRuleIdx(null)
-      setRuleFormText('')
-      setRuleFormSentIdx(index)
-      setRuleRequestsRefreshKey((k) => k + 1)
-      setTimeout(() => setRuleFormSentIdx(null), 4000)
-    } catch (err) {
-      setRuleFormError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
-    } finally {
-      setRuleFormSubmitting(false)
-    }
   }
 
   function handleFilesSelected(files: File[]) {
@@ -1343,125 +1264,30 @@ export function PrelevementScreen() {
             </CardContent>
           </Card>
 
-          {rules !== null && rules.explication.length > 0 && (
-            <div className="mb-4 rounded-lg border border-[var(--border)]">
-              <button
-                type="button"
-                onClick={() => setRulesExplainOpen((v) => !v)}
-                className="flex w-full items-center justify-between px-3 py-2 text-sm font-medium"
-              >
-                <span className="flex items-center gap-2">
-                  <span>📋 Règles appliquées par le moteur</span>
-                  {ruleRequestsAll.some((r) => r.questions.some((q) => !q.answered_at)) ? (
-                    <span className="rounded-full bg-[var(--danger)] px-2 py-0.5 text-xs font-bold text-white">
-                      🔴 Réponse attendue
-                    </span>
-                  ) : ruleRequestsAll.some((r) => r.statut === 'a_verifier') ? (
-                    <span className="rounded-full bg-[var(--warning)] px-2 py-0.5 text-xs font-medium text-[var(--warning-foreground)]">
-                      🧪 {ruleRequestsAll.filter((r) => r.statut === 'a_verifier').length} à vérifier
-                    </span>
-                  ) : (
-                    ruleRequestsAll.some((r) => r.statut !== 'valide') && (
-                      <span className="rounded-full bg-[var(--primary)] px-2 py-0.5 text-xs font-medium text-[var(--primary-foreground)]">
-                        {ruleRequestsAll.filter((r) => r.statut !== 'valide').length} en cours de codage
-                      </span>
-                    )
-                  )}
-                </span>
-                <span className="text-[var(--muted)]">{rulesExplainOpen ? '▲' : '▼'}</span>
-              </button>
-              {rulesExplainOpen && (
-                <div className="flex flex-col gap-3 border-t border-[var(--border)] p-3">
-                  <p className="text-xs text-[var(--muted)]">
-                    Ce que le code applique réellement à chaque génération -- pour repérer une
-                    future erreur ou décider qu'une règle doit changer. Reflète tes réglages
-                    ci-dessus (frais, délai).
-                  </p>
-                  {rules.explication.map((r, i) => {
-                    const latestReq = latestRuleRequestFor(r.titre)
-                    const pendingQuestions = latestReq?.questions.filter((q) => !q.answered_at) ?? []
-                    return (
-                    <div key={i}>
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <span className="flex items-center gap-2">
-                          <p className="text-sm font-bold text-[var(--foreground)]">{r.titre}</p>
-                          {pendingQuestions.length > 0 ? (
-                            <span className="rounded-md bg-[var(--danger)] px-2 py-0.5 text-xs font-bold text-white">
-                              🔴 Ta réponse est nécessaire
-                            </span>
-                          ) : (
-                            latestReq && (
-                              <span className="text-xs font-medium text-[var(--muted)]">
-                                {STATUT_BADGE[latestReq.statut]} -- {formatRuleRequestTime(latestReq.created_at)}
-                              </span>
-                            )
-                          )}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => openRuleForm(i, r.titre)}
-                          className="text-xs text-[var(--primary)] hover:underline"
-                        >
-                          {openRuleIdx === i ? 'Annuler' : '✏️ Demander une modification'}
-                        </button>
-                      </div>
-                      <p className="text-sm text-[var(--muted)]">{r.detail}</p>
-
-                      {orgId && latestReq && pendingQuestions.map((q) => (
-                        <RuleQuestionBlock
-                          key={q.id}
-                          orgId={orgId}
-                          requestId={latestReq.id}
-                          question={q}
-                          onAnswered={() => setRuleRequestsRefreshKey((k) => k + 1)}
-                        />
-                      ))}
-
-                      {ruleFormSentIdx === i && openRuleIdx !== i && (
-                        <p className="mt-1 text-xs text-[var(--success)]">
-                          ✅ Demande enregistrée, visible dans "Demandes de modification de règles"
-                          ci-dessous.
-                        </p>
-                      )}
-
-                      {openRuleIdx === i && (
-                        <div className="mt-2 flex flex-col gap-2 rounded-md border border-[var(--border)] p-2">
-                          <Input
-                            className="font-bold"
-                            placeholder="Titre de la règle"
-                            value={ruleFormTitre}
-                            onChange={(e) => setRuleFormTitre(e.target.value)}
-                          />
-                          <textarea
-                            autoFocus
-                            className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] p-2 text-sm"
-                            rows={2}
-                            placeholder="Changement souhaité pour cette règle, en détail..."
-                            value={ruleFormText}
-                            onChange={(e) => setRuleFormText(e.target.value)}
-                          />
-                          {ruleFormError && (
-                            <p className="text-xs text-[var(--danger)]">Erreur : {ruleFormError}</p>
-                          )}
-                          <div>
-                            <Button
-                              onClick={() => void submitRuleForm(i)}
-                              disabled={ruleFormSubmitting || !ruleFormTitre.trim() || !ruleFormText.trim()}
-                            >
-                              {ruleFormSubmitting ? 'Enregistrement…' : 'Envoyer la demande'}
-                            </Button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                    )
-                  })}
-
-                  {orgId && <PrelevementRuleRequests orgId={orgId} refreshKey={ruleRequestsRefreshKey} />}
-                </div>
-              )}
-            </div>
-          )}
+          {/* "📋 Règles appliquées par le moteur" -- avant : ce panneau
+              rendait une liste STATIQUE (rules.explication, écrite en dur
+              dans trieur/prelevement.py) avec un badge de statut rapproché
+              par titre depuis la liste de demandes, ET une liste "Historique
+              des demandes" séparée juste en dessous listant à nouveau TOUTES
+              les demandes -- deux vues du même sujet, reliées seulement par
+              une correspondance de titre fragile. Confusion signalée
+              explicitement (Raphaël, 2026-09-22) : "celles d'en haut,
+              celles qui sont utilisées[...] et celles d'en bas, elles sont
+              codées, est-ce qu'elles sont utilisées oui ou non, on ne peut
+              pas savoir, on ne peut pas faire la distinction [...] est-ce
+              qu'elles vont passer au-dessus ?" -- et sa réponse au fond :
+              "deux bacs, un bac actif, un bac en cours d'optimisation [...]
+              une règle utilisée qui ne fonctionne pas [...] repasse dans le
+              bloc d'en bas".
+              PrelevementRuleRequests EST maintenant cette unique source de
+              vérité (chaque règle codée par une session Claude Code a une
+              ligne en base, y compris les règles historiques documentées
+              avant ce mécanisme -- voir migration/seed du 2026-09-22) :
+              "✅ Actif" = certifiée par un humain, "🔧 En cours
+              d'optimisation" = tout le reste, y compris une règle active
+              qui vient d'être signalée en panne (bouton "Signaler un
+              problème" sur sa carte). Plus de liste statique dupliquée. */}
+          {orgId && <PrelevementRuleRequests orgId={orgId} refreshKey={ruleRequestsRefreshKey} />}
 
           <Card>
             <CardContent className="flex flex-col gap-3">

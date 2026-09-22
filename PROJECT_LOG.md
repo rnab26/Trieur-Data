@@ -3681,3 +3681,21 @@ changer là-dessus, juste confirmé.
 
 `pytest` : 449 passés (nouveau test vérifiant que l'explication reflète
 les réglages réellement enregistrés). CI verte du premier coup.
+
+### PR #54 : résumé du traitement en petit tableau (2026-09-22)
+
+Raphaël a demandé de rendre le résumé après génération plus lisible --
+l'ancien format empilait tout dans des phrases denses (ex. "11
+ligne(s) exclue(s) : 9 × Statut agent IA \"Refusé par le client\" ...,
+2 × ..."), difficile à lire d'un coup d'œil sur mobile.
+
+- L'API renvoie maintenant un résumé structuré (`summary` : compteurs
+  séparés + raisons d'exclusion en liste de `{raison, n}`) au lieu de
+  phrases préformatées à parser côté client.
+- Frontend : deux petits tableaux -- un tableau clé/valeur pour les
+  compteurs (fichiers lus, lignes, exclus, First, RCUR, fusions), puis
+  un tableau "Raisons d'exclusion" séparé, au lieu d'une liste numérotée
+  de phrases à virgules.
+
+`pytest` : 449 passés (2 tests adaptés au nouveau format). CI verte du
+premier coup.

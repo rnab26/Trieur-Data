@@ -1198,6 +1198,59 @@ export type PrelevementGenerateResult = {
   telephonesManquants: PrelevementMissingPhone[]
   filename: string
   fileBase64: string
+  // true seulement pour generatePrelevementExample ci-dessous -- données
+  // ENTIÈREMENT inventées, jamais un vrai client. L'écran doit s'en
+  // servir pour bloquer tout enregistrement/téléchargement de ce lot
+  // comme s'il s'agissait d'un vrai envoi en banque.
+  exemple: boolean
+}
+
+type PrelevementGenerateApiResponse = {
+  counts: { ooff: number; rcur: number; exclus: number; sans_telephone: number }
+  summary: {
+    n_fichiers: number
+    n_lignes: number
+    n_exclus: number
+    exclusions: { raison: string; n: number }[]
+    n_mandats: number
+    n_first: number
+    n_rcur: number
+    n_fusions: number
+    n_sans_telephone: number
+  }
+  mandats: PrelevementMandatRow[]
+  telephones_manquants: { reference_client: string; nom: string; motif: string }[]
+  filename: string
+  file_base64: string
+  exemple?: boolean
+}
+
+function parsePrelevementGenerateResponse(data: PrelevementGenerateApiResponse): PrelevementGenerateResult {
+  return {
+    ooffCount: data.counts.ooff,
+    rcurCount: data.counts.rcur,
+    exclusCount: data.counts.exclus,
+    summary: {
+      nFichiers: data.summary.n_fichiers,
+      nLignes: data.summary.n_lignes,
+      nExclus: data.summary.n_exclus,
+      exclusions: data.summary.exclusions,
+      nMandats: data.summary.n_mandats,
+      nFirst: data.summary.n_first,
+      nRcur: data.summary.n_rcur,
+      nFusions: data.summary.n_fusions,
+      nSansTelephone: data.summary.n_sans_telephone,
+    },
+    mandats: data.mandats,
+    telephonesManquants: data.telephones_manquants.map((t) => ({
+      referenceClient: t.reference_client,
+      nom: t.nom,
+      motif: t.motif,
+    })),
+    filename: data.filename,
+    fileBase64: data.file_base64,
+    exemple: data.exemple ?? false,
+  }
 }
 
 // Envoie le fichier CRM brut et renvoie un aperçu du résultat (lignes de
@@ -1222,48 +1275,26 @@ export async function generatePrelevementMandats(
   if (!res.ok) {
     return throwForErrorResponse(res)
   }
-  const data = (await res.json()) as {
-    counts: { ooff: number; rcur: number; exclus: number; sans_telephone: number }
-    summary: {
-      n_fichiers: number
-      n_lignes: number
-      n_exclus: number
-      exclusions: { raison: string; n: number }[]
-      n_mandats: number
-      n_first: number
-      n_rcur: number
-      n_fusions: number
-      n_sans_telephone: number
-    }
-    mandats: PrelevementMandatRow[]
-    telephones_manquants: { reference_client: string; nom: string; motif: string }[]
-    filename: string
-    file_base64: string
+  return parsePrelevementGenerateResponse((await res.json()) as PrelevementGenerateApiResponse)
+}
+
+// Aperçu sur des données ENTIÈREMENT inventées par le serveur (aucun
+// fichier envoyé), pour tester le moteur sans dépendre d'un export CRM
+// réel -- demandé par Raphaël (2026-09-22 : "un aperçu généré à partir
+// de données inventées par le code"). Même forme de réponse que
+// generatePrelevementMandats, avec `exemple: true` -- l'écran doit s'en
+// servir pour bloquer tout enregistrement/téléchargement de ce lot
+// comme un vrai envoi en banque (voir PrelevementGenerateResult.exemple).
+export async function generatePrelevementExample(orgId: string): Promise<PrelevementGenerateResult> {
+  const headers = await authHeader()
+  const res = await safeFetch(`${API_URL}/orgs/${orgId}/prelevement/generate-example`, {
+    method: 'POST',
+    headers,
+  })
+  if (!res.ok) {
+    return throwForErrorResponse(res)
   }
-  return {
-    ooffCount: data.counts.ooff,
-    rcurCount: data.counts.rcur,
-    exclusCount: data.counts.exclus,
-    summary: {
-      nFichiers: data.summary.n_fichiers,
-      nLignes: data.summary.n_lignes,
-      nExclus: data.summary.n_exclus,
-      exclusions: data.summary.exclusions,
-      nMandats: data.summary.n_mandats,
-      nFirst: data.summary.n_first,
-      nRcur: data.summary.n_rcur,
-      nFusions: data.summary.n_fusions,
-      nSansTelephone: data.summary.n_sans_telephone,
-    },
-    mandats: data.mandats,
-    telephonesManquants: data.telephones_manquants.map((t) => ({
-      referenceClient: t.reference_client,
-      nom: t.nom,
-      motif: t.motif,
-    })),
-    filename: data.filename,
-    fileBase64: data.file_base64,
-  }
+  return parsePrelevementGenerateResponse((await res.json()) as PrelevementGenerateApiResponse)
 }
 
 // Enregistre en base le lot de mandats affiché dans l'aperçu -- demandé

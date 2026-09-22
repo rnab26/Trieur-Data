@@ -1819,6 +1819,23 @@ def test_prelevement_generate_shows_custom_column_empty(client_factory):
     assert mandat["Ma colonne perso"] in ("", None)
 
 
+def test_prelevement_generate_example_uses_invented_rows(client_factory):
+    """"Tester avec des données d'exemple" (Raphaël, 2026-09-22) : même
+    aperçu que /prelevement/generate mais SANS fichier uploadé -- des
+    lignes inventées par le code. `exemple: true` dans la réponse, au
+    moins un mandat produit, et un cas exclu (IBAN invalide) pour
+    montrer le comportement complet du moteur d'un coup."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    res = tc.post("/orgs/org-1/prelevement/generate-example", headers=headers)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["exemple"] is True
+    assert len(body["mandats"]) > 0
+    assert body["counts"]["exclus"] >= 1
+
+
 def test_prelevement_colonnes_mandat_preset_create_list_and_delete(client_factory):
     """Jeux de colonnes réutilisables (Raphaël, 2026-09-22 : "comme on
     avait sur Streamlit") -- enregistrer un instantané nommé, le

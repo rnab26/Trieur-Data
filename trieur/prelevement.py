@@ -55,6 +55,22 @@ COL_ADRESSE = "Adresse"
 COL_VILLE = "Ville"
 COL_CODE_POSTAL = "Code postal"
 COL_EMAIL = "Email"
+# "Statut agent IA" -- champ jusque-là inexploité, découvert le
+# 2026-09-22 en revérifiant les 3 fichiers maîtres du père de Raphaël à
+# sa demande (le bug ci-dessous avait fait fuir TOUS les mandats en
+# FRST, jamais un seul RCUR). Porte deux signaux distincts, confirmés
+# avec Raphaël avant de coder :
+# 1. "Notifié le {jour}" = notification préalable obligatoire (règle
+#    SEPA) avant un prélèvement RÉCURRENT -- vérifié sur le fichier de
+#    référence (291 lignes) : le jour de notification correspond au
+#    jour de prélèvement récurrent du client dans 95,3% des cas
+#    (204/214). Bien plus fiable que l'ancienne règle ("Total frais de
+#    dossier" > 0 pour FRST), qui ne concordait qu'à 63% (557/878) avec
+#    le vrai historique des remises bancaires du Drive.
+# 2. "Refusé par le client" / "Nrp J-1 - Annuler contrat" -- le client a
+#    refusé ou son contrat doit être annulé : jamais envoyé en banque,
+#    même règle qu'un IBAN invalide.
+COL_STATUT_IA = "Statut agent IA"
 COL_TELEPHONE = "Téléphone"
 # "Mobile" -- repli si "Téléphone" (fixe) est vide. Vérifié sur le
 # fichier CRM de référence (2026-09-22, signalé par Raphaël) : "Mobile"
@@ -78,7 +94,6 @@ COL_ADMIN_AIDE = "Admin & Aide a dom"
 COL_AUDITIF = "Auditif"
 COL_IMMO = "IMMO"
 COL_VETO = "Total cotisation MYMO VETO SUR"
-COL_TOTAL_FRAIS = "Total frais de dossier"
 COL_DATE_EFFET = "Date d'effet du nouveau contrat (OPTILIFE)"
 
 # Suffixe du motif par produit -- ordre et lettres copiés de la formule
@@ -366,6 +381,12 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
             exclure("RUM manquant")
             continue
 
+        statut_ia = str(_get(row, COL_STATUT_IA, keyed) or "").strip()
+        statut_ia_lower = statut_ia.lower()
+        if "refus" in statut_ia_lower or "annuler" in statut_ia_lower:
+            exclure(f"Statut agent IA \"{statut_ia}\" -- client refusé ou contrat à annuler")
+            continue
+
         date_premiere = compute_first_prelevement_date(
             _get(row, COL_DATE_PREMIER, keyed), today, rules.delay_days,
         )
@@ -401,14 +422,18 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
         else:
             mandats_bundles = [(s, [c]) for c, s in produits_actifs]
 
-        # OOFF (1er prélèvement, avec frais de dossier) vs RCUR
-        # (récurrent, sans frais) -- "Total frais de dossier" > 0 veut
-        # dire que CE client vient d'activer ses produits actuels (ligne
-        # = instantané de signature), donc TOUS ses produits actifs de
-        # cette ligne sont en 1er prélèvement. Sert seulement à choisir
-        # FRST/RCUR, jamais comme montant (voir plus bas).
-        total_frais = to_amount(_get(row, COL_TOTAL_FRAIS, keyed))
-        type_sequence = "FRST" if total_frais > 0 else "RCUR"
+        # FRST (1er prélèvement, avec frais de dossier) vs RCUR
+        # (récurrent, sans frais) -- "Statut agent IA" commence par
+        # "Notifié" = le client a reçu la notification obligatoire
+        # avant un prélèvement RÉCURRENT (règle SEPA), donc RCUR. Sinon
+        # (vide, "Validé par le client", autre) -- FRST. Bug réel
+        # corrigé le 2026-09-22 (signalé par Raphaël : "aucun
+        # prélèvement n'est récurrent") : l'ancienne règle ("Total frais
+        # de dossier" > 0 -> FRST) ne concordait qu'à 63% avec le vrai
+        # historique des remises bancaires du Drive -- voir COL_STATUT_IA
+        # ci-dessus pour le détail de la vérification (95,3% de
+        # concordance sur le nouveau signal).
+        type_sequence = "RCUR" if statut_ia_lower.startswith("notifié") else "FRST"
 
         # Date de signature du mandat = la date de création du contrat
         # dans le CRM, PAS la date à laquelle ce fichier est généré --

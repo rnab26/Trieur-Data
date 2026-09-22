@@ -199,10 +199,14 @@ def test_generate_mandats_ooff_when_frais_present():
     assert mandat.date_effet == ""
 
 
-def test_generate_mandats_rcur_when_no_frais():
+def test_generate_mandats_rcur_when_notified():
     """RCUR (récurrent) = valeur du produit TELLE QUELLE, jamais de
-    frais ajouté."""
-    row = _base_row(**{"Total frais de dossier": 0.0})
+    frais ajouté. Déclenché par "Statut agent IA" = "Notifié le ..." --
+    bug réel corrigé le 2026-09-22 (Raphaël : "aucun prélèvement n'est
+    récurrent") : l'ancienne règle ("Total frais de dossier" == 0)
+    faisait dépendre FRST/RCUR d'une colonne qui ne concordait qu'à 63%
+    avec le vrai historique des remises bancaires du Drive."""
+    row = _base_row(**{"Statut agent IA": "Notifié le 10/09/26"})
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
     assert len(result.rcur) == 1
     assert len(result.ooff) == 0
@@ -252,7 +256,7 @@ def test_generate_mandats_multi_product_rcur_matches_real_remise():
         "RUM": "1419267",
         "Optilife": 49.90,
         "MYJURIS & MYHOSPI": 29.89,
-        "Total frais de dossier": 0.0,
+        "Statut agent IA": "Notifié le 10/09/26",
     })
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
     assert len(result.rcur) == 2
@@ -345,6 +349,35 @@ def test_generate_mandats_excludes_missing_first_prelevement_date():
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
     assert len(result.exclus) == 1
     assert "date" in result.exclus[0].raison.lower()
+
+
+def test_generate_mandats_excludes_client_refused():
+    """Bug réel corrigé le 2026-09-22 (Raphaël, en revérifiant les
+    fichiers maîtres) : un client "Refusé par le client" était généré
+    et envoyé en banque comme n'importe quel autre mandat -- jamais
+    remarqué faute d'exploiter "Statut agent IA"."""
+    row = _base_row(**{"Statut agent IA": "Refusé par le client"})
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    assert result.ooff == [] and result.rcur == []
+    assert len(result.exclus) == 1
+    assert "refus" in result.exclus[0].raison.lower()
+
+
+def test_generate_mandats_excludes_contract_to_cancel():
+    row = _base_row(**{"Statut agent IA": "Nrp J-1 - Annuler contrat"})
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    assert result.ooff == [] and result.rcur == []
+    assert len(result.exclus) == 1
+
+
+def test_generate_mandats_frst_when_statut_ia_blank_or_valide():
+    """Sans "Notifié" -- vide ou "Validé par le client" (première
+    validation, pas encore de cycle récurrent) -- reste FRST."""
+    for statut in ("", "Validé par le client"):
+        row = _base_row(**{"Statut agent IA": statut})
+        result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+        assert len(result.ooff) == 1, f"statut={statut!r}"
+        assert result.ooff[0].type_sequence == "FRST"
 
 
 def test_generate_mandats_excludes_when_no_product_active():

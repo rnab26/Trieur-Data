@@ -21,6 +21,7 @@ import {
   createPrelevementRuleRequest,
   deletePrelevementColonnesMandatPreset,
   downloadPrelevementFile,
+  generatePrelevementExample,
   generatePrelevementMandats,
   getPrelevementRules,
   listPrelevementColonnesMandatPresets,
@@ -692,8 +693,36 @@ export function PrelevementScreen() {
     }
   }
 
+  // "Tester avec des données d'exemple" (Raphaël, 2026-09-22) : un aperçu
+  // généré à partir de lignes ENTIÈREMENT inventées par le serveur, sans
+  // fichier à fournir -- pour voir comment le moteur se comporte sans
+  // dépendre d'un export CRM réel. Même écran d'aperçu que pour un vrai
+  // fichier (result.exemple distingue les deux, voir handleSaveToDatabase
+  // et le bouton "Télécharger" plus bas).
+  async function handleGenerateExample() {
+    if (!orgId) return
+    setGenerating(true)
+    setGenerateError(null)
+    setResult(null)
+    setSaveError(null)
+    setSavedCount(null)
+    try {
+      const counts = await generatePrelevementExample(orgId)
+      setResult(counts)
+    } catch (err) {
+      setGenerateError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+    } finally {
+      setGenerating(false)
+    }
+  }
+
   async function handleSaveToDatabase() {
     if (!orgId || !result || result.mandats.length === 0) return
+    // Garde-fou (domaine "zéro droit à l'erreur") : un lot d'exemple ne
+    // doit jamais pouvoir être enregistré comme un vrai envoi en banque
+    // -- le bouton est déjà désactivé plus bas, ce return est la
+    // deuxième barrière si jamais il était appelé autrement.
+    if (result.exemple) return
     if (
       !window.confirm(
         `Enregistrer ${result.mandats.length} mandat(s) dans la base de données, environnement « ${PRELEVEMENT_ORG_NAME} » ?`,
@@ -1371,12 +1400,21 @@ export function PrelevementScreen() {
                   </div>
                 )}
               </div>
-              <div>
+              <div className="flex flex-wrap items-center gap-2">
                 <Button onClick={() => void handleGenerate()} disabled={generating || selectedFiles.length === 0}>
                   {generating ? 'Génération…' : '2. Générer un aperçu'}
                 </Button>
+                <Button variant="secondary" onClick={() => void handleGenerateExample()} disabled={generating}>
+                  {generating ? 'Génération…' : '🧪 Tester avec des données d\'exemple'}
+                </Button>
               </div>
               {generateError && <p className="text-sm text-[var(--danger)]">{generateError}</p>}
+              {result?.exemple && (
+                <p className="rounded-md bg-[var(--warning)] p-2 text-sm font-bold text-[var(--warning-foreground)]">
+                  🧪 Données d'exemple -- entièrement inventées, aucun vrai client. Pour vérifier le
+                  moteur uniquement : impossible de télécharger ou d'enregistrer ce lot.
+                </p>
+              )}
               {result && (
                 <div className="flex flex-col gap-3 rounded-md border border-[var(--border)] p-3">
                   <p className="text-sm font-medium text-[var(--foreground)]">
@@ -1495,13 +1533,13 @@ export function PrelevementScreen() {
                   )}
 
                   <div className="flex flex-wrap items-center gap-2">
-                    <Button onClick={() => downloadPrelevementFile(result)}>
+                    <Button onClick={() => downloadPrelevementFile(result)} disabled={result.exemple}>
                       3. Télécharger le classeur (.xlsx)
                     </Button>
                     <Button
                       variant="secondary"
                       onClick={() => void handleSaveToDatabase()}
-                      disabled={saving || result.mandats.length === 0}
+                      disabled={saving || result.mandats.length === 0 || result.exemple}
                     >
                       {saving ? 'Enregistrement…' : 'Enregistrer dans la base de données'}
                     </Button>

@@ -19,7 +19,7 @@ import json
 import os
 import uuid
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Optional
 
 import pandas as pd
@@ -116,6 +116,29 @@ from trieur.db import (
 )
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
 from trieur.prelevement import (
+    COL_ADMIN_AIDE,
+    COL_ADRESSE,
+    COL_AUDITIF,
+    COL_BIC,
+    COL_CARTE_MGS,
+    COL_CODE_POSTAL,
+    COL_DATE_CREATION,
+    COL_DATE_PREMIER,
+    COL_EMAIL,
+    COL_IBAN,
+    COL_IMMO,
+    COL_MOBILE,
+    COL_MYJURIS,
+    COL_NOM,
+    COL_OPTILIFE,
+    COL_PERIODICITE,
+    COL_REFERENCE,
+    COL_RUM,
+    COL_STATUT,
+    COL_TELEPHONE,
+    COL_TYPE_PRELEVEMENT,
+    COL_VETO,
+    COL_VILLE,
     PRODUITS_CONNUS,
     PrelevementRules,
     _add_months,
@@ -2452,10 +2475,21 @@ async def post_prelevement_generate(
             raise HTTPException(status_code=400, detail=f"Impossible de lire \"{filename}\" : {exc}")
     df = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
     filename = files[0].filename or "export"
+    rows = df.where(pd.notnull(df), None).to_dict(orient="records")
+    return _build_prelevement_generate_response(ctx, org_id, rows, filename, len(files))
 
+
+def _build_prelevement_generate_response(
+    ctx: AuthCtx, org_id: str, rows: list[dict], filename: str, n_fichiers: int,
+) -> dict:
+    """Fabrique la réponse JSON de /prelevement/generate (aperçu + classeur
+    encodé en base64) à partir de lignes déjà prêtes -- factorisé pour être
+    réutilisé tel quel par /prelevement/generate-example (2026-09-22,
+    Raphaël : "un aperçu généré à partir de données inventées, pas de vrai
+    client, pour tester sans dépendre d'un fichier réel") sans dupliquer
+    ~150 lignes de construction de colonnes/classeur/résumé."""
     rules_row = get_prelevement_rules(ctx.client, org_id)
     rules = _rules_from_row(rules_row)
-    rows = df.where(pd.notnull(df), None).to_dict(orient="records")
     result = generate_mandats(rows, rules)
 
     aujourdhui = date.today()
@@ -2575,7 +2609,6 @@ async def post_prelevement_generate(
     # tableau/grille lisible plutôt qu'un bloc de texte dense
     # (demande du 2026-09-22, "moins mal aux yeux").
     n_lignes = len(rows)
-    n_fichiers = len(files)
     raisons_exclusion: dict[str, int] = {}
     for e in result.exclus:
         raisons_exclusion[e.raison] = raisons_exclusion.get(e.raison, 0) + 1
@@ -2622,6 +2655,110 @@ async def post_prelevement_generate(
         "filename": f"mandats_{file_base}.xlsx",
         "file_base64": base64.b64encode(buffer.getvalue()).decode("ascii"),
     }
+
+
+# IBAN français réel (fichier de référence), checksum mod-97 valide --
+# jamais un IBAN inventé au hasard : un faux IBAN "plausible" tomberait
+# presque toujours sur la règle "IBAN invalide" et exclurait la ligne,
+# ce qui fausserait l'aperçu au lieu de montrer un cas "actif" normal.
+_EXEMPLE_IBAN_VALIDE = "FR7615589228070085438594040"
+
+
+def _build_prelevement_example_rows() -> list[dict]:
+    """Jeu de lignes CRM inventées (aucune vraie donnée client) couvrant
+    plusieurs cas représentatifs du moteur -- demande de Raphaël
+    (2026-09-22, "un aperçu généré à partir de données inventées par le
+    code, pour tester sans dépendre d'un fichier réel"). Sert UNIQUEMENT
+    à /prelevement/generate-example ; le vrai flux (upload d'un export
+    CRM réel) est inchangé."""
+    aujourdhui = date.today()
+    date_premier = (aujourdhui + timedelta(days=10)).strftime("%d/%m/%Y")
+    base = {
+        COL_STATUT: "Sepa validé par le client",
+        COL_TYPE_PRELEVEMENT: "Prélèvement",
+        COL_PERIODICITE: "Mensuelle",
+        COL_IBAN: _EXEMPLE_IBAN_VALIDE,
+        COL_BIC: "CMBRFR2B",
+        COL_DATE_CREATION: aujourdhui.strftime("%d/%m/%Y"),
+        COL_DATE_PREMIER: date_premier,
+        COL_ADRESSE: "1 rue Exemple",
+        COL_VILLE: "Ville Exemple",
+        COL_CODE_POSTAL: "00000",
+        COL_EMAIL: "exemple@exemple.test",
+        COL_TELEPHONE: "+33600000000",
+    }
+    return [
+        {
+            **base,
+            COL_REFERENCE: "EXEMPLE-001",
+            COL_NOM: "Client Exemple Un",
+            COL_RUM: "EXEMPLE000001",
+            COL_OPTILIFE: 49.9,
+            "Total frais de dossier": 20.0,
+        },
+        {
+            **base,
+            COL_REFERENCE: "EXEMPLE-002",
+            COL_NOM: "Client Exemple Deux",
+            COL_RUM: "EXEMPLE000002",
+            COL_CARTE_MGS: 99.0,
+            "Total frais de dossier": 20.0,
+        },
+        {
+            **base,
+            COL_REFERENCE: "EXEMPLE-003",
+            COL_NOM: "Client Exemple Trois",
+            COL_RUM: "EXEMPLE000003",
+            COL_MYJURIS: 29.89,
+            COL_ADMIN_AIDE: 15.0,
+            COL_AUDITIF: 12.0,
+            COL_IMMO: 18.0,
+            COL_VETO: 20.0,
+            "Total frais de dossier": 20.0,
+        },
+        {
+            **base,
+            COL_REFERENCE: "EXEMPLE-004",
+            COL_NOM: "Client Exemple Quatre",
+            COL_RUM: "EXEMPLE000004",
+            COL_OPTILIFE: 49.9,
+            COL_CARTE_MGS: 99.0,
+            "Total frais de dossier": 20.0,
+        },
+        {
+            **base,
+            COL_REFERENCE: "EXEMPLE-005",
+            COL_NOM: "Client Exemple Cinq (sans téléphone)",
+            COL_RUM: "EXEMPLE000005",
+            COL_TELEPHONE: "",
+            COL_MOBILE: "",
+            COL_OPTILIFE: 49.9,
+            "Total frais de dossier": 20.0,
+        },
+        {
+            **base,
+            COL_REFERENCE: "EXEMPLE-006",
+            COL_NOM: "Client Exemple Six (IBAN invalide)",
+            COL_RUM: "EXEMPLE000006",
+            COL_IBAN: "FR0000000000000000000000000",
+            COL_OPTILIFE: 49.9,
+            "Total frais de dossier": 20.0,
+        },
+    ]
+
+
+@app.post("/orgs/{org_id}/prelevement/generate-example")
+def post_prelevement_generate_example(org_id: str, ctx: AuthCtx = Depends(require_cockpit_access)):
+    """Même aperçu que /prelevement/generate, mais sur des lignes
+    ENTIÈREMENT inventées (voir _build_prelevement_example_rows) au lieu
+    d'un fichier uploadé -- pour tester le moteur sans dépendre d'un
+    export CRM réel. `exemple: true` dans la réponse : le frontend doit
+    s'en servir pour bloquer tout enregistrement/envoi de ce lot en
+    banque (ce n'est QUE de la donnée fictive)."""
+    rows = _build_prelevement_example_rows()
+    resp = _build_prelevement_generate_response(ctx, org_id, rows, "exemple", 0)
+    resp["exemple"] = True
+    return resp
 
 
 class PrelevementMandatsSave(BaseModel):

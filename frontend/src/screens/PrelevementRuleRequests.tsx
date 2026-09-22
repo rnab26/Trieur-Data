@@ -3,18 +3,78 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
   ApiError,
+  answerPrelevementRuleRequestQuestion,
   createPrelevementRuleRequest,
   deletePrelevementRuleRequest,
   listPrelevementRuleRequests,
   updatePrelevementRuleRequest,
   type PrelevementRuleRequest,
+  type RuleRequestQuestion,
   type RuleRequestStatut,
 } from '@/lib/api'
 
+// Réponse à une question à choix cliquables posée par une session
+// Claude Code sur une demande de règle ambiguë -- même principe que
+// ChantierCard/QuestionBlock côté Cockpit. Une réponse libre (le champ
+// commentaire) reste toujours possible en plus des options.
+export function RuleQuestionBlock({
+  orgId,
+  requestId,
+  question,
+  onAnswered,
+}: {
+  orgId: string
+  requestId: string
+  question: RuleRequestQuestion
+  onAnswered: () => void
+}) {
+  const [comment, setComment] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function handleChoose(option: string) {
+    setSubmitting(true)
+    setError(null)
+    try {
+      await answerPrelevementRuleRequestQuestion(orgId, requestId, question.id, option, comment.trim() || null)
+      onAnswered()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="mt-2 rounded-md border-2 border-[var(--danger)] bg-[var(--muted-bg)] p-3 text-sm">
+      <p className="font-bold text-[var(--danger)]">🔴 Ta réponse est nécessaire</p>
+      <p className="mt-1 font-medium">{question.question}</p>
+      <div className="mt-2 flex flex-wrap gap-2">
+        {question.options.map((option) => (
+          <Button key={option} type="button" variant="secondary" disabled={submitting} onClick={() => void handleChoose(option)}>
+            {option}
+          </Button>
+        ))}
+      </div>
+      <Input
+        className="mt-2"
+        placeholder="Préciser ta réponse (optionnel)…"
+        value={comment}
+        onChange={(e) => setComment(e.target.value)}
+      />
+      {error && <p className="mt-1 text-xs text-[var(--danger)]">Erreur : {error}</p>}
+    </div>
+  )
+}
+
+// Statut affiché seulement quand il n'y a AUCUNE question en attente sur
+// la demande -- une question en attente prime toujours sur le statut
+// (voir renderStatutBadge ci-dessous), pour ne jamais laisser croire
+// "en cours de codage" alors qu'une réponse est en fait attendue.
 const STATUT_LABEL: Record<RuleRequestStatut, string> = {
-  en_attente: '⏳ En attente',
-  en_cours: '🔵 En cours',
-  valide: '✅ Validé',
+  en_attente: '⏳ Pas encore examinée',
+  en_cours: '🔧 En cours de codage -- rien à faire de ton côté',
+  valide: '✅ Codée et validée',
 }
 
 const STATUT_COLOR: Record<RuleRequestStatut, string> = {
@@ -44,6 +104,11 @@ export function PrelevementRuleRequests({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [historyOpen, setHistoryOpen] = useState(false)
+  // Une question en attente est une ACTION à faire, pas de l'historique
+  // -- dérouler automatiquement dès qu'il y en a une, pour ne jamais la
+  // cacher derrière un clic (bug réel signalé par Raphaël : son père ne
+  // trouvait pas où répondre).
+  const hasPendingQuestion = requests.some((r) => r.questions.some((q) => !q.answered_at))
 
   const [newTitre, setNewTitre] = useState('')
   const [newDemande, setNewDemande] = useState('')
@@ -51,6 +116,10 @@ export function PrelevementRuleRequests({
 
   const [savingId, setSavingId] = useState<string | null>(null)
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null)
+  // Bump manuel après une réponse à une question -- même mécanisme que
+  // refreshKey (venant du parent), pour recharger sans dupliquer la
+  // logique de récupération.
+  const [reloadNonce, setReloadNonce] = useState(0)
 
   useEffect(() => {
     let cancelled = false
@@ -69,7 +138,11 @@ export function PrelevementRuleRequests({
     return () => {
       cancelled = true
     }
-  }, [orgId, refreshKey])
+  }, [orgId, refreshKey, reloadNonce])
+
+  useEffect(() => {
+    if (hasPendingQuestion) setHistoryOpen(true)
+  }, [hasPendingQuestion])
 
   async function handleCreate() {
     const titre = newTitre.trim()
@@ -117,10 +190,18 @@ export function PrelevementRuleRequests({
   }
 
   const nonValidees = requests.filter((r) => r.statut !== 'valide').length
+  const nbPendingQuestions = requests.reduce((n, r) => n + r.questions.filter((q) => !q.answered_at).length, 0)
 
   return (
     <div className="mt-2 border-t border-[var(--border)] pt-3">
       {error && <p className="mb-2 text-sm text-[var(--danger)]">Erreur : {error}</p>}
+
+      {nbPendingQuestions > 0 && (
+        <p className="mb-2 rounded-md bg-[var(--danger)] p-2 text-sm font-bold text-white">
+          🔴 {nbPendingQuestions} question{nbPendingQuestions > 1 ? 's' : ''} en attente de ta réponse
+          ci-dessous
+        </p>
+      )}
 
       {!loading && requests.length > 0 && (
         <button
@@ -141,8 +222,16 @@ export function PrelevementRuleRequests({
 
       {historyOpen && requests.length > 0 && (
         <ul className="mb-3 flex flex-col gap-3">
-          {requests.map((r) => (
-            <li key={r.id} className="rounded-md border border-[var(--border)] p-2">
+          {requests.map((r) => {
+            const pendingQuestions = r.questions.filter((q) => !q.answered_at)
+            return (
+            <li
+              key={r.id}
+              className={
+                'rounded-md border p-2 ' +
+                (pendingQuestions.length > 0 ? 'border-2 border-[var(--danger)]' : 'border-[var(--border)]')
+              }
+            >
               <div className="mb-1 flex flex-wrap items-center gap-2">
                 <Input
                   className="min-w-[10rem] flex-1 font-medium"
@@ -156,19 +245,25 @@ export function PrelevementRuleRequests({
                     if (titre && titre !== r.titre) void persist(r.id, { titre })
                   }}
                 />
-                <select
-                  className={
-                    'rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-1 text-xs font-medium ' +
-                    STATUT_COLOR[r.statut]
-                  }
-                  value={r.statut}
-                  disabled={savingId === r.id}
-                  onChange={(e) => void persist(r.id, { statut: e.target.value as RuleRequestStatut })}
-                >
-                  <option value="en_attente">{STATUT_LABEL.en_attente}</option>
-                  <option value="en_cours">{STATUT_LABEL.en_cours}</option>
-                  <option value="valide">{STATUT_LABEL.valide}</option>
-                </select>
+                {pendingQuestions.length > 0 ? (
+                  <span className="rounded-md bg-[var(--danger)] px-2 py-1 text-xs font-bold text-white">
+                    🔴 Ta réponse est nécessaire
+                  </span>
+                ) : (
+                  <select
+                    className={
+                      'rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-1 text-xs font-medium ' +
+                      STATUT_COLOR[r.statut]
+                    }
+                    value={r.statut}
+                    disabled={savingId === r.id}
+                    onChange={(e) => void persist(r.id, { statut: e.target.value as RuleRequestStatut })}
+                  >
+                    <option value="en_attente">{STATUT_LABEL.en_attente}</option>
+                    <option value="en_cours">{STATUT_LABEL.en_cours}</option>
+                    <option value="valide">{STATUT_LABEL.valide}</option>
+                  </select>
+                )}
               </div>
               <textarea
                 className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] p-2 text-sm"
@@ -183,6 +278,15 @@ export function PrelevementRuleRequests({
                   if (demande && demande !== r.demande) void persist(r.id, { demande })
                 }}
               />
+              {pendingQuestions.map((q) => (
+                <RuleQuestionBlock
+                  key={q.id}
+                  orgId={orgId}
+                  requestId={r.id}
+                  question={q}
+                  onAnswered={() => setReloadNonce((n) => n + 1)}
+                />
+              ))}
               <div className="mt-1 flex items-center justify-between">
                 <span className="text-xs text-[var(--muted)]">
                   Modifié le {new Date(r.updated_at).toLocaleDateString('fr-FR')}
@@ -207,7 +311,8 @@ export function PrelevementRuleRequests({
                 )}
               </div>
             </li>
-          ))}
+            )
+          })}
         </ul>
       )}
 

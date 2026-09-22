@@ -125,6 +125,19 @@ export function PrelevementScreen() {
     }
   }, [orgId, ruleRequestsRefreshKey])
 
+  // Une question en attente est une ACTION à faire, jamais cachée
+  // derrière un panneau replié -- bug réel signalé par Raphaël (son
+  // père ne voyait rien du tout, y compris le badge rouge, parce que
+  // "Règles appliquées par le moteur" reste replié par défaut et qu'il
+  // fallait cliquer dessus AVANT même d'arriver à "Historique des
+  // demandes" en dessous). Déroule ce panneau tout seul dès qu'une
+  // question attend une réponse.
+  useEffect(() => {
+    if (ruleRequestsAll.some((r) => r.questions.some((q) => !q.answered_at))) {
+      setRulesExplainOpen(true)
+    }
+  }, [ruleRequestsAll])
+
   function latestRuleRequestFor(titre: string): PrelevementRuleRequest | undefined {
     const key = titre.trim().toLowerCase()
     const matches = ruleRequestsAll.filter((r) => r.titre.trim().toLowerCase() === key)

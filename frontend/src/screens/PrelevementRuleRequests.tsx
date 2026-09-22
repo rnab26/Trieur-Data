@@ -250,19 +250,16 @@ export function PrelevementRuleRequests({
                     🔴 Ta réponse est nécessaire
                   </span>
                 ) : (
-                  <select
-                    className={
-                      'rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-1 text-xs font-medium ' +
-                      STATUT_COLOR[r.statut]
-                    }
-                    value={r.statut}
-                    disabled={savingId === r.id}
-                    onChange={(e) => void persist(r.id, { statut: e.target.value as RuleRequestStatut })}
+                  // Lecture seule -- le statut est décidé par la session
+                  // Claude Code qui code la règle, jamais par Raphaël ou
+                  // son père (retour explicite : "les statuts sont à
+                  // statuer par toi, pas par moi"). Avant : un menu
+                  // déroulant modifiable ici, source de confusion.
+                  <span
+                    className={'rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-1 text-xs font-medium ' + STATUT_COLOR[r.statut]}
                   >
-                    <option value="en_attente">{STATUT_LABEL.en_attente}</option>
-                    <option value="en_cours">{STATUT_LABEL.en_cours}</option>
-                    <option value="valide">{STATUT_LABEL.valide}</option>
-                  </select>
+                    {STATUT_LABEL[r.statut]}
+                  </span>
                 )}
               </div>
               <textarea

@@ -2193,6 +2193,11 @@ def get_prelevement_rules_endpoint(org_id: str, ctx: AuthCtx = Depends(require_c
         "frais_par_produit": rules.frais_par_produit,
         "periodicites": rules.periodicites,
         "colonnes_mandat": colonnes_mandat,
+        # Sert au front à distinguer une colonne canonique (jamais
+        # supprimable) d'une colonne personnalisée ("➕ ajouter une
+        # colonne", Raphaël 2026-09-22) -- une seule source de vérité,
+        # jamais dupliquée côté frontend.
+        "colonnes_mandat_canoniques": MANDAT_COLONNES_CANONIQUES,
         "produits_connus": PRODUITS_CONNUS,
         "explication": explain_rules(rules),
     }
@@ -2235,16 +2240,24 @@ def post_prelevement_rules(
             raise HTTPException(status_code=400, detail=f"Explication vide pour \"{code}\".")
     colonnes_mandat_dicts = None
     if body.colonnes_mandat is not None:
-        # Doit couvrir EXACTEMENT chaque colonne canonique une fois --
-        # jamais un sous-ensemble partiel qui perdrait silencieusement
-        # une colonne que l'utilisateur n'a pas explicitement décochée.
-        cles = [c.cle for c in body.colonnes_mandat]
-        if sorted(cles) != sorted(MANDAT_COLONNES_CANONIQUES):
+        # Doit couvrir chaque colonne canonique une fois -- jamais un
+        # sous-ensemble partiel qui perdrait silencieusement une colonne
+        # que l'utilisateur n'a pas explicitement décochée. Des colonnes
+        # personnalisées (Raphaël, 2026-09-22 : "➕ ajouter une colonne")
+        # peuvent s'ajouter en plus -- toujours vides au générateur (pas
+        # de source dans le CRM), à remplir à la main après export.
+        cles = [c.cle.strip() for c in body.colonnes_mandat]
+        if any(not c for c in cles):
+            raise HTTPException(status_code=400, detail="Nom de colonne vide.")
+        if len(cles) != len(set(cles)):
+            raise HTTPException(status_code=400, detail="Colonnes en double.")
+        manquantes = set(MANDAT_COLONNES_CANONIQUES) - set(cles)
+        if manquantes:
             raise HTTPException(
                 status_code=400,
-                detail="La liste des colonnes doit contenir exactement toutes les colonnes connues.",
+                detail=f"Colonnes manquantes : {', '.join(sorted(manquantes))}.",
             )
-        colonnes_mandat_dicts = [{"cle": c.cle, "visible": c.visible} for c in body.colonnes_mandat]
+        colonnes_mandat_dicts = [{"cle": c.cle.strip(), "visible": c.visible} for c in body.colonnes_mandat]
     saved = save_prelevement_rules(
         ctx.client, org_id, body.ics, body.nature, body.delay_days, body.frais_setup_eur,
         body.frais_par_produit, body.periodicites, ctx.user.id, colonnes_mandat_dicts,
@@ -2254,6 +2267,7 @@ def post_prelevement_rules(
         **saved,
         "colonnes_mandat": saved.get("colonnes_mandat")
         or [{"cle": c, "visible": True} for c in MANDAT_COLONNES_CANONIQUES],
+        "colonnes_mandat_canoniques": MANDAT_COLONNES_CANONIQUES,
         "produits_connus": PRODUITS_CONNUS,
         "explication": explain_rules(rules),
     }
@@ -2375,10 +2389,13 @@ async def post_prelevement_generate(
 
         def _mandat_dict(m):  # noqa: F811 -- enrobe volontairement la version ci-dessus
             d = base_dict(m)
+            # Une colonne personnalisée (pas dans les 28 canoniques, ajoutée
+            # via "➕ ajouter une colonne") n'a aucune source dans le CRM --
+            # toujours vide, à remplir à la main après export, jamais filtrée.
             return {
-                entry["cle"]: d[entry["cle"]]
+                entry["cle"]: d.get(entry["cle"], "")
                 for entry in colonnes_mandat
-                if entry.get("visible", True) and entry.get("cle") in d
+                if entry.get("visible", True)
             }
 
     df_mandat = pd.DataFrame([_mandat_dict(m) for m in result.mandats])

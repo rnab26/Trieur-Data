@@ -557,6 +557,11 @@ export function PrelevementRuleRequests({
         }
       >
         <div className="mb-1 flex flex-wrap items-center gap-2">
+          {r.statut === 'valide' && (
+            <span title="Certifiée -- ne sera plus retouchée" className="text-lg leading-none">
+              ✅
+            </span>
+          )}
           <Input
             className="min-w-[10rem] flex-1 font-bold"
             value={r.titre}

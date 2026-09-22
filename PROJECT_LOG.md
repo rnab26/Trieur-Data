@@ -4092,3 +4092,14 @@ montage des composants (quel composant est monté sous quelle
 condition, quel state contrôle l'affichage) plutôt que de partir
 directement sur des hypothèses réseau/cache/matching -- la cause
 racine ici était visible dès la première lecture attentive du JSX.
+
+### Demande "OPTILIFE OPTIVIE" retirée par le père de Raphaël (2026-09-22)
+
+Réponse "Autre chose (préciser)" avec juste "non" en commentaire à la
+question posée -- pas assez pour agir (rejette ma lecture proposée
+sans dire ce qu'il veut à la place). En tentant de poser une question
+de suivi, la demande n'existait déjà plus en base : le père de Raphaël
+a supprimé la demande elle-même (bouton 🗑️, suppression en cascade des
+questions) plutôt que de préciser. Traité comme un retrait volontaire
+-- rien à coder, rien à demander de plus. Reste 5 questions ouvertes :
+décalage remise (x2), motif (conflit -AU/-IM), ordre des colonnes.

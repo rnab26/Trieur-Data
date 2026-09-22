@@ -3699,3 +3699,37 @@ ligne(s) exclue(s) : 9 × Statut agent IA \"Refusé par le client\" ...,
 
 `pytest` : 449 passés (2 tests adaptés au nouveau format). CI verte du
 premier coup.
+
+### PR #55/#56 : onglet Prélèvement manquant -- cache navigateur (2026-09-22)
+
+Raphaël a signalé l'onglet Prélèvement absent du menu du haut, alors
+que Cockpit (soumis à exactement la même condition `isAdmin` dans
+`App.tsx`) restait visible. Vérifié : techniquement impossible avec le
+code actuel (les deux dans le même tableau conditionnel), et le
+déploiement Render était bien à jour (dernier commit, statut "live").
+Cause probable : le navigateur (Chrome mobile) gardait en cache une
+ancienne page `index.html`, qui réclame alors les anciens fichiers
+JS/CSS hashés d'un build précédent.
+
+**PR #55** : ajout d'un fichier `_headers` (format Netlify-style) pour
+forcer la revalidation de `index.html`. **Erreur** : vérifié après
+déploiement via `curl -sI` que Render ignore silencieusement ce
+format -- l'en-tête `Cache-Control` restait celui par défaut de
+Render, pas celui demandé. Toujours vérifier après coup, pas juste
+supposer qu'un correctif marche parce qu'il est déployé.
+
+**PR #56** : retrait du fichier inefficace. La vraie méthode Render
+(confirmée via leur documentation officielle) est soit `render.yaml`
+(écarté : un `render.yaml` à la racine du repo risquerait d'être
+interprété comme un Blueprint gérant TOUS les services du compte, y
+compris ceux d'autres projets -- risque d'infra partagée à ne pas
+prendre sans confirmation explicite), soit le réglage "Headers" du
+tableau de bord Render sur ce service précis. Aucune clé API Render
+disponible dans cet environnement pour l'automatiser -- instructions
+manuelles données à Raphaël (chemin `/index.html`, en-tête
+`Cache-Control: no-cache, no-store, must-revalidate`, dans
+https://dashboard.render.com/static/srv-dami3b740ujc73b19j0g).
+
+**Reste à faire côté Raphaël** : appliquer ce réglage une seule fois
+dans le tableau de bord Render pour que le problème ne se reproduise
+plus jamais à l'avenir.

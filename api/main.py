@@ -2416,7 +2416,13 @@ async def post_prelevement_generate(
             "Prochaine_echeance": prochaine_echeance.strftime("%d/%m/%Y") if prochaine_echeance else "",
             "Date_fin": "",
             "Statut": "",
-            "Reference_facture": "",
+            # "La règle du MOTIF devient -> Référence Facture" (demande du
+            # père de Raphaël, 2026-09-22) : le motif ("MGS-{RUM}{suffixe
+            # produit}", déjà calculé par build_motif) EST la référence de
+            # facture -- jamais laissée vide alors que Motif la contient
+            # déjà, jamais une valeur recalculée séparément (une seule
+            # source : m.motif).
+            "Reference_facture": m.motif,
             "Libelle": f"intégré le {aujourdhui.strftime('%d/%m/%Y')}",
             # Colonnes hors de la liste demandée, gardées par sécurité
             # (voir note ci-dessus) -- jamais retirées sans confirmation.

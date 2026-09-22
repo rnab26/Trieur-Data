@@ -4318,3 +4318,17 @@ seule box repliable regroupant tout ce qui touche aux colonnes.
 
 **Toutes les demandes de règles de la file sont `valide` -- plus
 aucune en attente.**
+
+### PR #84 : corrige le glisser-déposer des colonnes sur téléphone (2026-09-22)
+
+Raphaël : "quand je déplace l'ordre des colonnes je ne peux pas
+enregistrer l'ordre que j'ai réorganisé". Cause déduite du code (pas
+reproduite en direct, pas d'accès navigateur authentifié dans cette
+session -- **à confirmer par Raphaël**) : la grille défile
+horizontalement, et la contrainte de démarrage du glisser-déposer
+était basée sur une distance (5px) -- sur téléphone, ces premiers
+pixels sont capturés par le défilement natif du conteneur avant que
+dnd-kit prenne la main, le glissement ne démarre donc jamais.
+Remplacé par une contrainte "delay" (appui maintenu 150ms), pattern
+standard pour distinguer un défilement d'un glissement au doigt.
+Déployé.

@@ -25,6 +25,7 @@ import {
   getPrelevementRules,
   listPrelevementColonnesMandatPresets,
   listPrelevementRuleRequests,
+  patchPrelevementColonnesMandatPreset,
   savePrelevementColonnesMandatPreset,
   savePrelevementMandats,
   savePrelevementRules,
@@ -42,6 +43,15 @@ const STATUT_BADGE: Record<PrelevementRuleRequest['statut'], string> = {
   en_attente: '⏳ Pas encore examinée',
   en_cours: '🔧 En cours de codage',
   valide: '✅ Codée et validée',
+}
+
+// Version compacte (juste l'icône) -- utilisée sur les pastilles
+// d'attribution de règle par colonne (Modèles tableau, 2026-09-22) où
+// STATUT_BADGE serait trop long pour tenir dans une cellule de 168px.
+const RULE_STATUT_ICON: Record<PrelevementRuleRequest['statut'], string> = {
+  en_attente: '⏳',
+  en_cours: '🔧',
+  valide: '✅',
 }
 
 // Nombre de lignes affichées dans l'aperçu -- au-delà, seul le fichier
@@ -86,20 +96,28 @@ function SortableColonneMandatCell({
   lettre,
   note,
   removable,
+  attributionLabel,
   onToggleVisible,
   onRemove,
   onRename,
+  onOpenAttribute,
 }: {
   colonne: ColonneMandat
   lettre: string
   note: string
   removable: boolean
+  // Seule une colonne personnalisée (removable) peut être liée à une
+  // règle -- "Attribuer en connectant les règles disponibles sur les
+  // colonnes" (Raphaël, 2026-09-22, "Modèles tableau"). null tant
+  // qu'aucune règle n'est liée.
+  attributionLabel: string | null
   onToggleVisible: () => void
   onRemove: () => void
   // Seule une colonne personnalisée (removable) peut être renommée --
   // le nom d'une colonne canonique est la clé attendue par le
   // générateur, jamais éditable (Raphaël, 2026-09-22).
   onRename: (nouveauNom: string) => boolean
+  onOpenAttribute: () => void
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: colonne.cle,
@@ -154,6 +172,20 @@ function SortableColonneMandatCell({
           <span className={'text-xs font-medium ' + (colonne.visible ? '' : 'line-through')}>{colonne.cle}</span>
         )}
         <p className="text-[0.65rem] leading-tight text-[var(--muted)]">{note}</p>
+        {removable && (
+          <button
+            type="button"
+            onClick={onOpenAttribute}
+            className={
+              'rounded px-1 py-0.5 text-left text-[0.65rem] leading-tight ' +
+              (attributionLabel
+                ? 'bg-[var(--muted-bg)] text-[var(--primary)]'
+                : 'text-[var(--primary)] hover:underline')
+            }
+          >
+            {attributionLabel ?? '🔗 Attribuer une règle'}
+          </button>
+        )}
         <div className="mt-auto flex items-center gap-1.5 pt-1">
           <label className="flex items-center gap-1 text-[0.65rem] text-[var(--muted)]">
             <input type="checkbox" checked={colonne.visible} onChange={onToggleVisible} />
@@ -228,7 +260,26 @@ export function PrelevementScreen() {
   const [savingPreset, setSavingPreset] = useState(false)
   const [deletingPresetId, setDeletingPresetId] = useState<string | null>(null)
   const [presetError, setPresetError] = useState<string | null>(null)
-  const [presetsPanelOpen, setPresetsPanelOpen] = useState(false)
+  // "📊✏️ Modèles tableau ⚙️" (Raphaël, 2026-09-22) -- toute l'édition
+  // des colonnes (grille + modèles + attribution de règles) repliée
+  // dans une seule box cliquable, comme le reste des réglages de cet
+  // écran (jamais ouverte par défaut, "ça pollue visuellement").
+  const [modelesOpen, setModelesOpen] = useState(false)
+  // Le modèle actuellement chargé dans la grille de travail -- fixé par
+  // "Sélectionner", pour que "💾 Enregistrer" (dans le panneau) sache
+  // QUEL modèle mettre à jour, sans redemander un nom.
+  const [activePresetId, setActivePresetId] = useState<string | null>(null)
+  const [editingPresetId, setEditingPresetId] = useState<string | null>(null)
+  const [editingPresetName, setEditingPresetName] = useState('')
+  const [savingPresetColonnes, setSavingPresetColonnes] = useState(false)
+  // Attribution d'une règle à une colonne personnalisée (Raphaël,
+  // 2026-09-22 : "attribuer en connectant les règles disponibles sur
+  // les colonnes... créer une nouvelle règle au-dessus d'une colonne").
+  const [attributingCle, setAttributingCle] = useState<string | null>(null)
+  const [newRuleForColumnText, setNewRuleForColumnText] = useState('')
+  const [creatingRuleForColumn, setCreatingRuleForColumn] = useState(false)
+  const [ruleAttributionError, setRuleAttributionError] = useState<string | null>(null)
+  const [ruleAttributedNotice, setRuleAttributedNotice] = useState(false)
   const [newPeriodiciteCode, setNewPeriodiciteCode] = useState('')
   const [newPeriodiciteTexte, setNewPeriodiciteTexte] = useState('')
   const [savingRules, setSavingRules] = useState(false)
@@ -360,8 +411,12 @@ export function PrelevementScreen() {
     }
   }, [orgId])
 
-  function applyColonnesMandatPreset(preset: ColonnesMandatPreset) {
+  // "Sélectionner" (Raphaël, 2026-09-22) : applique ce modèle à la
+  // grille de travail ET mémorise lequel, pour que "💾 Enregistrer"
+  // sache où réenregistrer les colonnes ensuite.
+  function selectColonnesMandatPreset(preset: ColonnesMandatPreset) {
     setColonnesMandat(preset.colonnes)
+    setActivePresetId(preset.id)
   }
 
   async function handleSaveColonnesMandatPreset() {
@@ -379,11 +434,54 @@ export function PrelevementScreen() {
         next[idx] = saved
         return next
       })
+      setActivePresetId(saved.id)
       setNewPresetName('')
     } catch (err) {
       setPresetError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
     } finally {
       setSavingPreset(false)
+    }
+  }
+
+  // "✏️ Modifier" -- renomme un modèle existant, colonnes inchangées.
+  function startRenamePreset(preset: ColonnesMandatPreset) {
+    setEditingPresetId(preset.id)
+    setEditingPresetName(preset.name)
+  }
+
+  async function commitRenamePreset(id: string) {
+    if (!orgId) return
+    const name = editingPresetName.trim()
+    if (!name) return
+    setPresetError(null)
+    try {
+      const updated = await patchPrelevementColonnesMandatPreset(orgId, id, { name })
+      setColonnesMandatPresets((prev) =>
+        prev.map((p) => (p.id === id ? updated : p)).sort((a, b) => a.name.localeCompare(b.name)),
+      )
+      setEditingPresetId(null)
+    } catch (err) {
+      setPresetError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+    }
+  }
+
+  // "💾 Enregistrer" du panneau -- met à jour les colonnes du modèle
+  // SÉLECTIONNÉ (jamais les réglages réels du générateur : ça reste le
+  // rôle du bouton "Enregistrer les réglages", séparé, en dehors de ce
+  // panneau).
+  async function handleSaveActivePresetColonnes() {
+    if (!orgId || !activePresetId) return
+    setSavingPresetColonnes(true)
+    setPresetError(null)
+    try {
+      const updated = await patchPrelevementColonnesMandatPreset(orgId, activePresetId, {
+        colonnes: colonnesMandat,
+      })
+      setColonnesMandatPresets((prev) => prev.map((p) => (p.id === activePresetId ? updated : p)))
+    } catch (err) {
+      setPresetError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+    } finally {
+      setSavingPresetColonnes(false)
     }
   }
 
@@ -394,10 +492,48 @@ export function PrelevementScreen() {
     try {
       await deletePrelevementColonnesMandatPreset(orgId, id)
       setColonnesMandatPresets((prev) => prev.filter((p) => p.id !== id))
+      if (activePresetId === id) setActivePresetId(null)
     } catch (err) {
       setPresetError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
     } finally {
       setDeletingPresetId(null)
+    }
+  }
+
+  // Attribution d'une règle à une colonne personnalisée (Raphaël,
+  // 2026-09-22, "Modèles tableau") -- soit une demande déjà en file
+  // (pas encore validée), soit une nouvelle, créée ici même : même
+  // mécanisme que le formulaire "+ Nouvelle règle" déjà utilisé
+  // ailleurs sur cet écran (submitRuleForm), donc automatiquement
+  // visible dans "Règles appliquées par le moteur > + nouvelles règles".
+  function toggleAttribute(cle: string) {
+    setAttributingCle((prev) => (prev === cle ? null : cle))
+    setNewRuleForColumnText('')
+    setRuleAttributionError(null)
+  }
+
+  function pickExistingRuleForColumn(cle: string, requestId: string) {
+    setColonnesMandat((prev) => prev.map((c) => (c.cle === cle ? { ...c, rule_request_id: requestId } : c)))
+    setAttributingCle(null)
+  }
+
+  async function submitNewRuleForColumn(cle: string) {
+    const demande = newRuleForColumnText.trim()
+    if (!orgId || !demande) return
+    setCreatingRuleForColumn(true)
+    setRuleAttributionError(null)
+    try {
+      const created = await createPrelevementRuleRequest(orgId, `Colonne "${cle}"`, demande)
+      setColonnesMandat((prev) => prev.map((c) => (c.cle === cle ? { ...c, rule_request_id: created.id } : c)))
+      setRuleRequestsRefreshKey((k) => k + 1)
+      setAttributingCle(null)
+      setNewRuleForColumnText('')
+      setRuleAttributedNotice(true)
+      setTimeout(() => setRuleAttributedNotice(false), 4000)
+    } catch (err) {
+      setRuleAttributionError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+    } finally {
+      setCreatingRuleForColumn(false)
     }
   }
 
@@ -853,106 +989,108 @@ export function PrelevementScreen() {
                   <div>
                     <div className="mb-1 flex items-center justify-between gap-2">
                       <p className="text-sm font-medium text-[var(--foreground)]">
-                        Aperçu du fichier de mandats -- glisse ⠿ pour réordonner une colonne, décoche
-                        pour la masquer.
+                        Colonnes du fichier de mandats -- ordre, visibilité, modèles et règles.
                       </p>
-                      <Button variant="secondary" onClick={() => setPresetsPanelOpen((v) => !v)}>
-                        ⚙️ Jeux de colonnes
+                      <Button variant="secondary" onClick={() => setModelesOpen((v) => !v)}>
+                        📊✏️ Modèles tableau <span aria-hidden="true">⚙️</span>
                       </Button>
                     </div>
 
-                    <div className="flex items-start gap-3">
-                      {/* Façon tableur (Raphaël, 2026-09-22 : "un tableau Excel
-                          vraiment dans l'aperçu") -- lettres A, B, C... en repère
-                          visuel au-dessus de chaque colonne, quelques lignes vides
-                          très légères en dessous pour montrer la forme du fichier
-                          sans données réelles. */}
-                      <div className="overflow-x-auto rounded-md border border-[var(--border)]">
-                        <DndContext
-                          sensors={dndSensors}
-                          collisionDetection={closestCenter}
-                          onDragEnd={handleColonneMandatDragEnd}
-                        >
-                          <SortableContext
-                            items={colonnesMandat.map((c) => c.cle)}
-                            strategy={horizontalListSortingStrategy}
+                    {modelesOpen && (
+                      <div className="rounded-md border border-[var(--border)] bg-[var(--card)] shadow-sm">
+                        <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-2.5">
+                          <span className="text-sm font-bold">🗂️✏️ Modèles tableau</span>
+                          <button
+                            type="button"
+                            onClick={() => setModelesOpen(false)}
+                            aria-label="Fermer"
+                            className="px-1 text-[var(--muted)] hover:text-[var(--foreground)]"
                           >
-                            <div className="flex">
-                              {colonnesMandat.map((c, i) => (
-                                <SortableColonneMandatCell
-                                  key={c.cle}
-                                  colonne={c}
-                                  lettre={lettreExcel(i)}
-                                  note={
-                                    colonnesMandatNotes[c.cle] ??
-                                    'Colonne personnalisée -- toujours vide, à remplir après export.'
-                                  }
-                                  removable={!colonnesMandatCanoniques.includes(c.cle)}
-                                  onToggleVisible={() => toggleColonneMandatVisible(c.cle)}
-                                  onRemove={() => removeColonneMandatPersonnalisee(c.cle)}
-                                  onRename={(nouveauNom) => renameColonneMandatPersonnalisee(c.cle, nouveauNom)}
-                                />
-                              ))}
-                            </div>
-                          </SortableContext>
-                        </DndContext>
-                        {[0, 1, 2].map((ligne) => (
-                          <div key={ligne} className="flex opacity-30">
-                            {colonnesMandat.map((c) => (
-                              <div
-                                key={c.cle}
-                                className="h-5 w-40 flex-shrink-0 border-r border-b border-[var(--border)]"
-                              />
-                            ))}
-                          </div>
-                        ))}
-                      </div>
+                            ✕
+                          </button>
+                        </div>
 
-                      {/* Jeux de colonnes réutilisables (Raphaël, 2026-09-22 :
-                          "comme on avait sur Streamlit") -- petit panneau à CÔTÉ
-                          de l'aperçu, pas un écran à part : appliquer un jeu
-                          remplace juste les colonnes ci-dessus (il faut encore
-                          "Enregistrer les réglages" pour que ça s'applique
-                          vraiment au générateur, comme toute autre modification). */}
-                      {presetsPanelOpen && (
-                        <div className="w-56 flex-shrink-0 rounded-md border border-[var(--border)] bg-[var(--card)] p-2">
-                          <p className="mb-1 text-xs font-medium text-[var(--foreground)]">
-                            Jeux de colonnes -- clique pour appliquer.
-                          </p>
+                        {/* Modèles enregistrés (Raphaël, 2026-09-22 : "comme on
+                            avait sur Streamlit") -- nommer/modifier/supprimer un
+                            modèle, "Sélectionner" pour l'appliquer à la grille
+                            de travail ci-dessous ET mémoriser le choix. */}
+                        <div className="flex flex-col gap-2 border-b border-[var(--border)] px-4 py-3">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold uppercase tracking-wide text-[var(--muted)]">
+                              Modèles enregistrés
+                            </span>
+                          </div>
+
                           {colonnesMandatPresets.length === 0 && (
-                            <p className="text-xs text-[var(--muted)]">Aucun jeu enregistré pour l'instant.</p>
+                            <p className="text-xs text-[var(--muted)]">Aucun modèle enregistré pour l'instant.</p>
                           )}
                           {colonnesMandatPresets.length > 0 && (
-                            <ul className="flex flex-col gap-1">
-                              {colonnesMandatPresets.map((p) => (
-                                <li
-                                  key={p.id}
-                                  className="flex items-center gap-1 rounded-md border border-[var(--border)] py-0.5 pl-1.5 pr-0.5 text-xs"
-                                >
-                                  <button
-                                    type="button"
-                                    onClick={() => applyColonnesMandatPreset(p)}
-                                    className="flex-1 text-left hover:text-[var(--primary)]"
+                            <ul className="flex flex-col gap-1.5">
+                              {colonnesMandatPresets.map((p) =>
+                                editingPresetId === p.id ? (
+                                  <li key={p.id} className="flex items-center gap-2">
+                                    <Input
+                                      autoFocus
+                                      className="h-8 flex-1 px-2 py-1 text-sm"
+                                      value={editingPresetName}
+                                      onChange={(e) => setEditingPresetName(e.target.value)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter') void commitRenamePreset(p.id)
+                                        if (e.key === 'Escape') setEditingPresetId(null)
+                                      }}
+                                    />
+                                    <Button onClick={() => void commitRenamePreset(p.id)}>OK</Button>
+                                    <Button variant="secondary" onClick={() => setEditingPresetId(null)}>
+                                      Annuler
+                                    </Button>
+                                  </li>
+                                ) : (
+                                  <li
+                                    key={p.id}
+                                    className={
+                                      'flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-sm ' +
+                                      (p.id === activePresetId
+                                        ? 'border-[var(--primary)] bg-[var(--muted-bg)]'
+                                        : 'border-[var(--border)]')
+                                    }
                                   >
-                                    {p.name} ({p.colonnes.filter((c) => c.visible).length})
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => void handleDeleteColonnesMandatPreset(p.id)}
-                                    disabled={deletingPresetId === p.id}
-                                    className="px-1 text-[var(--danger)] hover:opacity-70"
-                                    aria-label={`Supprimer le jeu ${p.name}`}
-                                  >
-                                    🗑️
-                                  </button>
-                                </li>
-                              ))}
+                                    <span className="flex-1 font-medium">{p.name}</span>
+                                    <span className="text-xs text-[var(--muted)]">
+                                      {p.colonnes.filter((c) => c.visible).length} colonnes
+                                    </span>
+                                    <Button
+                                      variant={p.id === activePresetId ? 'primary' : 'secondary'}
+                                      onClick={() => selectColonnesMandatPreset(p)}
+                                    >
+                                      {p.id === activePresetId ? '✓ Sélectionné' : 'Sélectionner'}
+                                    </Button>
+                                    <button
+                                      type="button"
+                                      onClick={() => startRenamePreset(p)}
+                                      aria-label={`Modifier le modèle ${p.name}`}
+                                      className="rounded-md border border-[var(--border)] px-2 py-1 text-xs hover:bg-[var(--muted-bg)]"
+                                    >
+                                      ✏️
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleDeleteColonnesMandatPreset(p.id)}
+                                      disabled={deletingPresetId === p.id}
+                                      aria-label={`Supprimer le modèle ${p.name}`}
+                                      className="rounded-md border border-[var(--danger)] px-2 py-1 text-xs text-[var(--danger)] hover:bg-[var(--muted-bg)]"
+                                    >
+                                      🗑️
+                                    </button>
+                                  </li>
+                                ),
+                              )}
                             </ul>
                           )}
-                          <div className="mt-2 flex flex-col gap-1.5">
+
+                          <div className="mt-1 flex items-center gap-2">
                             <Input
-                              placeholder="Nom du jeu (ex. Export banque)"
-                              className="h-8 px-2 py-1"
+                              placeholder="Nom du nouveau modèle (ex. Export banque)"
+                              className="h-8 flex-1 px-2 py-1"
                               value={newPresetName}
                               onChange={(e) => setNewPresetName(e.target.value)}
                               onKeyDown={(e) => {
@@ -964,34 +1102,176 @@ export function PrelevementScreen() {
                               onClick={() => void handleSaveColonnesMandatPreset()}
                               disabled={savingPreset || !newPresetName.trim()}
                             >
-                              {savingPreset ? 'Enregistrement…' : '💾 Enregistrer la liste actuelle'}
+                              {savingPreset ? 'Création…' : '✏️ Créer un nouveau modèle'}
                             </Button>
                           </div>
-                          {presetError && (
-                            <p className="mt-1 text-xs text-[var(--danger)]">Erreur : {presetError}</p>
-                          )}
+                          {presetError && <p className="text-xs text-[var(--danger)]">Erreur : {presetError}</p>}
                         </div>
-                      )}
-                    </div>
 
-                    <div className="mt-2 flex items-center gap-2">
-                      <Input
-                        placeholder="Nom de la nouvelle colonne (ex. Code société)"
-                        className="h-8 max-w-xs px-2 py-1"
-                        value={newColonneMandat}
-                        onChange={(e) => setNewColonneMandat(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') addColonneMandat()
-                        }}
-                      />
-                      <Button variant="secondary" onClick={addColonneMandat} disabled={!newColonneMandat.trim()}>
-                        ➕ Ajouter une colonne
-                      </Button>
-                    </div>
-                    <p className="mt-1 text-xs text-[var(--muted)]">
-                      Une colonne ajoutée est toujours vide dans le fichier généré (aucune source dans le
-                      CRM) -- à remplir toi-même après export.
-                    </p>
+                        {/* Façon tableur (Raphaël, 2026-09-22 : "un tableau Excel
+                            vraiment dans l'aperçu") -- lettres A, B, C... en repère
+                            visuel au-dessus de chaque colonne, quelques lignes
+                            vides très légères en dessous pour montrer la forme du
+                            fichier sans données réelles. */}
+                        <div className="flex flex-col gap-3 px-4 py-3">
+                          <span className="text-xs font-bold uppercase tracking-wide text-[var(--muted)]">
+                            Colonnes du modèle en cours d'édition -- glisse ⠿ pour réordonner, décoche
+                            pour masquer.
+                          </span>
+
+                          <div className="overflow-x-auto rounded-md border border-[var(--border)]">
+                            <DndContext
+                              sensors={dndSensors}
+                              collisionDetection={closestCenter}
+                              onDragEnd={handleColonneMandatDragEnd}
+                            >
+                              <SortableContext
+                                items={colonnesMandat.map((c) => c.cle)}
+                                strategy={horizontalListSortingStrategy}
+                              >
+                                <div className="flex">
+                                  {colonnesMandat.map((c, i) => {
+                                    const attributedReq = c.rule_request_id
+                                      ? ruleRequestsAll.find((r) => r.id === c.rule_request_id)
+                                      : undefined
+                                    const attributionLabel = c.rule_request_id
+                                      ? attributedReq
+                                        ? `${RULE_STATUT_ICON[attributedReq.statut]} ${attributedReq.titre}`
+                                        : '🔗 règle liée'
+                                      : null
+                                    return (
+                                      <SortableColonneMandatCell
+                                        key={c.cle}
+                                        colonne={c}
+                                        lettre={lettreExcel(i)}
+                                        note={
+                                          colonnesMandatNotes[c.cle] ??
+                                          'Colonne personnalisée -- toujours vide, à remplir après export.'
+                                        }
+                                        removable={!colonnesMandatCanoniques.includes(c.cle)}
+                                        attributionLabel={attributionLabel}
+                                        onToggleVisible={() => toggleColonneMandatVisible(c.cle)}
+                                        onRemove={() => removeColonneMandatPersonnalisee(c.cle)}
+                                        onRename={(nouveauNom) =>
+                                          renameColonneMandatPersonnalisee(c.cle, nouveauNom)
+                                        }
+                                        onOpenAttribute={() => toggleAttribute(c.cle)}
+                                      />
+                                    )
+                                  })}
+                                </div>
+                              </SortableContext>
+                            </DndContext>
+                            {[0, 1, 2].map((ligne) => (
+                              <div key={ligne} className="flex opacity-30">
+                                {colonnesMandat.map((c) => (
+                                  <div
+                                    key={c.cle}
+                                    className="h-5 w-40 flex-shrink-0 border-r border-b border-[var(--border)]"
+                                  />
+                                ))}
+                              </div>
+                            ))}
+                          </div>
+
+                          {attributingCle && (
+                            <div className="flex flex-col gap-2 rounded-md border border-[var(--border)] bg-[var(--muted-bg)] p-3">
+                              <span className="text-xs font-bold">
+                                Attribuer une règle à la colonne « {attributingCle} »
+                              </span>
+                              <div className="flex flex-wrap gap-1.5">
+                                {ruleRequestsAll
+                                  .filter((r) => r.statut !== 'valide')
+                                  .map((r) => (
+                                    <button
+                                      key={r.id}
+                                      type="button"
+                                      onClick={() => pickExistingRuleForColumn(attributingCle, r.id)}
+                                      className="rounded-full border border-[var(--border)] bg-[var(--card)] px-2.5 py-1 text-xs hover:border-[var(--primary)]"
+                                    >
+                                      {RULE_STATUT_ICON[r.statut]} {r.titre}
+                                    </button>
+                                  ))}
+                                {ruleRequestsAll.filter((r) => r.statut !== 'valide').length === 0 && (
+                                  <span className="text-xs text-[var(--muted)]">
+                                    Aucune règle en attente pour l'instant.
+                                  </span>
+                                )}
+                              </div>
+                              <div className="h-px bg-[var(--border)]" />
+                              <span className="text-xs text-[var(--muted)]">
+                                Aucune règle ne correspond ? Décris-la, elle sera codée à la prochaine session.
+                              </span>
+                              <div className="flex items-center gap-2">
+                                <Input
+                                  placeholder="Ex. TVA à 20% si société assujettie"
+                                  className="h-8 flex-1 px-2 py-1"
+                                  value={newRuleForColumnText}
+                                  onChange={(e) => setNewRuleForColumnText(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') void submitNewRuleForColumn(attributingCle)
+                                  }}
+                                />
+                                <Button
+                                  onClick={() => void submitNewRuleForColumn(attributingCle)}
+                                  disabled={creatingRuleForColumn || !newRuleForColumnText.trim()}
+                                >
+                                  {creatingRuleForColumn ? 'Création…' : '➕ Créer la règle'}
+                                </Button>
+                              </div>
+                              {ruleAttributionError && (
+                                <p className="text-xs text-[var(--danger)]">Erreur : {ruleAttributionError}</p>
+                              )}
+                            </div>
+                          )}
+
+                          {ruleAttributedNotice && (
+                            <div className="rounded-md border border-[var(--success)] bg-[var(--muted-bg)] p-2.5 text-xs text-[var(--success)]">
+                              ✅ Règle créée -- visible dans "Règles appliquées par le moteur &rsaquo; + nouvelles
+                              règles" et traitée à la prochaine session Claude Code. Une fois codée, elle rejoint
+                              "Règles appliquées" automatiquement, comme les autres.
+                            </div>
+                          )}
+
+                          <div className="flex items-center gap-2">
+                            <Input
+                              placeholder="Nom de la nouvelle colonne (ex. Code société)"
+                              className="h-8 max-w-xs px-2 py-1"
+                              value={newColonneMandat}
+                              onChange={(e) => setNewColonneMandat(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') addColonneMandat()
+                              }}
+                            />
+                            <Button
+                              variant="secondary"
+                              onClick={addColonneMandat}
+                              disabled={!newColonneMandat.trim()}
+                            >
+                              ➕ Ajouter une colonne
+                            </Button>
+                          </div>
+                          <p className="text-xs text-[var(--muted)]">
+                            Une colonne ajoutée est toujours vide dans le fichier généré (aucune source dans le
+                            CRM) -- à remplir toi-même après export, ou attribue-lui une règle ci-dessus.
+                          </p>
+
+                          <div className="flex items-center justify-end gap-2 border-t border-[var(--border)] pt-3">
+                            {!activePresetId && (
+                              <span className="text-xs text-[var(--muted)]">
+                                Sélectionne ou crée un modèle pour pouvoir l'enregistrer avec ces colonnes.
+                              </span>
+                            )}
+                            <Button
+                              onClick={() => void handleSaveActivePresetColonnes()}
+                              disabled={!activePresetId || savingPresetColonnes}
+                            >
+                              {savingPresetColonnes ? 'Enregistrement…' : '💾 Enregistrer'}
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   <div>

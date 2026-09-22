@@ -1521,6 +1521,24 @@ def save_prelevement_colonnes_mandat_preset(
     return res.data[0]
 
 
+def update_prelevement_colonnes_mandat_preset(
+    client: Client, preset_id: str, org_id: str, data: dict,
+) -> dict | None:
+    """`data` : sous-ensemble de {name, colonnes} -- fusion partielle
+    (comme update_prelevement_rule_request), pour "✏️ Modifier" (juste
+    renommer) sans devoir renvoyer les colonnes, et pour le "💾
+    Enregistrer" du panneau "Modèles tableau" (juste les colonnes,
+    nom inchangé)."""
+    res = (
+        _td(client, "prelevement_colonnes_mandat_presets")
+        .update(data)
+        .eq("id", preset_id)
+        .eq("org_id", org_id)
+        .execute()
+    )
+    return res.data[0] if res.data else None
+
+
 def delete_prelevement_colonnes_mandat_preset(client: Client, preset_id: str, org_id: str) -> None:
     (
         _td(client, "prelevement_colonnes_mandat_presets")

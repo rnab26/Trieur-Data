@@ -2266,11 +2266,31 @@ async def post_prelevement_generate(
         steps.append(
             f"{n_fusions} mandat(s) MYJURIS+IMMO fusionné(s) en un seul (règle -J-AU)"
         )
+    # Signalement des mandats sans AUCUN numéro (ni Téléphone ni Mobile
+    # trouvés sur la ligne CRM) -- décision de Raphaël (2026-09-22) : ne
+    # jamais bloquer l'envoi pour ça (contrairement à un IBAN invalide),
+    # mais le rendre visible immédiatement dans le résumé, sans avoir à
+    # ouvrir le fichier téléchargé pour le découvrir.
+    sans_telephone = [m for m in result.mandats if not m.telephone]
+    if sans_telephone:
+        steps.append(
+            f"⚠️ {len(sans_telephone)} mandat(s) SANS numéro de téléphone "
+            f"(ni Téléphone ni Mobile trouvés) -- envoyés quand même, à vérifier"
+        )
     file_base = sanitize_filename(filename, default="mandats_prelevement")
     return {
-        "counts": {"ooff": len(result.ooff), "rcur": len(result.rcur), "exclus": len(result.exclus)},
+        "counts": {
+            "ooff": len(result.ooff),
+            "rcur": len(result.rcur),
+            "exclus": len(result.exclus),
+            "sans_telephone": len(sans_telephone),
+        },
         "steps": steps,
         "mandats": df_mandat.to_dict(orient="records") if not df_mandat.empty else [],
+        "telephones_manquants": [
+            {"reference_client": m.reference_client, "nom": m.nom, "motif": m.motif}
+            for m in sans_telephone
+        ],
         "filename": f"mandats_{file_base}.xlsx",
         "file_base64": base64.b64encode(buffer.getvalue()).decode("ascii"),
     }

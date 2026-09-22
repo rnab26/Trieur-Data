@@ -1630,7 +1630,9 @@ def test_prelevement_generate_returns_ooff_rcur_and_exclus(client_factory):
     )
     assert res.status_code == 200
     body = res.json()
-    assert body["counts"] == {"ooff": 1, "rcur": 0, "exclus": 1}
+    assert body["counts"]["ooff"] == 1
+    assert body["counts"]["rcur"] == 0
+    assert body["counts"]["exclus"] == 1
 
 
 def test_prelevement_generate_returns_mandat_rows_and_file_for_preview(client_factory):
@@ -1731,6 +1733,39 @@ def test_prelevement_generate_steps_describe_processing(client_factory):
     assert "1 fichier lu" in joined
     assert "exclue" in joined
     assert "mandat" in joined.lower()
+
+
+_PRELEVEMENT_CSV_NO_PHONE = (
+    "Référence du client,Nom complet,RUM,Statut,Type de prélèvement,"
+    "Périodicité (Mensuel/trimestre/annuel),IBAN,BIC,Date de premier prélèvement,"
+    "Adresse,Ville,Code postal,Email,Téléphone,"
+    "Optilife,Optivie,Carte MGS,MYJURIS & MYHOSPI,Admin & Aide a dom,Auditif,IMMO,"
+    "Total cotisation MYMO VETO SUR,Total frais de dossier,Total cotisation et frais de dossier\n"
+    "MGS-1,CLIENT SANS TEL,RUM1,Sepa validé par le client,Prélèvement,Mensuelle,"
+    "FR7615589228070085438594040,CMBRFR2B,24/09/2026,1 rue Test,Paris,75001,a@example.com,,"
+    "99,0,0,0,0,0,0,0,40,139\n"
+).encode("utf-8")
+
+
+def test_prelevement_generate_reports_missing_phone_without_blocking(client_factory):
+    """Décision de Raphaël (2026-09-22) : un mandat sans AUCUN numéro (ni
+    Téléphone ni Mobile trouvés sur la ligne CRM) n'est jamais exclu --
+    contrairement à un IBAN invalide -- mais signalé immédiatement dans
+    le résumé, sans avoir à ouvrir le fichier téléchargé."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/prelevement/generate",
+        files=[("files", ("export.csv", _PRELEVEMENT_CSV_NO_PHONE, "text/csv"))],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["counts"]["ooff"] == 1  # le mandat part quand même
+    assert body["counts"]["sans_telephone"] == 1
+    assert len(body["telephones_manquants"]) == 1
+    assert body["telephones_manquants"][0]["reference_client"] == "MGS-1"
+    assert any("SANS numéro" in s for s in body["steps"])
 
 
 def test_prelevement_mandats_saved_to_database(client_factory):

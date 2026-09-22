@@ -2257,45 +2257,35 @@ async def post_prelevement_generate(
         )
     buffer.seek(0)
 
-    # Résumé des étapes de traitement, lisible par Raphaël -- demande
-    # explicite (2026-09-21) : voir CE QUI A ÉTÉ FAIT sur le fichier,
-    # pas seulement le nombre final de mandats. Encodé en base64 dans un
-    # en-tête (les en-têtes HTTP n'acceptent que de l'ASCII, jamais les
-    # accents en clair) -- décodé côté frontend.
+    # Résumé du traitement, lisible par Raphaël -- demande explicite
+    # (2026-09-21) : voir CE QUI A ÉTÉ FAIT sur le fichier, pas
+    # seulement le nombre final de mandats. Structuré (pas des phrases
+    # à virgules empilées) pour que le frontend l'affiche en petit
+    # tableau/grille lisible plutôt qu'un bloc de texte dense
+    # (demande du 2026-09-22, "moins mal aux yeux").
     n_lignes = len(rows)
     n_fichiers = len(files)
     raisons_exclusion: dict[str, int] = {}
     for e in result.exclus:
         raisons_exclusion[e.raison] = raisons_exclusion.get(e.raison, 0) + 1
     n_fusions = sum(1 for m in result.mandats if m.motif.endswith("-J-AU"))
-    steps = [
-        f"{n_fichiers} fichier(s) lu(s) et fusionné(s)" if n_fichiers > 1 else "1 fichier lu",
-        f"{n_lignes} ligne(s) client au total",
-    ]
-    if raisons_exclusion:
-        detail = ", ".join(f"{v} × {k}" for k, v in raisons_exclusion.items())
-        steps.append(f"{len(result.exclus)} ligne(s) exclue(s) : {detail}")
-    else:
-        steps.append("Aucune ligne exclue")
-    steps.append(
-        f"{len(result.mandats)} mandat(s) généré(s) : {len(result.ooff)} en 1er "
-        f"prélèvement (First), {len(result.rcur)} récurrent(s) (RCUR)"
-    )
-    if n_fusions:
-        steps.append(
-            f"{n_fusions} mandat(s) MYJURIS+IMMO fusionné(s) en un seul (règle -J-AU)"
-        )
+    summary = {
+        "n_fichiers": n_fichiers,
+        "n_lignes": n_lignes,
+        "n_exclus": len(result.exclus),
+        "exclusions": [{"raison": k, "n": v} for k, v in raisons_exclusion.items()],
+        "n_mandats": len(result.mandats),
+        "n_first": len(result.ooff),
+        "n_rcur": len(result.rcur),
+        "n_fusions": n_fusions,
+    }
     # Signalement des mandats sans AUCUN numéro (ni Téléphone ni Mobile
     # trouvés sur la ligne CRM) -- décision de Raphaël (2026-09-22) : ne
     # jamais bloquer l'envoi pour ça (contrairement à un IBAN invalide),
     # mais le rendre visible immédiatement dans le résumé, sans avoir à
     # ouvrir le fichier téléchargé pour le découvrir.
     sans_telephone = [m for m in result.mandats if not m.telephone]
-    if sans_telephone:
-        steps.append(
-            f"⚠️ {len(sans_telephone)} mandat(s) SANS numéro de téléphone "
-            f"(ni Téléphone ni Mobile trouvés) -- envoyés quand même, à vérifier"
-        )
+    summary["n_sans_telephone"] = len(sans_telephone)
     file_base = sanitize_filename(filename, default="mandats_prelevement")
     return {
         "counts": {
@@ -2304,7 +2294,7 @@ async def post_prelevement_generate(
             "exclus": len(result.exclus),
             "sans_telephone": len(sans_telephone),
         },
-        "steps": steps,
+        "summary": summary,
         "mandats": df_mandat.to_dict(orient="records") if not df_mandat.empty else [],
         "telephones_manquants": [
             {"reference_client": m.reference_client, "nom": m.nom, "motif": m.motif}

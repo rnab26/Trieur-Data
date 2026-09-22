@@ -400,22 +400,65 @@ export function PrelevementScreen() {
                   <p className="text-sm font-medium text-[var(--foreground)]">
                     Résumé du traitement
                   </p>
-                  {result.steps.length > 0 ? (
-                    <ol className="list-decimal pl-5 text-sm text-[var(--foreground)]">
-                      {result.steps.map((step, i) => (
-                        <li key={i}>{step}</li>
-                      ))}
-                    </ol>
-                  ) : (
-                    <p className="text-sm text-[var(--foreground)]">
-                      ✅ {result.ooffCount} mandat(s) First, {result.rcurCount} mandat(s) RCUR,{' '}
-                      {result.exclusCount} ligne(s) exclue(s).
-                    </p>
+                  <table className="w-fit text-sm">
+                    <tbody>
+                      <tr>
+                        <td className="pr-4 py-0.5 text-[var(--muted)]">Fichier(s) lu(s)</td>
+                        <td className="py-0.5 font-medium text-[var(--foreground)]">
+                          {result.summary.nFichiers}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="pr-4 py-0.5 text-[var(--muted)]">Lignes client au total</td>
+                        <td className="py-0.5 font-medium text-[var(--foreground)]">
+                          {result.summary.nLignes}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="pr-4 py-0.5 text-[var(--muted)]">Lignes exclues</td>
+                        <td className="py-0.5 font-medium text-[var(--foreground)]">
+                          {result.summary.nExclus}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="pr-4 py-0.5 text-[var(--muted)]">Mandats First (1er prélèvement)</td>
+                        <td className="py-0.5 font-medium text-[var(--foreground)]">{result.summary.nFirst}</td>
+                      </tr>
+                      <tr>
+                        <td className="pr-4 py-0.5 text-[var(--muted)]">Mandats RCUR (récurrent)</td>
+                        <td className="py-0.5 font-medium text-[var(--foreground)]">{result.summary.nRcur}</td>
+                      </tr>
+                      {result.summary.nFusions > 0 && (
+                        <tr>
+                          <td className="pr-4 py-0.5 text-[var(--muted)]">Fusionnés MYJURIS+IMMO</td>
+                          <td className="py-0.5 font-medium text-[var(--foreground)]">
+                            {result.summary.nFusions}
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+
+                  {result.summary.exclusions.length > 0 && (
+                    <div>
+                      <p className="mb-1 text-sm font-medium text-[var(--foreground)]">
+                        Raisons d'exclusion
+                      </p>
+                      <table className="w-full text-sm">
+                        <tbody>
+                          {result.summary.exclusions.map((e, i) => (
+                            <tr key={i} className="border-t border-[var(--border)] first:border-t-0">
+                              <td className="py-1 pr-2 text-[var(--foreground)]">{e.raison}</td>
+                              <td className="py-1 text-right font-medium text-[var(--muted)]">{e.n}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      <p className="mt-1 text-xs text-[var(--muted)]">
+                        Voir aussi l'onglet "Exclus" du fichier téléchargé, client par client.
+                      </p>
+                    </div>
                   )}
-                  <p className="text-xs text-[var(--muted)]">
-                    Voir l'onglet "Exclus" du fichier téléchargé pour la raison précise de chaque
-                    ligne exclue.
-                  </p>
 
                   {result.telephonesManquants.length > 0 && (
                     <div className="rounded-md border border-[var(--danger)] bg-[var(--danger)]/10 p-3">

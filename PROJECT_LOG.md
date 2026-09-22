@@ -4021,12 +4021,52 @@ par produit) : 480 passent. PR mergée, CI verte. Requêtes
 `9ddade7f`/`1e1db64d` marquées `valide` dans
 `prelevement_rule_requests`.
 
-**Toujours bloqué par le backend Render sur la mauvaise branche**
-(voir juste au-dessus) : ce code est mergé sur `main` et donc prêt,
-mais ni ce changement ni aucun testé réellement en production tant
-que `trieur-data-api-test` ne déploie pas `main`. Il reste 6 questions
-ouvertes (exclusions x2, date d'effet Optilife, OPTILIFE/OPTIVIE,
-décalage remise x2, ordre des colonnes, motif -- conflit avec la
-correction du 21/09 sur -AU/-IM) -- surveillance légère en place
-(vérification toutes les 60s côté session Claude, pas de rechargement
-d'agent complet) pour coder dès que le père de Raphaël répond.
+Le backend réel de production (`trieur-data`, voir correction plus bas)
+est bien à jour sur `main` -- ce changement est donc réellement
+déployé, pas seulement mergé. Il reste 6 questions ouvertes
+(exclusions x2, date d'effet Optilife, OPTILIFE/OPTIVIE, décalage
+remise x2, ordre des colonnes, motif -- conflit avec la correction du
+21/09 sur -AU/-IM) -- surveillance légère en place (vérification
+toutes les 60s côté session Claude, pas de rechargement d'agent
+complet) pour coder dès que le père de Raphaël répond.
+
+### PR #70 + #71 : questions de règle invisibles, deux causes réelles (2026-09-22)
+
+Raphaël a fait suivre une capture d'écran de son père : dans
+"Historique des demandes", aucune question ni bouton de réponse
+visible nulle part, juste le titre/texte/statut de chaque demande.
+Deux bugs réels, corrigés l'un après l'autre :
+
+1. **PR #70** -- les questions à choix cliquables ne s'affichaient QUE
+   sous une règle du panneau "Règles appliquées" dont le titre
+   correspond EXACTEMENT (chaîne identique) au titre de la demande.
+   Or la plupart des demandes du père de Raphaël ont un titre libre
+   ("date d'effet", "OPTILIFE OPTIVIE", "décalage remise", "ordre des
+   colonnes du fichiers de mandats", "motif") qui ne matche aucune
+   règle expliquée par `explain_rules()` -- leurs questions n'étaient
+   donc affichées NULLE PART. Correctif : chaque demande de la liste
+   "Historique des demandes" affiche directement ses questions en
+   attente (toutes, pas seulement la première), bandeau rouge "🔴 Ta
+   réponse est nécessaire" qui prime sur le statut, bandeau global de
+   comptage, liste dépliée automatiquement s'il y a une question en
+   attente. Statuts clarifiés : ⏳ Pas encore examinée / 🔧 En cours de
+   codage / ✅ Codée et validée (l'ancien "🔵 En cours" prêtait à
+   confusion avec "réponse attendue"). `RuleQuestionBlock` dédupliqué
+   (deux copies divergentes avant, une seule maintenant).
+
+2. **PR #71** -- même après le correctif #70 déployé (vérifié dans le
+   vrai bundle JS servi), le père de Raphaël ne voyait toujours rien :
+   son navigateur avait probablement gardé en cache une page chargée
+   AVANT le déploiement, référençant un nom de fichier JS (chunk par
+   écran, hashé à chaque build) qui n'existe plus après coup -- le
+   `import()` dynamique de React.lazy échoue alors silencieusement,
+   React démonte l'écran sans erreur visible. Ce bug précis avait déjà
+   été diagnostiqué et corrigé une fois (18 sept., commit 7cc0d3c) mais
+   seulement sur une branche jamais mergée dans `main` -- porté ici :
+   error boundary autour du `Suspense`, rechargement automatique une
+   fois (récupère alors le bon `index.html`), message + bouton si ça
+   persiste. **Leçon retenue** : quand un correctif frontend vérifié
+   "déployé" (bundle inspecté) ne résout toujours pas un signalement
+   utilisateur, penser au cache navigateur avant de chercher plus loin
+   côté code -- et vérifier si un filet contre ce cas existe déjà
+   ailleurs dans l'historique du repo avant d'en écrire un nouveau.

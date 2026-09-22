@@ -109,6 +109,50 @@ export function DatabaseScreen() {
     return cols
   }, [rows])
 
+  // Tri par colonne, façon Google Sheets (clic sur l'en-tête) -- demandé
+  // par Raphaël (2026-09-22). Appliqué côté client, sur le lot déjà
+  // chargé : même portée que la recherche/les filtres par colonne
+  // ci-dessus (déjà limités au lot affiché, pas à tout l'historique --
+  // pas une nouvelle limite introduite ici).
+  const [sortCol, setSortCol] = useState<string | null>(null)
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
+
+  // Colonne triée disparue du lot (nouvel environnement, colonnes
+  // différentes) -- même sanitation que effectiveVisibleCols ci-dessus.
+  useEffect(() => {
+    setSortCol((prev) => (prev !== null && !columns.includes(prev) ? null : prev))
+  }, [columns])
+
+  function toggleSort(col: string) {
+    if (sortCol !== col) {
+      setSortCol(col)
+      setSortDir('asc')
+    } else if (sortDir === 'asc') {
+      setSortDir('desc')
+    } else {
+      // 3e clic sur la même colonne : retire le tri.
+      setSortCol(null)
+    }
+  }
+
+  const displayedRows = useMemo(() => {
+    if (!sortCol) return rows
+    const dir = sortDir === 'asc' ? 1 : -1
+    return [...rows].sort((a, b) => {
+      const av = a[sortCol]
+      const bv = b[sortCol]
+      if (av == null && bv == null) return 0
+      if (av == null) return 1 // valeurs vides toujours en fin, quel que soit le sens du tri
+      if (bv == null) return -1
+      const an = Number(av)
+      const bn = Number(bv)
+      if (!Number.isNaN(an) && !Number.isNaN(bn) && av !== '' && bv !== '') {
+        return (an - bn) * dir
+      }
+      return String(av).localeCompare(String(bv), 'fr', { sensitivity: 'base' }) * dir
+    })
+  }, [rows, sortCol, sortDir])
+
   // Colonnes affichées : toutes par défaut, personnalisable (voir plus
   // bas), rappelable via une vue enregistrée -- même principe que
   // views/tab_database.py:_render_client_list (multiselect "Colonnes
@@ -452,14 +496,22 @@ export function DatabaseScreen() {
                     </th>
                     {effectiveVisibleCols.map((col) => (
                       <th key={col} className="whitespace-nowrap px-3 py-2 font-medium">
-                        {col}
+                        <button
+                          type="button"
+                          onClick={() => toggleSort(col)}
+                          className="flex items-center gap-1 hover:text-[var(--primary)]"
+                          title="Trier par cette colonne"
+                        >
+                          {col}
+                          {sortCol === col && <span>{sortDir === 'asc' ? '▲' : '▼'}</span>}
+                        </button>
                       </th>
                     ))}
                     <th className="px-3 py-2" />
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((row) => (
+                  {displayedRows.map((row) => (
                     <tr key={String(row._id)} className="border-t border-[var(--border)]">
                       <td className="px-3 py-2">
                         <label className="flex h-9 w-9 cursor-pointer items-center justify-center">

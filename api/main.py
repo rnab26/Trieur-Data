@@ -87,6 +87,7 @@ from trieur.db import (
     delete_prelevement_colonnes_mandat_preset,
     list_prelevement_colonnes_mandat_presets,
     save_prelevement_colonnes_mandat_preset,
+    update_prelevement_colonnes_mandat_preset,
     answer_prelevement_rule_request_question,
     create_prelevement_rule_request,
     delete_prelevement_mandat,
@@ -2251,6 +2252,14 @@ def get_prelevement_rules_endpoint(org_id: str, ctx: AuthCtx = Depends(require_c
 class ColonneMandat(BaseModel):
     cle: str
     visible: bool = True
+    # Lie une colonne PERSONNALISÉE (jamais une canonique, déjà décrite
+    # par MANDAT_COLONNES_NOTES) à une demande de règle -- "attribuer une
+    # règle disponible" ou "créer une nouvelle règle" (Raphaël,
+    # 2026-09-22, "Modèles tableau"). Simple référence, jamais vérifiée
+    # contre prelevement_rule_requests (colonnes_mandat reste un jsonb
+    # libre) : une demande supprimée laisse juste un lien orphelin,
+    # sans casser l'enregistrement des colonnes.
+    rule_request_id: Optional[str] = None
 
 
 class PrelevementRulesUpdate(BaseModel):
@@ -2302,7 +2311,10 @@ def post_prelevement_rules(
                 status_code=400,
                 detail=f"Colonnes manquantes : {', '.join(sorted(manquantes))}.",
             )
-        colonnes_mandat_dicts = [{"cle": c.cle.strip(), "visible": c.visible} for c in body.colonnes_mandat]
+        colonnes_mandat_dicts = [
+            {"cle": c.cle.strip(), "visible": c.visible, "rule_request_id": c.rule_request_id}
+            for c in body.colonnes_mandat
+        ]
     saved = save_prelevement_rules(
         ctx.client, org_id, body.ics, body.nature, body.delay_days, body.frais_setup_eur,
         body.frais_par_produit, body.periodicites, ctx.user.id, colonnes_mandat_dicts,
@@ -2349,10 +2361,49 @@ def post_prelevement_colonnes_mandat_preset(
         raise HTTPException(status_code=400, detail="Nom du jeu de colonnes vide.")
     if not body.colonnes:
         raise HTTPException(status_code=400, detail="Aucune colonne à enregistrer.")
-    colonnes = [{"cle": c.cle.strip(), "visible": c.visible} for c in body.colonnes]
+    colonnes = [
+        {"cle": c.cle.strip(), "visible": c.visible, "rule_request_id": c.rule_request_id}
+        for c in body.colonnes
+    ]
     if any(not c["cle"] for c in colonnes):
         raise HTTPException(status_code=400, detail="Nom de colonne vide.")
     return save_prelevement_colonnes_mandat_preset(ctx.client, org_id, name, colonnes, ctx.user.id)
+
+
+class PrelevementColonnesMandatPresetUpdate(BaseModel):
+    name: Optional[str] = None
+    colonnes: Optional[list[ColonneMandat]] = None
+
+
+@app.patch("/orgs/{org_id}/prelevement/colonnes-mandat-presets/{preset_id}")
+def patch_prelevement_colonnes_mandat_preset(
+    org_id: str, preset_id: str, body: PrelevementColonnesMandatPresetUpdate,
+    ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    """"✏️ Modifier" (juste renommer) ou "💾 Enregistrer" du panneau
+    "Modèles tableau" (juste les colonnes) -- Raphaël, 2026-09-22."""
+    data: dict = {}
+    if body.name is not None:
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Nom du jeu de colonnes vide.")
+        data["name"] = name
+    if body.colonnes is not None:
+        if not body.colonnes:
+            raise HTTPException(status_code=400, detail="Aucune colonne à enregistrer.")
+        colonnes = [
+            {"cle": c.cle.strip(), "visible": c.visible, "rule_request_id": c.rule_request_id}
+            for c in body.colonnes
+        ]
+        if any(not c["cle"] for c in colonnes):
+            raise HTTPException(status_code=400, detail="Nom de colonne vide.")
+        data["colonnes"] = colonnes
+    if not data:
+        raise HTTPException(status_code=400, detail="Rien à modifier.")
+    updated = update_prelevement_colonnes_mandat_preset(ctx.client, preset_id, org_id, data)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Jeu de colonnes introuvable (déjà supprimé ?).")
+    return updated
 
 
 @app.delete("/orgs/{org_id}/prelevement/colonnes-mandat-presets/{preset_id}")

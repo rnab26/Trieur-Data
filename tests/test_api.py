@@ -1741,12 +1741,12 @@ def test_prelevement_rules_roundtrip_colonnes_mandat(client_factory):
         headers=headers,
     )
     assert res.status_code == 200
-    assert res.json()["colonnes_mandat"][0] == {"cle": "RUM", "visible": True}
+    assert res.json()["colonnes_mandat"][0] == {"cle": "RUM", "visible": True, "rule_request_id": None}
     prenom_entry = next(c for c in res.json()["colonnes_mandat"] if c["cle"] == "Prenom")
     assert prenom_entry["visible"] is False
 
     res = tc.get("/orgs/org-1/prelevement/rules", headers=headers)
-    assert res.json()["colonnes_mandat"][0] == {"cle": "RUM", "visible": True}
+    assert res.json()["colonnes_mandat"][0] == {"cle": "RUM", "visible": True, "rule_request_id": None}
 
 
 def test_prelevement_rules_rejects_incomplete_colonnes_mandat(client_factory):
@@ -1836,7 +1836,10 @@ def test_prelevement_colonnes_mandat_preset_create_list_and_delete(client_factor
     assert res.status_code == 200
     preset = res.json()
     assert preset["name"] == "Export banque"
-    assert preset["colonnes"] == colonnes
+    assert preset["colonnes"] == [
+        {"cle": "RUM", "visible": True, "rule_request_id": None},
+        {"cle": "Nom", "visible": False, "rule_request_id": None},
+    ]
     assert preset["org_id"] == "org-1"
 
     res = tc.get("/orgs/org-1/prelevement/colonnes-mandat-presets", headers=headers)
@@ -1869,7 +1872,7 @@ def test_prelevement_colonnes_mandat_preset_save_same_name_replaces(client_facto
     res = tc.get("/orgs/org-1/prelevement/colonnes-mandat-presets", headers=headers)
     presets = res.json()
     assert len(presets) == 1
-    assert presets[0]["colonnes"] == [{"cle": "Nom", "visible": False}]
+    assert presets[0]["colonnes"] == [{"cle": "Nom", "visible": False, "rule_request_id": None}]
 
 
 def test_prelevement_colonnes_mandat_preset_rejects_empty(client_factory):
@@ -1899,6 +1902,77 @@ def test_prelevement_colonnes_mandat_preset_forbidden_for_non_admin(client_facto
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 403
+
+
+def test_prelevement_colonnes_mandat_preset_patch_renames(client_factory):
+    """"✏️ Modifier" (Modèles tableau, Raphaël 2026-09-22) : renommer un
+    jeu existant, sans toucher ses colonnes."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    preset = tc.post(
+        "/orgs/org-1/prelevement/colonnes-mandat-presets",
+        json={"name": "Brouillon", "colonnes": [{"cle": "RUM", "visible": True}]},
+        headers=headers,
+    ).json()
+    res = tc.patch(
+        f"/orgs/org-1/prelevement/colonnes-mandat-presets/{preset['id']}",
+        json={"name": "Export banque"},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    updated = res.json()
+    assert updated["name"] == "Export banque"
+    assert updated["colonnes"] == [{"cle": "RUM", "visible": True, "rule_request_id": None}]
+
+
+def test_prelevement_colonnes_mandat_preset_patch_updates_colonnes(client_factory):
+    """"💾 Enregistrer" du panneau "Modèles tableau" : met à jour les
+    colonnes du jeu sélectionné, nom inchangé."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    preset = tc.post(
+        "/orgs/org-1/prelevement/colonnes-mandat-presets",
+        json={"name": "Export banque", "colonnes": [{"cle": "RUM", "visible": True}]},
+        headers=headers,
+    ).json()
+    res = tc.patch(
+        f"/orgs/org-1/prelevement/colonnes-mandat-presets/{preset['id']}",
+        json={"colonnes": [{"cle": "Nom", "visible": False}]},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    updated = res.json()
+    assert updated["name"] == "Export banque"
+    assert updated["colonnes"] == [{"cle": "Nom", "visible": False, "rule_request_id": None}]
+
+
+def test_prelevement_colonnes_mandat_preset_patch_not_found(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.patch(
+        "/orgs/org-1/prelevement/colonnes-mandat-presets/does-not-exist",
+        json={"name": "X"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 404
+
+
+def test_prelevement_colonnes_mandat_column_carries_rule_request_id(client_factory):
+    """Attribution d'une règle à une colonne personnalisée (Modèles
+    tableau, Raphaël 2026-09-22) -- simple référence, transportée telle
+    quelle par colonnes_mandat et les jeux de colonnes."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    with_custom = [{"cle": c, "visible": True} for c in MANDAT_COLONNES_CANONIQUES] + [
+        {"cle": "Code société", "visible": True, "rule_request_id": "req-123"}
+    ]
+    res = tc.post("/orgs/org-1/prelevement/rules", json={"colonnes_mandat": with_custom}, headers=headers)
+    assert res.status_code == 200
+    custom = next(c for c in res.json()["colonnes_mandat"] if c["cle"] == "Code société")
+    assert custom["rule_request_id"] == "req-123"
 
 
 def test_prelevement_generate_respects_colonnes_mandat_order_and_visibility(client_factory):

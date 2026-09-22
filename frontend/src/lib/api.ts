@@ -949,7 +949,15 @@ export type PrelevementRuleExplanation = { titre: string; detail: string }
 // COLONNES + MODIFICATIONS" : "que ca reste figé... sans passer par
 // claude"), jamais éditée en dur par une session Claude après ce
 // chantier.
-export type ColonneMandat = { cle: string; visible: boolean }
+export type ColonneMandat = {
+  cle: string
+  visible: boolean
+  // Lie une colonne PERSONNALISÉE à une demande de règle (Raphaël,
+  // 2026-09-22, "Modèles tableau" : "attribuer en connectant les
+  // règles disponibles sur les colonnes"). Toujours null pour une
+  // colonne canonique (déjà décrite par colonnes_mandat_notes).
+  rule_request_id?: string | null
+}
 
 export type PrelevementRules = {
   org_id: string
@@ -1039,6 +1047,20 @@ export function savePrelevementColonnesMandatPreset(orgId: string, name: string,
   return request<ColonnesMandatPreset>(`/orgs/${orgId}/prelevement/colonnes-mandat-presets`, {
     method: 'POST',
     body: JSON.stringify({ name, colonnes }),
+  })
+}
+
+// "✏️ Modifier" (renommer) ou "💾 Enregistrer" du panneau "Modèles
+// tableau" (mettre à jour les colonnes du modèle sélectionné) --
+// fusion partielle, comme updatePrelevementRuleRequest.
+export function patchPrelevementColonnesMandatPreset(
+  orgId: string,
+  presetId: string,
+  patch: Partial<{ name: string; colonnes: ColonneMandat[] }>,
+) {
+  return request<ColonnesMandatPreset>(`/orgs/${orgId}/prelevement/colonnes-mandat-presets/${presetId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
   })
 }
 

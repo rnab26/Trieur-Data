@@ -1340,3 +1340,64 @@ def update_prelevement_mandat(client: Client, mandat_id: str, org_id: str, data:
 
 def delete_prelevement_mandat(client: Client, mandat_id: str, org_id: str) -> None:
     _td(client, "prelevement_mandats").delete().eq("id", mandat_id).eq("org_id", org_id).execute()
+
+
+# ---------------------------------------------------------------
+# Demandes de modification des règles codées en dur du moteur de
+# prélèvement (migration 0025, Raphaël 2026-09-22) : une file d'attente
+# structurée, jamais appliquée automatiquement -- une session Claude
+# Code la lit sur demande explicite, code/teste/déploie le changement,
+# puis met à jour le statut ici même.
+# ---------------------------------------------------------------
+
+def list_prelevement_rule_requests(client: Client, org_id: str) -> list[dict]:
+    res = (
+        _td(client, "prelevement_rule_requests")
+        .select("*")
+        .eq("org_id", org_id)
+        .order("created_at", desc=False)
+        .execute()
+    )
+    return res.data or []
+
+
+def create_prelevement_rule_request(
+    client: Client, org_id: str, titre: str, demande: str, user_id: str,
+) -> dict:
+    res = (
+        _td(client, "prelevement_rule_requests")
+        .insert({
+            "org_id": org_id,
+            "titre": titre,
+            "demande": demande,
+            "statut": "en_attente",
+            "created_by": user_id,
+            "updated_by": user_id,
+        })
+        .execute()
+    )
+    return res.data[0]
+
+
+def update_prelevement_rule_request(
+    client: Client, request_id: str, org_id: str, data: dict, user_id: str,
+) -> dict | None:
+    """`data` : sous-ensemble de {titre, demande, statut} -- fusion
+    partielle, jamais un remplacement de ligne complète (contrairement
+    aux réglages Prélèvement) : Raphaël peut éditer le texte d'une
+    demande pendant qu'une session Claude Code n'a touché que le statut,
+    sans que l'un écrase le travail de l'autre."""
+    from datetime import datetime, timezone
+
+    res = (
+        _td(client, "prelevement_rule_requests")
+        .update({**data, "updated_by": user_id, "updated_at": datetime.now(timezone.utc).isoformat()})
+        .eq("id", request_id)
+        .eq("org_id", org_id)
+        .execute()
+    )
+    return res.data[0] if res.data else None
+
+
+def delete_prelevement_rule_request(client: Client, request_id: str, org_id: str) -> None:
+    _td(client, "prelevement_rule_requests").delete().eq("id", request_id).eq("org_id", org_id).execute()

@@ -201,7 +201,7 @@ function ValidationBlock({
       {!correcting ? (
         <div className="mt-2 flex flex-wrap gap-2">
           <Button type="button" disabled={submitting} onClick={() => void handleValider()}>
-            {submitting ? 'Enregistrement…' : '✅ Ça fonctionne, je valide'}
+            {submitting ? 'Enregistrement…' : '✅ Ça fonctionne, je certifie'}
           </Button>
           <Button type="button" variant="secondary" disabled={submitting} onClick={() => setCorrecting(true)}>
             ✏️ Ça ne marche pas, corriger
@@ -244,7 +244,7 @@ const STATUT_LABEL: Record<RuleRequestStatut, string> = {
   en_attente: '⏳ Pas encore examinée',
   en_cours: '🔧 En cours de codage -- rien à faire de ton côté',
   a_verifier: '🧪 Codée et déployée -- à toi de vérifier',
-  valide: '✅ Validée par toi',
+  valide: '✅ Certifiée -- ne sera plus retouchée',
 }
 
 const STATUT_COLOR: Record<RuleRequestStatut, string> = {

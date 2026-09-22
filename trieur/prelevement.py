@@ -56,22 +56,21 @@ COL_ADRESSE = "Adresse"
 COL_VILLE = "Ville"
 COL_CODE_POSTAL = "Code postal"
 COL_EMAIL = "Email"
-# "Statut agent IA" -- champ jusque-là inexploité, découvert le
-# 2026-09-22 en revérifiant les 3 fichiers maîtres du père de Raphaël à
-# sa demande (le bug ci-dessous avait fait fuir TOUS les mandats en
-# FRST, jamais un seul RCUR). Porte deux signaux distincts, confirmés
-# avec Raphaël avant de coder :
-# 1. "Notifié le {jour}" = notification préalable obligatoire (règle
-#    SEPA) avant un prélèvement RÉCURRENT -- vérifié sur le fichier de
-#    référence (291 lignes) : le jour de notification correspond au
-#    jour de prélèvement récurrent du client dans 95,3% des cas
-#    (204/214). Bien plus fiable que l'ancienne règle ("Total frais de
-#    dossier" > 0 pour FRST), qui ne concordait qu'à 63% (557/878) avec
-#    le vrai historique des remises bancaires du Drive.
-# 2. "Refusé par le client" / "Nrp J-1 - Annuler contrat" -- le client a
-#    refusé ou son contrat doit être annulé : jamais envoyé en banque,
-#    même règle qu'un IBAN invalide.
-COL_STATUT_IA = "Statut agent IA"
+# "Statut agent IA" -- utilisé un temps pour deux règles, TOUTES DEUX
+# retirées depuis (colonne entièrement inexploitée maintenant, gardée
+# en commentaire pour la trace) :
+# 1. Distinguait FRST/RCUR ("Notifié le {jour}" -> RCUR) -- retiré le
+#    2026-09-22 (PR #69, réponse du père de Raphaël à une question
+#    posée) : chaque mandat génère désormais systématiquement les deux
+#    lignes, peu importe ce champ.
+# 2. Excluait un client "Refusé par le client"/"Nrp J-1 - Annuler
+#    contrat" -- retiré le 2026-09-22 (PR à venir, réponse du père de
+#    Raphaël à une question posée AVEC le risque explicitement signalé
+#    : "ça veut dire qu'un client qui a explicitement refusé... pourrait
+#    être envoyé en banque". Réponse reçue : "Oui, retirer les deux
+#    critères"). Décision confirmée en connaissance du risque, pas une
+#    supposition -- si ce comportement doit être révisé, ça ne peut
+#    venir que d'une nouvelle demande explicite du père de Raphaël.
 COL_TELEPHONE = "Téléphone"
 # "Mobile" -- repli si "Téléphone" (fixe) est vide. Vérifié sur le
 # fichier CRM de référence (2026-09-22, signalé par Raphaël) : "Mobile"
@@ -407,12 +406,6 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
             exclure("RUM manquant")
             continue
 
-        statut_ia = str(_get(row, COL_STATUT_IA, keyed) or "").strip()
-        statut_ia_lower = statut_ia.lower()
-        if "refus" in statut_ia_lower or "annuler" in statut_ia_lower:
-            exclure(f"Statut agent IA \"{statut_ia}\" -- client refusé ou contrat à annuler")
-            continue
-
         date_premiere = compute_first_prelevement_date(
             _get(row, COL_DATE_PREMIER, keyed), today, rules.delay_days,
         )
@@ -480,17 +473,33 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
         # FRST puis RCUR -- changé le 2026-09-22 sur demande du père de
         # Raphaël (question posée, risque de double prélèvement signalé
         # explicitement : confirmé "toujours FRST+RCUR pour tout le
-        # monde, la règle de notification [Statut agent IA] ne
-        # s'applique plus"). "Statut agent IA" continue seulement à
-        # servir à l'EXCLUSION (Refusé/Annuler) ci-dessus, plus à choisir
-        # FRST ou RCUR. La ligne RCUR reprend la date du 1er prélèvement
-        # décalée de la périodicité du contrat (repli 1 mois si la
-        # périodicité n'est pas reconnue).
+        # monde"). "Statut agent IA" ne sert plus à rien dans ce moteur
+        # (voir le commentaire au-dessus de COL_EMAIL, colonne retirée
+        # du traitement). La ligne RCUR reprend
+        # la date du 1er prélèvement décalée de la périodicité du
+        # contrat (repli 1 mois si la périodicité n'est pas reconnue).
         for suffix, cols in mandats_bundles:
             montant_produits = sum(amounts[c] for c in cols)
             frais = sum(rules.frais_par_produit.get(c, rules.frais_setup_eur) for c in cols)
             explication = _explication_periodicite(_get(row, COL_PERIODICITE, keyed), rules.periodicites)
-            date_rcur = _add_months(date_premiere, _mois_periodicite(_get(row, COL_PERIODICITE, keyed)))
+
+            # Date d'effet -- UNIQUEMENT pour le mandat Optilife (jamais
+            # les autres produits) -- demande du père de Raphaël,
+            # 2026-09-22, deux questions posées et confirmées :
+            # - date d'effet renseignée ET future (> aujourd'hui) ->
+            #   date de 1er prélèvement = date d'effet + 1 mois.
+            # - sinon (pas de date d'effet, OU déjà passée) -> date de
+            #   1er prélèvement = date de 1er prélèvement (calculée
+            #   ci-dessus) + 1 mois.
+            if cols == [COL_OPTILIFE]:
+                if date_effet_raw is not None and date_effet_raw > today:
+                    date_premiere_ligne = _add_months(date_effet_raw, 1)
+                else:
+                    date_premiere_ligne = _add_months(date_premiere, 1)
+            else:
+                date_premiere_ligne = date_premiere
+
+            date_rcur = _add_months(date_premiere_ligne, _mois_periodicite(_get(row, COL_PERIODICITE, keyed)))
 
             mandat_frst = MandatRow(
                 reference_client=ref_client,
@@ -511,7 +520,7 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
                 montant_eur=round(montant_produits + frais, 2),
                 devise="EUR",
                 date_signature_mandat=date_signature.strftime("%d/%m/%Y"),
-                date_premiere_echeance=date_premiere.strftime("%d/%m/%Y"),
+                date_premiere_echeance=date_premiere_ligne.strftime("%d/%m/%Y"),
                 date_effet=date_effet,
                 periodicite=str(_get(row, COL_PERIODICITE, keyed) or ""),
                 explication_periodicite="",
@@ -606,9 +615,11 @@ def explain_rules(rules: PrelevementRules) -> list[dict[str, str]]:
             "titre": "Exclusions (jamais envoyé en banque)",
             "detail": (
                 "Mode de paiement autre que \"Prélèvement\" -- IBAN manquant ou "
-                "invalide (contrôle mod-97) -- RUM manquant -- \"Statut agent IA\" "
-                "contenant \"Refusé\" ou \"Annuler\" -- pas de date de premier "
-                "prélèvement renseignée -- aucun produit actif (tous les montants à 0)."
+                "invalide (contrôle mod-97) -- RUM manquant -- pas de date de "
+                "premier prélèvement renseignée -- aucun produit actif (tous les "
+                "montants à 0). \"Statut agent IA\" contenant \"Refusé\" ou "
+                "\"Annuler\" retiré des exclusions le 2026-09-22 (demande du père "
+                "de Raphaël, risque signalé et confirmé explicitement)."
             ),
         },
         {
@@ -630,8 +641,7 @@ def explain_rules(rules: PrelevementRules) -> list[dict[str, str]]:
                 "Chaque mandat génère systématiquement DEUX lignes : FRST à "
                 "la date du 1er prélèvement (avec frais), puis RCUR à cette "
                 "même date décalée de la périodicité du contrat (sans frais). "
-                "\"Statut agent IA\" ne sert plus qu'à l'exclusion "
-                "(Refusé/Annuler), plus à choisir entre FRST et RCUR."
+                "\"Statut agent IA\" ne sert plus à rien dans ce moteur."
             ),
         },
         {
@@ -666,6 +676,15 @@ def explain_rules(rules: PrelevementRules) -> list[dict[str, str]]:
                 f"Jamais avant aujourd'hui + {rules.delay_days} jour(s) (réglable) : "
                 f"si la date prévue dans le fichier est déjà passée ou trop proche, "
                 f"repoussée à ce délai minimum."
+            ),
+        },
+        {
+            "titre": "date d'effet",
+            "detail": (
+                "Uniquement pour le mandat Optilife (les autres produits gardent "
+                "la date du 1er prélèvement normale) : date d'effet renseignée et "
+                "future (> aujourd'hui) -> date d'effet + 1 mois. Sinon (pas de "
+                "date d'effet, ou déjà passée) -> date du 1er prélèvement + 1 mois."
             ),
         },
     ]

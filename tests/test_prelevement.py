@@ -185,7 +185,9 @@ def test_generate_mandats_ooff_when_frais_present():
     assert mandat.iban == VALID_IBAN
     assert mandat.bic == "CMBRFR2BXXX"
     assert mandat.motif == "MGS-RUM000001-O"
-    assert mandat.date_premiere_echeance == "24/09/2026"
+    # Optilife : pas de date d'effet dans cette ligne -> date du 1er
+    # prélèvement + 1 mois (règle spécifique Optilife, voir plus bas).
+    assert mandat.date_premiere_echeance == "24/10/2026"
     # Date de signature = date de création du contrat, PAS la date de
     # génération du fichier ("today" ci-dessus) -- vérifié contre un
     # vrai client du fichier de référence (2026-09-21).
@@ -224,8 +226,14 @@ def test_generate_mandats_always_pairs_frst_with_rcur():
 def test_generate_mandats_rcur_date_shifted_by_periodicite():
     """La date de la ligne RCUR = date du 1er prélèvement décalée de la
     périodicité du contrat (demande du père de Raphaël, 2026-09-22) --
-    pas la même date que FRST."""
-    row = _base_row(**{"Périodicité (Mensuel/trimestre/annuel)             ": "Trimestrielle"})
+    pas la même date que FRST. Produit hors Optilife (Carte MGS) pour
+    ne pas mélanger avec la règle "date d'effet", spécifique à
+    Optilife (voir plus bas)."""
+    row = _base_row(**{
+        "Optilife": 0,
+        "Carte MGS": 99.0,
+        "Périodicité (Mensuel/trimestre/annuel)             ": "Trimestrielle",
+    })
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
     assert result.ooff[0].date_premiere_echeance == "24/09/2026"
     assert result.rcur[0].date_premiere_echeance == "24/12/2026"  # +3 mois
@@ -236,7 +244,11 @@ def test_generate_mandats_rcur_date_defaults_to_one_month_for_unknown_periodicit
     """Une périodicité non reconnue (colonne vide/texte inattendu) ne
     doit jamais faire échouer la génération -- repli à 1 mois, jamais
     une exception bloquante pour une seule ligne mal renseignée."""
-    row = _base_row(**{"Périodicité (Mensuel/trimestre/annuel)             ": "???"})
+    row = _base_row(**{
+        "Optilife": 0,
+        "Carte MGS": 99.0,
+        "Périodicité (Mensuel/trimestre/annuel)             ": "???",
+    })
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
     assert result.rcur[0].date_premiere_echeance == "24/10/2026"  # +1 mois par défaut
 
@@ -453,23 +465,19 @@ def test_generate_mandats_excludes_missing_first_prelevement_date():
     assert "date" in result.exclus[0].raison.lower()
 
 
-def test_generate_mandats_excludes_client_refused():
-    """Bug réel corrigé le 2026-09-22 (Raphaël, en revérifiant les
-    fichiers maîtres) : un client "Refusé par le client" était généré
-    et envoyé en banque comme n'importe quel autre mandat -- jamais
-    remarqué faute d'exploiter "Statut agent IA"."""
-    row = _base_row(**{"Statut agent IA": "Refusé par le client"})
-    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
-    assert result.ooff == [] and result.rcur == []
-    assert len(result.exclus) == 1
-    assert "refus" in result.exclus[0].raison.lower()
-
-
-def test_generate_mandats_excludes_contract_to_cancel():
-    row = _base_row(**{"Statut agent IA": "Nrp J-1 - Annuler contrat"})
-    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
-    assert result.ooff == [] and result.rcur == []
-    assert len(result.exclus) == 1
+def test_generate_mandats_no_longer_excludes_refused_or_cancel_status():
+    """"Statut agent IA" contenant "Refusé"/"Annuler" excluait le
+    client jusqu'au 2026-09-22 -- retiré sur demande du père de
+    Raphaël (question posée AVEC le risque signalé explicitement : "un
+    client qui a explicitement refusé... pourrait être envoyé en
+    banque" -- réponse reçue : "Oui, retirer les deux critères").
+    "Statut agent IA" est maintenant un champ entièrement ignoré par le
+    moteur, quelle que soit sa valeur."""
+    for statut in ("Refusé par le client", "Nrp J-1 - Annuler contrat"):
+        row = _base_row(**{"Statut agent IA": statut})
+        result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+        assert len(result.exclus) == 0, f"statut={statut!r}"
+        assert len(result.ooff) == 1, f"statut={statut!r}"
 
 
 def test_generate_mandats_excludes_when_no_product_active():
@@ -502,6 +510,47 @@ def test_generate_mandats_reads_date_effet_column():
     row = _base_row(**{"Date d'effet du nouveau contrat (OPTILIFE)": "15/03/2026"})
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
     assert result.ooff[0].date_effet == "15/03/2026"
+
+
+def test_generate_mandats_optilife_date_premiere_uses_future_date_effet():
+    """Demande du père de Raphaël (2026-09-22, question posée et
+    confirmée) : pour le mandat Optilife uniquement, si la date d'effet
+    est renseignée ET future (> aujourd'hui), la date du 1er
+    prélèvement = date d'effet + 1 mois -- pas la date de premier
+    prélèvement du fichier."""
+    row = _base_row(**{"Date d'effet du nouveau contrat (OPTILIFE)": "15/12/2026"})
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    assert result.ooff[0].date_premiere_echeance == "15/01/2027"  # 15/12/2026 + 1 mois
+
+
+def test_generate_mandats_optilife_date_premiere_falls_back_when_date_effet_past():
+    """Réponse du père de Raphaël (2026-09-22) au cas manquant de la
+    règle initiale : date d'effet renseignée mais déjà passée -> traité
+    comme si elle n'existait pas, date du 1er prélèvement = date de 1er
+    prélèvement (calculée normalement) + 1 mois."""
+    row = _base_row(**{"Date d'effet du nouveau contrat (OPTILIFE)": "15/03/2026"})  # passée (today = 21/09/2026)
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    assert result.ooff[0].date_premiere_echeance == "24/10/2026"  # 24/09/2026 (date_premiere) + 1 mois
+
+
+def test_generate_mandats_optilife_date_premiere_falls_back_when_no_date_effet():
+    row = _base_row()  # pas de colonne "Date d'effet..." dans _base_row par défaut
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    assert result.ooff[0].date_premiere_echeance == "24/10/2026"  # 24/09/2026 (date_premiere) + 1 mois
+
+
+def test_generate_mandats_date_effet_rule_does_not_apply_outside_optilife():
+    """La règle ci-dessus est scopée au mandat Optilife UNIQUEMENT --
+    un autre produit actif garde la date de 1er prélèvement normale,
+    même avec une date d'effet future renseignée sur la ligne."""
+    row = _base_row(**{
+        "Optilife": 0,
+        "MYJURIS & MYHOSPI": 19.90,
+        "Total frais de dossier": 20.0,
+        "Date d'effet du nouveau contrat (OPTILIFE)": "15/12/2026",
+    })
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    assert result.ooff[0].date_premiere_echeance == "24/09/2026"  # inchangé, pas de +1 mois
 
 
 def test_generate_mandats_matches_real_reference_client():
@@ -544,7 +593,11 @@ def test_generate_mandats_matches_real_reference_client():
     assert mandat.montant_eur == 119.0  # 99 (Optilife) + 20 (frais)
     assert mandat.motif == "MGS-1422647-O"
     assert mandat.bic == "CMBRFR2BXXX"
-    assert mandat.date_premiere_echeance == "10/09/2026"
+    # 10/09/2026 (date de premier prélèvement d'origine, vérifiée contre
+    # le fichier réel avant l'ajout de la règle "date d'effet" du
+    # 2026-09-22) + 1 mois -- Optilife actif sans date d'effet
+    # renseignée applique désormais ce décalage (voir generate_mandats).
+    assert mandat.date_premiere_echeance == "10/10/2026"
     assert mandat.date_signature_mandat == "21/08/2026"
     assert mandat.explication_periodicite == ""
 

@@ -4,6 +4,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { useAuth } from '@/lib/AuthContext'
 import { useOrgs } from '@/lib/useAccount'
+import { PrelevementMandatsPanel } from './PrelevementMandatsPanel'
 import {
   ApiError,
   downloadPrelevementFile,
@@ -38,6 +39,8 @@ export function PrelevementScreen() {
   const { session, signOut } = useAuth()
   const { orgs, orgsError } = useOrgs()
   const orgId = orgs?.find((o) => o.name === PRELEVEMENT_ORG_NAME)?.id ?? null
+
+  const [tab, setTab] = useState<'generer' | 'mandats'>('generer')
 
   const [rules, setRules] = useState<PrelevementRules | null>(null)
   const [rulesError, setRulesError] = useState<string | null>(null)
@@ -164,9 +167,9 @@ export function PrelevementScreen() {
   }
 
   return (
-    <div className="mx-auto max-w-2xl p-4">
+    <div className={'mx-auto p-4 ' + (tab === 'mandats' ? 'max-w-6xl' : 'max-w-2xl')}>
       <header className="mb-4 flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-lg font-semibold">Prélèvement — Génération des mandats</h1>
+        <h1 className="text-lg font-semibold">Prélèvement</h1>
         <div className="flex items-center gap-2 text-sm text-[var(--muted)]">
           <span>{session?.user.email}</span>
           <Button variant="secondary" onClick={() => void signOut()}>
@@ -174,13 +177,6 @@ export function PrelevementScreen() {
           </Button>
         </div>
       </header>
-
-      <p className="mb-4 text-sm text-[var(--muted)]">
-        Dépose l'export CRM brut, télécharge un classeur prêt (4 onglets : Mandat avec tout, First et
-        RCUR en détail, Exclus avec la raison). Un mandat par produit actif du client, jamais un
-        montant groupé. Ne couvre pas encore l'historique/les doublons/les impayés/le relevé bancaire
-        — voir le chantier séparé dans le Cockpit.
-      </p>
 
       {orgsError && (
         <p className="mb-4 text-sm text-[var(--danger)]">
@@ -191,7 +187,7 @@ export function PrelevementScreen() {
       {orgs && orgs.length > 0 && (
         <p className="mb-4 flex items-center gap-2 text-sm text-[var(--muted)]">
           Environnement <span className="font-medium text-[var(--foreground)]">{PRELEVEMENT_ORG_NAME}</span>{' '}
-          (verrouillé -- les réglages ci-dessous sont propres à cet environnement)
+          (verrouillé -- les réglages/mandats ci-dessous sont propres à cet environnement)
         </p>
       )}
 
@@ -202,7 +198,40 @@ export function PrelevementScreen() {
       )}
 
       {orgId && (
+        <div className="mb-4 flex gap-2 border-b border-[var(--border)]">
+          {(
+            [
+              ['generer', 'Générer des mandats'],
+              ['mandats', 'Mandats enregistrés'],
+            ] as [typeof tab, string][]
+          ).map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setTab(key)}
+              className={
+                'px-3 py-2 text-sm font-medium ' +
+                (tab === key
+                  ? 'border-b-2 border-[var(--primary)] text-[var(--foreground)]'
+                  : 'text-[var(--muted)] hover:text-[var(--foreground)]')
+              }
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {orgId && tab === 'mandats' && <PrelevementMandatsPanel orgId={orgId} />}
+
+      {orgId && tab === 'generer' && (
         <>
+          <p className="mb-4 text-sm text-[var(--muted)]">
+            Dépose l'export CRM brut, télécharge un classeur prêt (4 onglets : Mandat avec tout, First et
+            RCUR en détail, Exclus avec la raison). Un mandat par produit actif du client, jamais un
+            montant groupé. Ne couvre pas encore l'historique/les doublons/les impayés/le relevé bancaire
+            — voir le chantier séparé dans le Cockpit.
+          </p>
+
           <Card className="mb-4">
             <CardContent className="flex flex-col gap-3">
               <h2 className="text-sm font-semibold">Réglages</h2>

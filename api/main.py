@@ -64,6 +64,7 @@ from trieur.db import (
     insert_pipeline_rows_only,
     is_pipeline_dedupe_lock_owner,
     list_all_records,
+    list_all_prelevement_mandats,
     list_chantier_messages,
     list_chantier_questions,
     list_chantier_todos,
@@ -73,11 +74,16 @@ from trieur.db import (
     list_org_tags,
     list_pipeline_rows,
     list_pipeline_rows_for_sheet,
+    list_prelevement_mandats,
     list_recent_import_batches,
     list_records,
     list_saved_views,
     list_sections,
     list_user_column_sets,
+    count_prelevement_mandats,
+    delete_prelevement_mandat,
+    get_prelevement_mandat,
+    MANDAT_DISPLAY_COLUMNS,
     remove_membership,
     remove_record_tag,
     resolve_dedup_alert,
@@ -93,6 +99,7 @@ from trieur.db import (
     update_chantier_status,
     update_membership_role,
     update_pipeline_row_data,
+    update_prelevement_mandat,
     update_record,
 )
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
@@ -2321,6 +2328,131 @@ def post_prelevement_mandats(
     if not body.mandats:
         raise HTTPException(status_code=400, detail="Aucun mandat à enregistrer.")
     return save_prelevement_mandats(ctx.client, org_id, body.mandats, ctx.user.id)
+
+
+@app.get("/orgs/{org_id}/prelevement/mandats")
+def list_prelevement_mandats_endpoint(
+    org_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(LIST_PAGE_SIZE, ge=1, le=2000),
+    search: str = Query(""),
+    col_filters: str = Query("{}", description="JSON : {colonne: {op, value}}"),
+    ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    """Liste paginée des mandats déjà enregistrés en base (vue de
+    consultation demandée par Raphaël, 2026-09-22) -- même limite connue
+    que list_org_records : recherche/filtres appliqués au lot chargé pour
+    cette page, pas à tout l'historique."""
+    parsed_filters = _parse_col_filters(col_filters)
+    total = count_prelevement_mandats(ctx.client, org_id)
+    rows = list_prelevement_mandats(ctx.client, org_id, limit=page_size, offset=(page - 1) * page_size)
+    rows = _filter_by_search(rows, search)
+    rows = _filter_by_columns(rows, parsed_filters)
+    return {
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "columns": MANDAT_DISPLAY_COLUMNS + ["Enregistré le"],
+        "rows": rows,
+    }
+
+
+class PrelevementMandatBulkDelete(BaseModel):
+    ids: list[str]
+
+
+@app.delete("/orgs/{org_id}/prelevement/mandats")
+def bulk_delete_prelevement_mandats(
+    org_id: str, body: PrelevementMandatBulkDelete, ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    n_deleted = 0
+    for mandat_id in body.ids:
+        delete_prelevement_mandat(ctx.client, mandat_id, org_id)
+        n_deleted += 1
+    return {"n_deleted": n_deleted}
+
+
+class PrelevementMandatBulkUpdate(BaseModel):
+    ids: list[str]
+    field: str
+    value: Any = None
+
+
+@app.patch("/orgs/{org_id}/prelevement/mandats/bulk")
+def bulk_update_prelevement_mandats(
+    org_id: str, body: PrelevementMandatBulkUpdate, ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    """Même principe que bulk_update_records : un seul champ pour toute la
+    sélection, une chaîne vide efface le champ."""
+    if body.field not in MANDAT_DISPLAY_COLUMNS:
+        raise HTTPException(status_code=400, detail="Champ inconnu.")
+    value = body.value.strip() if isinstance(body.value, str) else body.value
+    new_value = value if value not in ("", None) else None
+    n_updated = 0
+    for mandat_id in body.ids:
+        if update_prelevement_mandat(ctx.client, mandat_id, org_id, {body.field: new_value}):
+            n_updated += 1
+    return {"n_updated": n_updated, "n_requested": len(body.ids)}
+
+
+@app.get("/orgs/{org_id}/prelevement/mandats/export")
+def export_prelevement_mandats(
+    org_id: str,
+    format: str = Query("csv", pattern="^(csv|xlsx)$"),
+    search: str = Query(""),
+    col_filters: str = Query("{}", description="JSON : {colonne: {op, value}}"),
+    ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    """Exporte TOUT l'historique des mandats de cet environnement, avec la
+    même recherche/les mêmes filtres que la liste -- mirroir de
+    export_org_records."""
+    parsed_filters = _parse_col_filters(col_filters)
+    rows = list_all_prelevement_mandats(ctx.client, org_id)
+    rows = _filter_by_search(rows, search)
+    rows = _filter_by_columns(rows, parsed_filters)
+
+    export_cols = MANDAT_DISPLAY_COLUMNS + ["Enregistré le"]
+    df = pd.DataFrame(rows) if rows else pd.DataFrame()
+    for c in export_cols:
+        if c not in df.columns:
+            df[c] = None
+    df = df[export_cols]
+
+    file_base = "mandats_prelevement"
+    if format == "csv":
+        content = export_csv_safe(df)
+        if content is None:
+            raise HTTPException(status_code=500, detail="Échec de la génération du CSV.")
+        return StreamingResponse(
+            io.BytesIO(content),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{file_base}.csv"'},
+        )
+
+    buf = export_excel_safe(df)
+    if buf is None:
+        raise HTTPException(status_code=500, detail="Échec de la génération de l'Excel.")
+    return StreamingResponse(
+        io.BytesIO(buf.getvalue()),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{file_base}.xlsx"'},
+    )
+
+
+# Route à motif fixe ("/{mandat_id}") déclarée APRÈS /mandats/bulk et
+# /mandats/export ci-dessus -- FastAPI fait correspondre les routes dans
+# l'ordre de déclaration, "bulk"/"export" seraient sinon capturés comme
+# un mandat_id par cette route (bug réel rencontré en test : PATCH
+# /mandats/bulk renvoyait 422, le corps ne correspondant pas à
+# RecordUpdate).
+@app.patch("/orgs/{org_id}/prelevement/mandats/{mandat_id}")
+def patch_prelevement_mandat(
+    org_id: str, mandat_id: str, body: RecordUpdate, ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    ok = update_prelevement_mandat(ctx.client, mandat_id, org_id, body.data)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Mandat introuvable (déjà supprimé ?).")
+    return {"id": mandat_id, "data": body.data, "updated": True}
 
 
 # ---------------------------------------------------------------

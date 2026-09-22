@@ -1220,3 +1220,111 @@ def save_prelevement_mandats(
     ]
     _td(client, "prelevement_mandats").insert(rows).execute()
     return {"batch_id": batch_id, "n_saved": len(rows)}
+
+
+# Colonnes affichables d'un mandat, dans le même ordre que l'aperçu de
+# génération (PrelevementScreen) -- réutilise _MANDAT_DICT_TO_COLUMN comme
+# unique source de vérité pour les libellés français, jamais dupliqués.
+MANDAT_DISPLAY_COLUMNS = list(_MANDAT_DICT_TO_COLUMN.keys())
+_MANDAT_COLUMN_TO_LABEL = {v: k for k, v in _MANDAT_DICT_TO_COLUMN.items()}
+_MANDAT_DB_COLUMNS = list(_MANDAT_DICT_TO_COLUMN.values())
+
+
+def _mandat_row_to_display(row: dict) -> dict:
+    """Une ligne `trieur_data.prelevement_mandats` (colonnes techniques en
+    anglais) -> dict affichable (libellés français, même casse que l'aperçu
+    de génération), avec `_id` en tête -- même convention que les clients
+    génériques (voir api/main.py:_build_rows, row["_id"])."""
+    out: dict = {"_id": row["id"]}
+    for col, label in _MANDAT_COLUMN_TO_LABEL.items():
+        out[label] = row.get(col)
+    out["Enregistré le"] = row.get("created_at")
+    return out
+
+
+def count_prelevement_mandats(client: Client, org_id: str) -> int:
+    res = (
+        _td(client, "prelevement_mandats")
+        .select("id", count="exact")
+        .eq("org_id", org_id)
+        .limit(1)
+        .execute()
+    )
+    return res.count or 0
+
+
+def list_prelevement_mandats(
+    client: Client, org_id: str, limit: int = LIST_PAGE_SIZE, offset: int = 0,
+) -> list[dict]:
+    """Mandats enregistrés de cet environnement, du plus récent au plus
+    ancien -- même pagination par offset que list_records (limite connue
+    identique : recherche/filtres appliqués au lot chargé, pas à tout
+    l'historique, voir _render_client_list)."""
+    res = (
+        _td(client, "prelevement_mandats")
+        .select("id, " + ", ".join(_MANDAT_DB_COLUMNS) + ", created_at")
+        .eq("org_id", org_id)
+        .order("created_at", desc=True)
+        .limit(limit)
+        .offset(offset)
+        .execute()
+    )
+    return [_mandat_row_to_display(r) for r in (res.data or [])]
+
+
+def list_all_prelevement_mandats(
+    client: Client, org_id: str, page_size: int = LIST_PAGE_SIZE,
+) -> list[dict]:
+    """Tout l'historique des mandats de cet environnement -- utilisé
+    uniquement pour un export complet, même principe que
+    list_all_records."""
+    total = count_prelevement_mandats(client, org_id)
+    all_rows: list[dict] = []
+    offset = 0
+    while len(all_rows) < total:
+        page = list_prelevement_mandats(client, org_id, limit=page_size, offset=offset)
+        if not page:
+            break
+        all_rows.extend(page)
+        offset += len(page)
+    return all_rows
+
+
+def get_prelevement_mandat(client: Client, mandat_id: str, org_id: str) -> dict | None:
+    res = (
+        _td(client, "prelevement_mandats")
+        .select("id, " + ", ".join(_MANDAT_DB_COLUMNS) + ", created_at")
+        .eq("id", mandat_id)
+        .eq("org_id", org_id)
+        .limit(1)
+        .execute()
+    )
+    return _mandat_row_to_display(res.data[0]) if res.data else None
+
+
+def update_prelevement_mandat(client: Client, mandat_id: str, org_id: str, data: dict) -> bool:
+    """`data` : dict de libellés français (mêmes clés que
+    MANDAT_DISPLAY_COLUMNS) -> nouvelle valeur. Traduit vers les colonnes
+    réelles avant l'update -- jamais de colonne technique acceptée
+    directement depuis l'appelant (même garde que RecordUpdate côté
+    clients génériques, qui remplace tout le jsonb plutôt que d'exposer
+    les noms de colonnes SQL)."""
+    columns = {
+        _MANDAT_DICT_TO_COLUMN[label]: value
+        for label, value in data.items()
+        if label in _MANDAT_DICT_TO_COLUMN
+    }
+    if not columns:
+        return False
+    res = (
+        _td(client, "prelevement_mandats")
+        .update(columns)
+        .eq("id", mandat_id)
+        .eq("org_id", org_id)
+        .execute()
+    )
+    return bool(res.data)
+
+
+def delete_prelevement_mandat(client: Client, mandat_id: str, org_id: str) -> None:
+    _td(client, "prelevement_mandats").delete().eq("id", mandat_id).eq("org_id", org_id).execute()

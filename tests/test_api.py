@@ -1849,6 +1849,164 @@ def test_prelevement_mandats_forbidden_for_non_admin(client_factory):
     assert res.status_code == 403
 
 
+def _save_one_mandat(tc) -> str:
+    """Génère et enregistre un seul mandat, renvoie son id -- fixture
+    partagée par les tests de la vue de consultation ci-dessous."""
+    gen_res = tc.post(
+        "/orgs/org-1/prelevement/generate",
+        files=[("files", ("export.csv", _PRELEVEMENT_CSV, "text/csv"))],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    mandats = gen_res.json()["mandats"]
+    save_res = tc.post(
+        "/orgs/org-1/prelevement/mandats",
+        json={"mandats": mandats},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert save_res.status_code == 200
+    return save_res.json()
+
+
+def test_list_prelevement_mandats(client_factory):
+    """Vue de consultation (Raphaël, 2026-09-22) : la liste renvoie bien
+    les mandats déjà enregistrés, avec les colonnes affichables."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    _save_one_mandat(tc)
+
+    res = tc.get("/orgs/org-1/prelevement/mandats", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["total"] == 1
+    assert len(body["rows"]) == 1
+    assert body["rows"][0]["RUM"] == "RUM1"
+    assert "_id" in body["rows"][0]
+    assert "RUM" in body["columns"]
+    assert "Enregistré le" in body["columns"]
+
+
+def test_list_prelevement_mandats_search_filters_loaded_page(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    _save_one_mandat(tc)
+
+    res = tc.get(
+        "/orgs/org-1/prelevement/mandats",
+        params={"search": "aucune-correspondance"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.json()["rows"] == []
+
+    res = tc.get(
+        "/orgs/org-1/prelevement/mandats",
+        params={"search": "RUM1"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert len(res.json()["rows"]) == 1
+
+
+def test_patch_prelevement_mandat(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    saved = _save_one_mandat(tc)
+    mandat_id = fake.postgrest.tables["prelevement_mandats"][0]["id"]
+
+    res = tc.patch(
+        f"/orgs/org-1/prelevement/mandats/{mandat_id}",
+        json={"data": {"Nom": "Nouveau nom"}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    stored = fake.postgrest.tables["prelevement_mandats"][0]
+    assert stored["nom"] == "Nouveau nom"
+    # Les autres colonnes ne sont pas touchées -- PATCH mandat fusionne,
+    # ne remplace jamais toute la ligne (contrairement à update_record).
+    assert stored["rum"] == "RUM1"
+    assert stored["batch_id"] == saved["batch_id"]
+
+
+def test_patch_prelevement_mandat_not_found(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.patch(
+        "/orgs/org-1/prelevement/mandats/does-not-exist",
+        json={"data": {"Nom": "X"}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 404
+
+
+def test_bulk_delete_prelevement_mandats(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    _save_one_mandat(tc)
+    mandat_id = fake.postgrest.tables["prelevement_mandats"][0]["id"]
+
+    res = tc.request(
+        "DELETE",
+        "/orgs/org-1/prelevement/mandats",
+        json={"ids": [mandat_id]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.json()["n_deleted"] == 1
+    assert fake.postgrest.tables["prelevement_mandats"] == []
+
+
+def test_bulk_update_prelevement_mandats(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    _save_one_mandat(tc)
+    mandat_id = fake.postgrest.tables["prelevement_mandats"][0]["id"]
+
+    res = tc.patch(
+        "/orgs/org-1/prelevement/mandats/bulk",
+        json={"ids": [mandat_id], "field": "Ville", "value": "Marseille"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.json()["n_updated"] == 1
+    assert fake.postgrest.tables["prelevement_mandats"][0]["ville"] == "Marseille"
+
+
+def test_bulk_update_prelevement_mandats_rejects_unknown_field(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    _save_one_mandat(tc)
+    mandat_id = fake.postgrest.tables["prelevement_mandats"][0]["id"]
+
+    res = tc.patch(
+        "/orgs/org-1/prelevement/mandats/bulk",
+        json={"ids": [mandat_id], "field": "org_id", "value": "autre-org"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_export_prelevement_mandats(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    _save_one_mandat(tc)
+
+    res = tc.get(
+        "/orgs/org-1/prelevement/mandats/export",
+        params={"format": "csv"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/csv")
+    assert "RUM1" in res.text
+
+
+def test_prelevement_mandats_list_forbidden_for_non_admin(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.get("/orgs/org-1/prelevement/mandats", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 403
+
+
 def test_create_and_list_sections(client_factory):
     fake = _make_client(profiles=[ADMIN_PROFILE])
     tc = client_factory(fake)

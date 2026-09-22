@@ -42,7 +42,8 @@ import {
 const STATUT_BADGE: Record<PrelevementRuleRequest['statut'], string> = {
   en_attente: '⏳ Pas encore examinée',
   en_cours: '🔧 En cours de codage',
-  valide: '✅ Codée et validée',
+  a_verifier: '🧪 Codée -- à valider',
+  valide: '✅ Validée',
 }
 
 // Version compacte (juste l'icône) -- utilisée sur les pastilles
@@ -51,6 +52,7 @@ const STATUT_BADGE: Record<PrelevementRuleRequest['statut'], string> = {
 const RULE_STATUT_ICON: Record<PrelevementRuleRequest['statut'], string> = {
   en_attente: '⏳',
   en_cours: '🔧',
+  a_verifier: '🧪',
   valide: '✅',
 }
 

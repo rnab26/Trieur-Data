@@ -2774,7 +2774,7 @@ def patch_prelevement_mandat(
 # demande explicite (code + tests + PR), puis met à jour le statut ici.
 # ---------------------------------------------------------------
 
-RULE_REQUEST_STATUTS = ("en_attente", "en_cours", "valide")
+RULE_REQUEST_STATUTS = ("en_attente", "en_cours", "a_verifier", "valide")
 
 
 @app.get("/orgs/{org_id}/prelevement/rule-requests")

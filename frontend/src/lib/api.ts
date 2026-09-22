@@ -1079,7 +1079,7 @@ export function deletePrelevementColonnesMandatPreset(orgId: string, presetId: s
 // met à jour `statut` ici même.
 // ---------------------------------------------------------------
 
-export const RULE_REQUEST_STATUTS = ['en_attente', 'en_cours', 'valide'] as const
+export const RULE_REQUEST_STATUTS = ['en_attente', 'en_cours', 'a_verifier', 'valide'] as const
 export type RuleRequestStatut = (typeof RULE_REQUEST_STATUTS)[number]
 
 // Question à choix cliquables posée par une session Claude Code sur une

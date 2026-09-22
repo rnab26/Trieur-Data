@@ -2528,6 +2528,43 @@ def test_prelevement_rule_requests_patch_statut_and_text(client_factory):
     assert res.json()["statut"] == "valide"
 
 
+def test_prelevement_rule_requests_patch_accepts_a_verifier_statut(client_factory):
+    """Nouveau statut (2026-09-22, "vrai système question réponse [...]
+    bouton validé par l'admin fonctionnel sinon bouton à corriger") :
+    une session Claude Code passe une demande codée et déployée à
+    "a_verifier" (jamais directement "valide") -- seul un humain fait
+    ensuite passer à "valide" (ça marche) ou repasse à "en_cours" (ça ne
+    marche pas, correction sur la MÊME demande, jamais une nouvelle)."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    created = tc.post(
+        "/orgs/org-1/prelevement/rule-requests",
+        json={"titre": "Frais VETO", "demande": "Passer à 25€"},
+        headers=headers,
+    ).json()
+
+    res = tc.patch(
+        f"/orgs/org-1/prelevement/rule-requests/{created['id']}",
+        json={"statut": "a_verifier"},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    assert res.json()["statut"] == "a_verifier"
+
+    # Correction : le texte de la demande est complété ET le statut
+    # repasse à en_cours EN UN SEUL PATCH -- même ligne, pas de doublon.
+    res = tc.patch(
+        f"/orgs/org-1/prelevement/rule-requests/{created['id']}",
+        json={"demande": "Passer à 25€\n\n--- Correction ---\nEn fait 30€", "statut": "en_cours"},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["statut"] == "en_cours"
+    assert "Correction" in body["demande"]
+
+
 def test_prelevement_rule_requests_patch_rejects_invalid_statut(client_factory):
     fake = _make_client(profiles=[ADMIN_PROFILE])
     tc = client_factory(fake)

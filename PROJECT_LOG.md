@@ -3575,3 +3575,39 @@ correctif du bug NaN (PR #46), verrouillage de l'environnement (PR
 tri par colonne + vues modifiables (PR #50). Reste ouvert et reporté
 explicitement par Raphaël : la vue Base de données dédiée aux mandats
 Prélèvement, une fois que son père aura validé les étapes actuelles.
+
+### PR #51 : numéros de téléphone manquants ou avec ".0" en trop (2026-09-22)
+
+Raphaël a signalé que certains mandats générés partaient sans numéro
+de téléphone, ou avec un ".0" en trop -- "impossible qu'on reçoive un
+contrat sans numéro de tel client". Confirmé réel, deux causes
+distinctes trouvées en croisant le fichier CRM de référence :
+
+1. **Mauvaise colonne lue** : le moteur ne lisait que "Téléphone"
+   (fixe), vide pour **92 clients sur 291 (32%)** dans le fichier de
+   référence, alors que "Mobile" est remplie à **100%** sur les mêmes
+   lignes -- jamais consultée. Corrigé par un repli sur "Mobile" quand
+   "Téléphone" est vide.
+2. **Artefact pandas** (même famille que le bug NaN de la veille) :
+   quand une cellule numéro est enregistrée comme un NOMBRE dans le
+   fichier source (pas du texte, contrairement à la majorité des
+   lignes), pandas la lit en float64 -- `str(33630653771.0)` donne
+   `"33630653771.0"`. Nouvelle fonction `to_telephone()` : retire le
+   ".0" et reformate en "+33..." un numéro à 11 chiffres commençant
+   par "33" sans "+" (perdu par le passage en nombre) -- ne comble
+   jamais un numéro manquant, ne devine jamais un chiffre.
+
+**Vérifié sur les deux fichiers CRM réels disponibles** (291 + 66
+lignes), rejoué via le chemin serveur exact (pandas) : 0 numéro
+manquant, 0 ".0" résiduel sur les 415 + 87 mandats générés (avant :
+92/291 partaient sans aucun numéro).
+
+**Question posée à Raphaël** avant de coder le cas résiduel (client
+sans AUCUN numéro, ni Téléphone ni Mobile -- jamais observé sur les
+502 mandats réels testés, mais possible) : exclure ou laisser partir ?
+Réponse : **jamais bloquer**, mais signaler immédiatement sans
+manipulation, avec un rapport. Ajouté : bannière d'alerte dédiée dans
+l'écran (référence client, nom, motif) + ligne dans le résumé des
+étapes, dès la génération.
+
+`pytest` : 445 passés. CI verte du premier coup.

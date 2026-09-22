@@ -144,18 +144,27 @@ export function RuleQuestionBlock({
 // Code passait seule une demande codée à "valide", sans qu'un humain ne
 // confirme que ça marche vraiment -- et quand ça ne marchait pas, une
 // NOUVELLE demande était recréée au lieu de corriger celle-ci (doublons).
-// Ce bloc apparaît UNIQUEMENT au statut "a_verifier" (codé + déployé,
-// pas encore confirmé) : soit ça marche (✅ Valider, statut -> valide),
-// soit non (✏️ Corriger, la précision est ajoutée à LA MÊME demande et
-// le statut repasse à "en_cours" -- jamais une nouvelle ligne).
+//
+// Deux modes (Raphaël, 2026-09-22 -- "une règle utilisée qui ne
+// fonctionne pas, si on demande de la modifier ou la corriger, elle
+// repasse dans le bloc d'en bas") :
+// - "a_verifier" (codé + déployé, pas encore confirmé) : soit ça marche
+//   (✅ Valider, statut -> valide), soit non (✏️ Corriger).
+// - "valide" (déjà certifiée, mais un problème est découvert plus tard,
+//   à tout moment) : juste "✏️ Signaler un problème / corriger", pas
+//   besoin de revalider ce qui l'était déjà.
+// Dans les deux cas, corriger ajoute la précision à LA MÊME demande et
+// repasse son statut à "en_cours" -- jamais une nouvelle ligne.
 function ValidationBlock({
   orgId,
   request,
+  mode,
   onValidated,
   onCorrected,
 }: {
   orgId: string
   request: PrelevementRuleRequest
+  mode: 'a_verifier' | 'valide'
   onValidated: () => void
   onCorrected: (demande: string) => void
 }) {
@@ -191,6 +200,50 @@ function ValidationBlock({
       setError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
       setSubmitting(false)
     }
+  }
+
+  if (mode === 'valide') {
+    return (
+      <div className="mt-2 text-sm">
+        {!correcting ? (
+          <button
+            type="button"
+            onClick={() => setCorrecting(true)}
+            className="text-xs text-[var(--primary)] hover:underline"
+          >
+            ✏️ Signaler un problème / demander une correction
+          </button>
+        ) : (
+          <div className="rounded-md border-2 border-[var(--warning)] bg-[var(--muted-bg)] p-3">
+            <p className="font-bold text-[var(--warning)]">
+              🧪 Qu'est-ce qui ne va pas ? Sois précis (exemple concret si possible)…
+            </p>
+            <div className="mt-2 flex flex-col gap-2">
+              <textarea
+                className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] p-2 text-sm"
+                rows={3}
+                value={correctionText}
+                onChange={(e) => setCorrectionText(e.target.value)}
+                autoFocus
+              />
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  disabled={submitting || !correctionText.trim()}
+                  onClick={() => void handleCorriger()}
+                >
+                  {submitting ? 'Enregistrement…' : '📩 Envoyer la correction'}
+                </Button>
+                <Button type="button" variant="secondary" disabled={submitting} onClick={() => setCorrecting(false)}>
+                  Annuler
+                </Button>
+              </div>
+            </div>
+            {error && <p className="mt-1 text-xs text-[var(--danger)]">Erreur : {error}</p>}
+          </div>
+        )}
+      </div>
+    )
   }
 
   return (
@@ -469,6 +522,138 @@ export function PrelevementRuleRequests({
           return t === newTitreNorm || t.includes(newTitreNorm) || newTitreNorm.includes(t)
         })
 
+  // Deux bacs, jamais mélangés (Raphaël, 2026-09-22 : "deux bacs, un bac
+  // actif, un bac en cours d'optimisation dès qu'une règle est créée ou
+  // modifiée pour quelconque raison -- comme ça on s'y retrouve, on sait
+  // ce qui est bon et ce qui ne l'est pas encore") -- remplace l'ancien
+  // panneau statique "Règles appliquées par le moteur" + la liste
+  // "Historique" séparée à côté, qui listaient les mêmes règles sans
+  // lien fiable entre les deux (rapprochement par titre, fragile).
+  // "Actif" = certifiée par un humain, donc ce que le moteur applique
+  // vraiment aujourd'hui. "En cours" = tout le reste (nouvelle demande,
+  // en cours de codage, codée mais pas encore vérifiée) -- une règle
+  // active qui ne fonctionne plus (bouton "Signaler un problème" sur sa
+  // carte, voir ValidationBlock) repasse automatiquement ici, jamais une
+  // nouvelle ligne.
+  const actifs = requests.filter((r) => r.statut === 'valide')
+  const enCours = requests.filter((r) => r.statut !== 'valide')
+
+  function renderCard(r: PrelevementRuleRequest) {
+    const pendingQuestions = r.questions.filter((q) => !q.answered_at)
+    const awaitingValidation = pendingQuestions.length === 0 && r.statut === 'a_verifier'
+    const canReportProblem = pendingQuestions.length === 0 && r.statut === 'valide'
+    return (
+      <li
+        key={r.id}
+        className={
+          'rounded-md border p-2 ' +
+          (pendingQuestions.length > 0
+            ? 'border-2 border-[var(--danger)]'
+            : awaitingValidation
+              ? 'border-2 border-[var(--warning)]'
+              : r.statut === 'valide'
+                ? 'border-[var(--success)]'
+                : 'border-[var(--border)]')
+        }
+      >
+        <div className="mb-1 flex flex-wrap items-center gap-2">
+          <Input
+            className="min-w-[10rem] flex-1 font-bold"
+            value={r.titre}
+            disabled={savingId === r.id}
+            onChange={(e) =>
+              setRequests((prev) => prev.map((x) => (x.id === r.id ? { ...x, titre: e.target.value } : x)))
+            }
+            onBlur={(e) => {
+              const titre = e.target.value.trim()
+              if (titre && titre !== r.titre) void persist(r.id, { titre })
+            }}
+          />
+          {pendingQuestions.length > 0 ? (
+            <span className="rounded-md bg-[var(--danger)] px-2 py-1 text-xs font-bold text-white">
+              🔴 Ta réponse est nécessaire
+            </span>
+          ) : (
+            // Lecture seule -- le statut est décidé par la session
+            // Claude Code qui code la règle, jamais par Raphaël ou
+            // son père (retour explicite : "les statuts sont à
+            // statuer par toi, pas par moi"). Avant : un menu
+            // déroulant modifiable ici, source de confusion.
+            <span
+              className={'rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-1 text-xs font-medium ' + STATUT_COLOR[r.statut]}
+            >
+              {STATUT_LABEL[r.statut]}
+            </span>
+          )}
+        </div>
+        <textarea
+          className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] p-2 text-sm"
+          rows={2}
+          value={r.demande}
+          disabled={savingId === r.id}
+          onChange={(e) =>
+            setRequests((prev) => prev.map((x) => (x.id === r.id ? { ...x, demande: e.target.value } : x)))
+          }
+          onBlur={(e) => {
+            const demande = e.target.value.trim()
+            if (demande && demande !== r.demande) void persist(r.id, { demande })
+          }}
+        />
+        {pendingQuestions.map((q) => (
+          <RuleQuestionBlock
+            key={q.id}
+            orgId={orgId}
+            requestId={r.id}
+            question={q}
+            onAnswered={() => {
+              markScroll()
+              setReloadNonce((n) => n + 1)
+            }}
+          />
+        ))}
+        <AnsweredQuestions questions={r.questions.filter((q) => q.answered_at)} />
+        {(awaitingValidation || canReportProblem) && (
+          <ValidationBlock
+            orgId={orgId}
+            request={r}
+            mode={awaitingValidation ? 'a_verifier' : 'valide'}
+            onValidated={() => {
+              markScroll()
+              setRequests((prev) => prev.map((x) => (x.id === r.id ? { ...x, statut: 'valide' } : x)))
+            }}
+            onCorrected={(demande) => {
+              markScroll()
+              setRequests((prev) =>
+                prev.map((x) => (x.id === r.id ? { ...x, demande, statut: 'en_cours' } : x)),
+              )
+            }}
+          />
+        )}
+        <ActivityFeed events={r.events} />
+        <div className="mt-1 flex items-center justify-between">
+          <span className="text-xs text-[var(--muted)]">
+            Créée le {formatEventTime(r.created_at)}
+            {r.updated_at !== r.created_at && ` -- modifiée le ${formatEventTime(r.updated_at)}`}
+          </span>
+          {confirmingDeleteId === r.id ? (
+            <span className="flex items-center gap-1">
+              <Button variant="danger" disabled={savingId === r.id} onClick={() => void handleDelete(r.id)}>
+                Confirmer
+              </Button>
+              <Button variant="secondary" onClick={() => setConfirmingDeleteId(null)}>
+                Annuler
+              </Button>
+            </span>
+          ) : (
+            <Button variant="danger" onClick={() => setConfirmingDeleteId(r.id)}>
+              🗑️
+            </Button>
+          )}
+        </div>
+      </li>
+    )
+  }
+
   return (
     <div className="mt-2 border-t border-[var(--border)] pt-3">
       {error && <p className="mb-2 text-sm text-[var(--danger)]">Erreur : {error}</p>}
@@ -496,6 +681,13 @@ export function PrelevementRuleRequests({
         </p>
       )}
 
+      {!loading && actifs.length > 0 && (
+        <div className="mb-3">
+          <p className="mb-2 text-xs font-bold text-[var(--success)]">✅ Actif ({actifs.length})</p>
+          <ul className="flex flex-col gap-3">{actifs.map(renderCard)}</ul>
+        </div>
+      )}
+
       {!loading && requests.length > 0 && (
         <button
           type="button"
@@ -503,7 +695,7 @@ export function PrelevementRuleRequests({
           className="mb-2 flex items-center gap-2 text-xs font-medium text-[var(--muted)] hover:text-[var(--foreground)]"
         >
           <span>
-            {historyOpen ? '▲' : '▼'} Historique des demandes ({requests.length})
+            {historyOpen ? '▲' : '▼'} 🔧 En cours d'optimisation ({enCours.length})
           </span>
           {nonValidees > 0 && (
             <span className="rounded-full bg-[var(--primary)] px-2 py-0.5 text-[0.65rem] font-bold text-[var(--primary-foreground)]">
@@ -513,124 +705,8 @@ export function PrelevementRuleRequests({
         </button>
       )}
 
-      {historyOpen && requests.length > 0 && (
-        <ul className="mb-3 flex flex-col gap-3">
-          {requests.map((r) => {
-            const pendingQuestions = r.questions.filter((q) => !q.answered_at)
-            const awaitingValidation = pendingQuestions.length === 0 && r.statut === 'a_verifier'
-            return (
-            <li
-              key={r.id}
-              className={
-                'rounded-md border p-2 ' +
-                (pendingQuestions.length > 0
-                  ? 'border-2 border-[var(--danger)]'
-                  : awaitingValidation
-                    ? 'border-2 border-[var(--warning)]'
-                    : 'border-[var(--border)]')
-              }
-            >
-              <div className="mb-1 flex flex-wrap items-center gap-2">
-                <Input
-                  className="min-w-[10rem] flex-1 font-bold"
-                  value={r.titre}
-                  disabled={savingId === r.id}
-                  onChange={(e) =>
-                    setRequests((prev) => prev.map((x) => (x.id === r.id ? { ...x, titre: e.target.value } : x)))
-                  }
-                  onBlur={(e) => {
-                    const titre = e.target.value.trim()
-                    if (titre && titre !== r.titre) void persist(r.id, { titre })
-                  }}
-                />
-                {pendingQuestions.length > 0 ? (
-                  <span className="rounded-md bg-[var(--danger)] px-2 py-1 text-xs font-bold text-white">
-                    🔴 Ta réponse est nécessaire
-                  </span>
-                ) : (
-                  // Lecture seule -- le statut est décidé par la session
-                  // Claude Code qui code la règle, jamais par Raphaël ou
-                  // son père (retour explicite : "les statuts sont à
-                  // statuer par toi, pas par moi"). Avant : un menu
-                  // déroulant modifiable ici, source de confusion.
-                  <span
-                    className={'rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-1 text-xs font-medium ' + STATUT_COLOR[r.statut]}
-                  >
-                    {STATUT_LABEL[r.statut]}
-                  </span>
-                )}
-              </div>
-              <textarea
-                className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] p-2 text-sm"
-                rows={2}
-                value={r.demande}
-                disabled={savingId === r.id}
-                onChange={(e) =>
-                  setRequests((prev) => prev.map((x) => (x.id === r.id ? { ...x, demande: e.target.value } : x)))
-                }
-                onBlur={(e) => {
-                  const demande = e.target.value.trim()
-                  if (demande && demande !== r.demande) void persist(r.id, { demande })
-                }}
-              />
-              {pendingQuestions.map((q) => (
-                <RuleQuestionBlock
-                  key={q.id}
-                  orgId={orgId}
-                  requestId={r.id}
-                  question={q}
-                  onAnswered={() => {
-                    markScroll()
-                    setReloadNonce((n) => n + 1)
-                  }}
-                />
-              ))}
-              <AnsweredQuestions questions={r.questions.filter((q) => q.answered_at)} />
-              {awaitingValidation && (
-                <ValidationBlock
-                  orgId={orgId}
-                  request={r}
-                  onValidated={() => {
-                    markScroll()
-                    setRequests((prev) => prev.map((x) => (x.id === r.id ? { ...x, statut: 'valide' } : x)))
-                  }}
-                  onCorrected={(demande) => {
-                    markScroll()
-                    setRequests((prev) =>
-                      prev.map((x) => (x.id === r.id ? { ...x, demande, statut: 'en_cours' } : x)),
-                    )
-                  }}
-                />
-              )}
-              <ActivityFeed events={r.events} />
-              <div className="mt-1 flex items-center justify-between">
-                <span className="text-xs text-[var(--muted)]">
-                  Créée le {formatEventTime(r.created_at)}
-                  {r.updated_at !== r.created_at && ` -- modifiée le ${formatEventTime(r.updated_at)}`}
-                </span>
-                {confirmingDeleteId === r.id ? (
-                  <span className="flex items-center gap-1">
-                    <Button
-                      variant="danger"
-                      disabled={savingId === r.id}
-                      onClick={() => void handleDelete(r.id)}
-                    >
-                      Confirmer
-                    </Button>
-                    <Button variant="secondary" onClick={() => setConfirmingDeleteId(null)}>
-                      Annuler
-                    </Button>
-                  </span>
-                ) : (
-                  <Button variant="danger" onClick={() => setConfirmingDeleteId(r.id)}>
-                    🗑️
-                  </Button>
-                )}
-              </div>
-            </li>
-            )
-          })}
-        </ul>
+      {historyOpen && enCours.length > 0 && (
+        <ul className="mb-3 flex flex-col gap-3">{enCours.map(renderCard)}</ul>
       )}
 
       <div className="flex flex-col gap-2 rounded-md border border-dashed border-[var(--border)] p-2">
@@ -647,7 +723,8 @@ export function PrelevementRuleRequests({
           <div className="rounded-md border border-[var(--primary)] bg-[var(--muted-bg)] p-2 text-xs">
             <p className="font-medium">
               ⚠️ Une demande avec un nom proche existe déjà -- pour éviter un doublon, ajoute plutôt ta
-              précision dans la demande existante (déroule "Historique des demandes" ci-dessus) :
+              précision directement sur la carte existante ci-dessus ("✅ Actif" ou "🔧 En cours
+              d'optimisation") :
             </p>
             <ul className="mt-1 list-disc pl-4">
               {similarExistingTitres.map((r) => (
@@ -661,7 +738,7 @@ export function PrelevementRuleRequests({
               onClick={() => setHistoryOpen(true)}
               className="mt-1 text-[var(--primary)] hover:underline"
             >
-              Voir l'historique
+              Voir "en cours d'optimisation"
             </button>
           </div>
         )}

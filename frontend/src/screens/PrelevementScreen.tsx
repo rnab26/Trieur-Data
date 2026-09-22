@@ -5,10 +5,9 @@ import { Input } from '@/components/ui/input'
 import { useAuth } from '@/lib/AuthContext'
 import { useOrgs } from '@/lib/useAccount'
 import { PrelevementMandatsPanel } from './PrelevementMandatsPanel'
-import { PrelevementRuleRequests } from './PrelevementRuleRequests'
+import { PrelevementRuleRequests, RuleQuestionBlock } from './PrelevementRuleRequests'
 import {
   ApiError,
-  answerPrelevementRuleRequestQuestion,
   createPrelevementRuleRequest,
   downloadPrelevementFile,
   generatePrelevementMandats,
@@ -19,68 +18,15 @@ import {
   type PrelevementGenerateResult,
   type PrelevementRuleRequest,
   type PrelevementRules,
-  type RuleRequestQuestion,
 } from '@/lib/api'
 
-// Réponse à une question à choix cliquables posée par une session
-// Claude Code sur une demande de règle ambiguë (Raphaël, 2026-09-22) --
-// même principe que ChantierCard/QuestionBlock côté Cockpit. Une
-// réponse libre (le champ commentaire) reste toujours possible en plus
-// des options, pour préciser sans devoir attendre une nouvelle option.
-function RuleQuestionBlock({
-  orgId,
-  requestId,
-  question,
-  onAnswered,
-}: {
-  orgId: string
-  requestId: string
-  question: RuleRequestQuestion
-  onAnswered: () => void
-}) {
-  const [comment, setComment] = useState('')
-  const [submitting, setSubmitting] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  async function handleChoose(option: string) {
-    setSubmitting(true)
-    setError(null)
-    try {
-      await answerPrelevementRuleRequestQuestion(orgId, requestId, question.id, option, comment.trim() || null)
-      onAnswered()
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
-    } finally {
-      setSubmitting(false)
-    }
-  }
-
-  return (
-    <div className="mt-2 rounded-md border-2 border-[var(--danger)] bg-[var(--muted-bg)] p-3 text-sm">
-      <p className="font-bold text-[var(--danger)]">🔴 Claude attend une réponse</p>
-      <p className="mt-1 font-medium">{question.question}</p>
-      <div className="mt-2 flex flex-wrap gap-2">
-        {question.options.map((option) => (
-          <Button key={option} type="button" variant="secondary" disabled={submitting} onClick={() => void handleChoose(option)}>
-            {option}
-          </Button>
-        ))}
-      </div>
-      <Input
-        className="mt-2"
-        placeholder="Préciser ta réponse (optionnel)…"
-        value={comment}
-        onChange={(e) => setComment(e.target.value)}
-      />
-      {error && <p className="mt-1 text-xs text-[var(--danger)]">Erreur : {error}</p>}
-    </div>
-  )
-}
-
+// Libellés courts pour le badge sur chaque règle du panneau ci-dessous
+// -- une question en attente (voir pendingQuestions plus bas) prime
+// toujours sur ce statut, jamais affichés en même temps.
 const STATUT_BADGE: Record<PrelevementRuleRequest['statut'], string> = {
-  en_attente: '⏳ En attente',
-  en_cours: '🔵 En cours',
-  valide: '✅ Validé',
+  en_attente: '⏳ Pas encore examinée',
+  en_cours: '🔧 En cours de codage',
+  valide: '✅ Codée et validée',
 }
 
 // Nombre de lignes affichées dans l'aperçu -- au-delà, seul le fichier
@@ -648,15 +594,15 @@ export function PrelevementScreen() {
                   </p>
                   {rules.explication.map((r, i) => {
                     const latestReq = latestRuleRequestFor(r.titre)
-                    const pendingQuestion = latestReq?.questions.find((q) => !q.answered_at)
+                    const pendingQuestions = latestReq?.questions.filter((q) => !q.answered_at) ?? []
                     return (
                     <div key={i}>
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <span className="flex items-center gap-2">
                           <p className="text-sm font-medium text-[var(--foreground)]">{r.titre}</p>
-                          {pendingQuestion ? (
-                            <span className="text-xs font-bold text-[var(--danger)]">
-                              🔴 Claude attend une réponse
+                          {pendingQuestions.length > 0 ? (
+                            <span className="rounded-md bg-[var(--danger)] px-2 py-0.5 text-xs font-bold text-white">
+                              🔴 Ta réponse est nécessaire
                             </span>
                           ) : (
                             latestReq && (
@@ -676,14 +622,15 @@ export function PrelevementScreen() {
                       </div>
                       <p className="text-sm text-[var(--muted)]">{r.detail}</p>
 
-                      {pendingQuestion && orgId && latestReq && (
+                      {orgId && latestReq && pendingQuestions.map((q) => (
                         <RuleQuestionBlock
+                          key={q.id}
                           orgId={orgId}
                           requestId={latestReq.id}
-                          question={pendingQuestion}
+                          question={q}
                           onAnswered={() => setRuleRequestsRefreshKey((k) => k + 1)}
                         />
-                      )}
+                      ))}
 
                       {ruleFormSentTitre === r.titre && openRuleIdx !== i && (
                         <p className="mt-1 text-xs text-[var(--success)]">

@@ -151,6 +151,13 @@ export function PrelevementScreen() {
 
   async function handleSaveToDatabase() {
     if (!orgId || !result || result.mandats.length === 0) return
+    if (
+      !window.confirm(
+        `Enregistrer ${result.mandats.length} mandat(s) dans la base de données, environnement « ${PRELEVEMENT_ORG_NAME} » ?`,
+      )
+    ) {
+      return
+    }
     setSaving(true)
     setSaveError(null)
     try {

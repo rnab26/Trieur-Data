@@ -77,6 +77,28 @@ intervention.
   directement sur `main`. Une tâche faite est cochée `[x]`, jamais
   supprimée.
 
+## Requêtes SQL : `scripts/sql.sh`, jamais l'outil MCP, jamais demandé à Raphaël
+
+**N'utilise pas `mcp__Supabase__execute_sql`, et ne demande jamais à Raphaël
+d'exécuter une requête à ta place.** Cet outil impose un pop-up à chaque
+appel, imposé par le serveur MCP lui-même — aucun réglage de permissions ne
+peut le lever, même en accès complet. Raphaël travaille depuis son
+téléphone.
+
+```bash
+scripts/sql.sh "select id, nom from clients limit 5;"
+```
+
+Passe par l'API HTTPS de Supabase (`rest/v1/rpc/exec_sql`), donc par Bash :
+aucune validation. Ajouté le 22 sept. 2026 — ce dépôt partage le MÊME projet
+Supabase que Jarvis-assistant (`bexiyvmdbxcwxasgslxp`), `exec_sql` y existe
+déjà (créée par une migration de Jarvis-assistant), rien à recréer ici.
+Script identique à celui de Jarvis-assistant et melissa-nabet. Testé contre
+la vraie base (succès et cas d'erreur) avant d'être committé.
+
+Accès total à la base (DDL et suppressions comprises) : toujours demander à
+Raphaël avant un `DROP`, un `DELETE` massif ou un `TRUNCATE`.
+
 ## Décisions en attente (fiches à remplir)
 
 - **Fonctionnalités Base de données** (2026-09-17) :

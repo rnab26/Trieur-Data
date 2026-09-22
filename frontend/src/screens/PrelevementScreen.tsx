@@ -56,8 +56,9 @@ function RuleQuestionBlock({
   }
 
   return (
-    <div className="mt-2 rounded-md border border-[var(--primary)] bg-[var(--muted-bg)] p-3 text-sm">
-      <p className="font-medium">❓ {question.question}</p>
+    <div className="mt-2 rounded-md border-2 border-[var(--danger)] bg-[var(--muted-bg)] p-3 text-sm">
+      <p className="font-bold text-[var(--danger)]">🔴 Claude attend une réponse</p>
+      <p className="mt-1 font-medium">{question.question}</p>
       <div className="mt-2 flex flex-wrap gap-2">
         {question.options.map((option) => (
           <Button key={option} type="button" variant="secondary" disabled={submitting} onClick={() => void handleChoose(option)}>
@@ -641,8 +642,8 @@ export function PrelevementScreen() {
                         <span className="flex items-center gap-2">
                           <p className="text-sm font-medium text-[var(--foreground)]">{r.titre}</p>
                           {pendingQuestion ? (
-                            <span className="text-xs font-medium text-[var(--primary)]">
-                              ❓ Réponse attendue
+                            <span className="text-xs font-bold text-[var(--danger)]">
+                              🔴 Claude attend une réponse
                             </span>
                           ) : (
                             latestReq && (

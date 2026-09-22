@@ -3999,3 +3999,40 @@ bien les routes `/prelevement/*`, tester un vrai appel `/prelevement/
 generate` en production, et ne marquer `ed9c74b4` (FRST) "validé" et
 les autres chantiers "prêts pour la banque" qu'à partir de là -- rien
 de tout ça n'a jamais été testé en conditions réelles jusqu'ici.
+
+### PR #69 : cumul de produits étendu + FRST/RCUR systématiques (2026-09-22)
+
+Système de questions (migration 0026) utilisé pour de vrai pour la
+première fois côté père de Raphaël : réponses reçues sur 2 des 8
+questions posées sur ses demandes de modification de règles (voir
+plus haut, "mon père a fait des demandes de modification").
+
+1. **"Un mandat par produit actif"** -- le cumul en un seul mandat,
+   jusqu'ici limité au duo MYJURIS+IMMO, étendu à tout le groupe
+   MYJURIS & MYHOSPI / Admin & Aide a dom / Auditif / IMMO / VETO
+   (suffixe de motif combiné). "Contrat MYMO casse & perte appareil
+   auditif" confirmé toujours ignoré.
+2. **"FRST vs RCUR"** -- chaque mandat génère désormais
+   SYSTÉMATIQUEMENT les deux lignes (FRST à la date du 1er
+   prélèvement + frais, RCUR à cette date décalée de la périodicité
+   du contrat, sans frais), au lieu de choisir l'une ou l'autre selon
+   "Statut agent IA" (qui ne sert plus qu'à l'exclusion
+   Refusé/Annuler). Risque de double prélèvement signalé explicitement
+   dans la question avant de coder, confirmé par le père de Raphaël.
+
+Tests ajoutés/mis à jour en conséquence (décalage de date RCUR par
+périodicité avec repli à 1 mois si périodicité inconnue, groupe de
+cumul étendu, tous les compteurs API qui supposaient un seul mandat
+par produit) : 480 passent. PR mergée, CI verte. Requêtes
+`9ddade7f`/`1e1db64d` marquées `valide` dans
+`prelevement_rule_requests`.
+
+**Toujours bloqué par le backend Render sur la mauvaise branche**
+(voir juste au-dessus) : ce code est mergé sur `main` et donc prêt,
+mais ni ce changement ni aucun testé réellement en production tant
+que `trieur-data-api-test` ne déploie pas `main`. Il reste 6 questions
+ouvertes (exclusions x2, date d'effet Optilife, OPTILIFE/OPTIVIE,
+décalage remise x2, ordre des colonnes, motif -- conflit avec la
+correction du 21/09 sur -AU/-IM) -- surveillance légère en place
+(vérification toutes les 60s côté session Claude, pas de rechargement
+d'agent complet) pour coder dès que le père de Raphaël répond.

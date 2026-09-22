@@ -512,3 +512,73 @@ _PERIODICITE_EXPLICATIONS = {
 
 def _explication_periodicite(raw: object) -> str:
     return _PERIODICITE_EXPLICATIONS.get(str(raw or "").strip().lower(), "")
+
+
+def explain_rules(rules: PrelevementRules) -> list[dict[str, str]]:
+    """Explique en français, pour affichage à l'écran, les règles
+    réellement appliquées par generate_mandats() ci-dessus -- demandé
+    par Raphaël (2026-09-22) pour pouvoir consulter ce que le moteur
+    applique sans lire le code, et repérer si une règle doit être
+    ajustée. SEULE SOURCE DE VÉRITÉ : décrit le comportement du code
+    tel qu'il est, jamais un texte séparé qui pourrait diverger --
+    toute règle ajoutée/modifiée ci-dessus doit mettre à jour cette
+    liste dans le MÊME commit."""
+    return [
+        {
+            "titre": "Exclusions (jamais envoyé en banque)",
+            "detail": (
+                "Mode de paiement autre que \"Prélèvement\" -- IBAN manquant ou "
+                "invalide (contrôle mod-97) -- RUM manquant -- \"Statut agent IA\" "
+                "contenant \"Refusé\" ou \"Annuler\" -- pas de date de premier "
+                "prélèvement renseignée -- aucun produit actif (tous les montants à 0)."
+            ),
+        },
+        {
+            "titre": "Un mandat par produit actif",
+            "detail": (
+                "Jamais un mandat combiné : un client avec 2 produits actifs "
+                "génère 2 lignes, chacune avec son propre montant et son propre "
+                "motif \"MGS-{RUM}{suffixe}\". Exception : MYJURIS et IMMO actifs "
+                "ensemble fusionnent en un seul mandat \"-J-AU\" (montants "
+                "additionnés, frais comptés 2 fois)."
+            ),
+        },
+        {
+            "titre": "First (1er prélèvement) vs RCUR (récurrent)",
+            "detail": (
+                "\"Statut agent IA\" commence par \"Notifié\" (notification "
+                "préalable obligatoire avant un prélèvement récurrent, règle "
+                "SEPA) -> RCUR. Sinon (vide, \"Validé par le client\", autre) -> "
+                "First."
+            ),
+        },
+        {
+            "titre": "Montant du mandat",
+            "detail": (
+                f"RCUR = valeur brute de la/les colonne(s) produit. First = "
+                f"valeur brute + {rules.frais_setup_eur:g}€ de frais de dossier "
+                f"PAR PRODUIT du mandat (réglable dans \"Réglages\" ci-dessus, "
+                f"jamais codé en dur). \"Total cotisation et frais de dossier\" "
+                f"du fichier source n'est jamais utilisé : vérifié qu'il ne "
+                f"correspond à aucun montant réel envoyé en banque."
+            ),
+        },
+        {
+            "titre": "Numéro de téléphone",
+            "detail": (
+                "Colonne \"Téléphone\" en priorité, repli sur \"Mobile\" si "
+                "vide. Un \".0\" ajouté par erreur (nombre au lieu de texte "
+                "dans le fichier source) est retiré -- jamais un chiffre "
+                "inventé. Si aucun numéro trouvé : le mandat part quand même, "
+                "avec une alerte visible dans le résumé (jamais bloquant)."
+            ),
+        },
+        {
+            "titre": "Date du premier prélèvement",
+            "detail": (
+                f"Jamais avant aujourd'hui + {rules.delay_days} jour(s) (réglable) : "
+                f"si la date prévue dans le fichier est déjà passée ou trop proche, "
+                f"repoussée à ce délai minimum."
+            ),
+        },
+    ]

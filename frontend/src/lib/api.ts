@@ -942,12 +942,15 @@ export function applyPipelineDedupe(orgId: string, sessionId: string, body: Pipe
 // administrateurs, comme le Cockpit.
 // ---------------------------------------------------------------
 
+export type PrelevementRuleExplanation = { titre: string; detail: string }
+
 export type PrelevementRules = {
   org_id: string
   ics: string | null
   nature: 'CORE' | 'B2B'
   delay_days: number
   frais_setup_eur: number
+  explication: PrelevementRuleExplanation[]
 }
 
 export function getPrelevementRules(orgId: string) {

@@ -960,8 +960,8 @@ export type PrelevementRules = {
   periodicites: Record<string, string>
   // Liste fixe des produits gérés par le moteur -- informative, jamais
   // éditable depuis l'écran (voir PROJECT_LOG.md, 2026-09-22 : couplée
-  // à la fusion spéciale MYJURIS+IMMO et au nom des colonnes de
-  // l'export CRM).
+  // au groupe de produits cumulés en un seul mandat et au nom des
+  // colonnes de l'export CRM).
   produits_connus: string[]
   explication: PrelevementRuleExplanation[]
 }

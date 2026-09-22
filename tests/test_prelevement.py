@@ -178,7 +178,6 @@ def test_generate_mandats_ooff_when_frais_present():
     vrai fichier de remise bancaire du Drive, jamais réutilisée)."""
     result = generate_mandats([_base_row()], PrelevementRules(), today=date(2026, 9, 21))
     assert len(result.ooff) == 1
-    assert len(result.rcur) == 0
     assert len(result.exclus) == 0
     mandat = result.ooff[0]
     assert mandat.type_sequence == "FRST"
@@ -199,19 +198,47 @@ def test_generate_mandats_ooff_when_frais_present():
     assert mandat.date_effet == ""
 
 
-def test_generate_mandats_rcur_when_notified():
-    """RCUR (récurrent) = valeur du produit TELLE QUELLE, jamais de
-    frais ajouté. Déclenché par "Statut agent IA" = "Notifié le ..." --
-    bug réel corrigé le 2026-09-22 (Raphaël : "aucun prélèvement n'est
-    récurrent") : l'ancienne règle ("Total frais de dossier" == 0)
-    faisait dépendre FRST/RCUR d'une colonne qui ne concordait qu'à 63%
-    avec le vrai historique des remises bancaires du Drive."""
-    row = _base_row(**{"Statut agent IA": "Notifié le 10/09/26"})
+def test_generate_mandats_always_pairs_frst_with_rcur():
+    """Depuis le 2026-09-22 (demande du père de Raphaël, question posée
+    et confirmée -- risque de double prélèvement signalé explicitement
+    avant de coder) : CHAQUE mandat génère systématiquement une ligne
+    FRST ET une ligne RCUR, peu importe "Statut agent IA" -- ce champ
+    ne sert plus qu'à l'exclusion (Refusé/Annuler), jamais à choisir
+    entre les deux. Remplace l'ancienne règle où "Notifié" déclenchait
+    RCUR seul (bug corrigé le 2026-09-22, cf. l'historique de ce
+    fichier) et où les autres statuts déclenchaient FRST seul."""
+    for statut in ("", "Validé par le client", "Notifié le 10/09/26"):
+        row = _base_row(**{"Statut agent IA": statut})
+        result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+        assert len(result.ooff) == 1, f"statut={statut!r}"
+        assert len(result.rcur) == 1, f"statut={statut!r}"
+        assert result.ooff[0].type_sequence == "FRST"
+        assert result.rcur[0].type_sequence == "RCUR"
+        # RCUR = valeur brute du produit, jamais de frais -- FRST = valeur
+        # + frais de dossier (20€ par défaut).
+        assert result.ooff[0].montant_eur == 119.0
+        assert result.rcur[0].montant_eur == 99.0
+        assert result.ooff[0].motif == result.rcur[0].motif == "MGS-RUM000001-O"
+
+
+def test_generate_mandats_rcur_date_shifted_by_periodicite():
+    """La date de la ligne RCUR = date du 1er prélèvement décalée de la
+    périodicité du contrat (demande du père de Raphaël, 2026-09-22) --
+    pas la même date que FRST."""
+    row = _base_row(**{"Périodicité (Mensuel/trimestre/annuel)             ": "Trimestrielle"})
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
-    assert len(result.rcur) == 1
-    assert len(result.ooff) == 0
-    assert result.rcur[0].type_sequence == "RCUR"
-    assert result.rcur[0].montant_eur == 99.0
+    assert result.ooff[0].date_premiere_echeance == "24/09/2026"
+    assert result.rcur[0].date_premiere_echeance == "24/12/2026"  # +3 mois
+    assert result.rcur[0].explication_periodicite == "Tous les 3 mois"
+
+
+def test_generate_mandats_rcur_date_defaults_to_one_month_for_unknown_periodicite():
+    """Une périodicité non reconnue (colonne vide/texte inattendu) ne
+    doit jamais faire échouer la génération -- repli à 1 mois, jamais
+    une exception bloquante pour une seule ligne mal renseignée."""
+    row = _base_row(**{"Périodicité (Mensuel/trimestre/annuel)             ": "???"})
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    assert result.rcur[0].date_premiere_echeance == "24/10/2026"  # +1 mois par défaut
 
 
 def test_generate_mandats_frais_setup_eur_is_adjustable():
@@ -278,7 +305,6 @@ def test_generate_mandats_splits_multi_product_client_into_separate_mandats():
     })
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
     assert len(result.ooff) == 2
-    assert len(result.rcur) == 0
     by_motif = {m.motif: m for m in result.ooff}
     assert set(by_motif) == {"MGS-1419267-O", "MGS-1419267-J"}
     # Montants réels vérifiés contre le vrai fichier de remise bancaire
@@ -289,14 +315,14 @@ def test_generate_mandats_splits_multi_product_client_into_separate_mandats():
 
 
 def test_generate_mandats_multi_product_rcur_matches_real_remise():
-    """Même client que ci-dessus, mais en récurrent (sans frais) --
-    montants RCUR vérifiés contre le vrai fichier de remise (49,90€ et
-    29,89€, exactement les valeurs brutes des colonnes produit)."""
+    """Même client que ci-dessus, ligne RCUR (générée systématiquement
+    en plus de FRST depuis le 2026-09-22) -- montants vérifiés contre
+    le vrai fichier de remise (49,90€ et 29,89€, exactement les valeurs
+    brutes des colonnes produit, sans frais)."""
     row = _base_row(**{
         "RUM": "1419267",
         "Optilife": 49.90,
         "MYJURIS & MYHOSPI": 29.89,
-        "Statut agent IA": "Notifié le 10/09/26",
     })
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
     assert len(result.rcur) == 2
@@ -320,10 +346,11 @@ def test_generate_mandats_immo_column_uses_au_suffix_not_im():
 
 def test_generate_mandats_myjuris_and_immo_bundle_into_one_mandat():
     """MYJURIS + IMMO actifs ensemble = UN SEUL mandat "-J-AU" (montants
-    additionnés, frais comptés 2 fois) -- seule exception à la règle
-    "un mandat par produit", confirmée sur 2 clients réels croisés avec
-    le vrai fichier de remise (RCUR = somme exacte des 2 colonnes, FRST
-    = RCUR + 2x les frais de dossier)."""
+    additionnés, frais comptés 2 fois) -- cas particulier du groupe de
+    cumul étendu le 2026-09-22 (voir test suivant pour le groupe
+    complet), confirmé sur 2 clients réels croisés avec le vrai fichier
+    de remise (RCUR = somme exacte des 2 colonnes, FRST = RCUR + 2x les
+    frais de dossier)."""
     row = _base_row(**{
         "RUM": "1425316",
         "Optilife": 99.0,
@@ -337,11 +364,42 @@ def test_generate_mandats_myjuris_and_immo_bundle_into_one_mandat():
     assert set(by_motif) == {"MGS-1425316-O", "MGS-1425316-J-AU"}
     assert by_motif["MGS-1425316-O"].montant_eur == 119.0  # 99 + 20
     assert by_motif["MGS-1425316-J-AU"].montant_eur == 65.80  # (19.90+5.90) + 2x20
+    # La ligne RCUR du mandat fusionné existe aussi, sans les frais.
+    rcur_fusion = next(m for m in result.rcur if m.motif == "MGS-1425316-J-AU")
+    assert rcur_fusion.montant_eur == 25.80  # 19.90 + 5.90, sans frais
+
+
+def test_generate_mandats_full_cumul_group_bundles_into_one_mandat():
+    """Le groupe de cumul étendu le 2026-09-22 (demande du père de
+    Raphaël, question posée et confirmée) : MYJURIS & MYHOSPI, Admin &
+    Aide a dom, Auditif, IMMO et VETO actifs ensemble fusionnent TOUS en
+    UN SEUL mandat, suffixe combiné dans l'ordre des produits connus
+    ("-J-AD-IM-AU-V"). Optilife reste hors du groupe, son propre
+    mandat."""
+    row = _base_row(**{
+        "RUM": "9000001",
+        "Optilife": 10.0,
+        "MYJURIS & MYHOSPI": 1.0,
+        "Admin & Aide a dom": 2.0,
+        "Auditif": 3.0,
+        "IMMO": 4.0,
+        "Total cotisation MYMO VETO SUR ": 5.0,
+        "Total frais de dossier": 120.0,  # 6 produits actifs x 20€
+    })
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    assert len(result.ooff) == 2  # Optilife seul + le groupe cumulé
+    by_motif = {m.motif: m for m in result.ooff}
+    assert set(by_motif) == {"MGS-9000001-O", "MGS-9000001-J-AD-IM-AU-V"}
+    # 1+2+3+4+5 = 15€ de produits, + 5x20€ de frais (un par produit du groupe)
+    assert by_motif["MGS-9000001-J-AD-IM-AU-V"].montant_eur == 115.0
+    rcur_groupe = next(m for m in result.rcur if m.motif == "MGS-9000001-J-AD-IM-AU-V")
+    assert rcur_groupe.montant_eur == 15.0  # sans frais
 
 
 def test_generate_mandats_myjuris_alone_stays_standalone():
-    """MYJURIS actif SEUL (sans IMMO) reste un mandat "-J" normal --
-    la fusion ne s'applique que si les DEUX sont actifs ensemble."""
+    """MYJURIS actif SEUL (aucun autre produit du groupe de cumul actif)
+    reste un mandat "-J" normal -- le cumul ne s'applique que si au
+    moins deux produits du groupe sont actifs ensemble."""
     row = _base_row(**{"Optilife": 0, "MYJURIS & MYHOSPI": 19.90, "Total frais de dossier": 20.0})
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
     assert len(result.ooff) == 1
@@ -351,7 +409,9 @@ def test_generate_mandats_myjuris_alone_stays_standalone():
 
 def test_generate_mandats_mandats_list_combines_ooff_and_rcur():
     """result.mandats (l'onglet "Mandat" combiné demandé par Raphaël)
-    contient bien tous les mandats générés, FRST et RCUR mélangés."""
+    contient bien tous les mandats générés, FRST et RCUR mélangés --
+    depuis le 2026-09-22, chaque mandat produit systématiquement les
+    deux."""
     row = _base_row(**{
         "RUM": "1419267",
         "Optilife": 49.90,
@@ -359,8 +419,10 @@ def test_generate_mandats_mandats_list_combines_ooff_and_rcur():
         "Total frais de dossier": 40.0,
     })
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
-    assert len(result.mandats) == 2
-    assert result.mandats == result.ooff
+    assert len(result.mandats) == 4  # 2 produits x (FRST + RCUR)
+    assert len(result.mandats) == len(result.ooff) + len(result.rcur)
+    assert all(m in result.mandats for m in result.ooff)
+    assert all(m in result.mandats for m in result.rcur)
 
 
 def test_generate_mandats_excludes_carte_bleue():
@@ -408,16 +470,6 @@ def test_generate_mandats_excludes_contract_to_cancel():
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
     assert result.ooff == [] and result.rcur == []
     assert len(result.exclus) == 1
-
-
-def test_generate_mandats_frst_when_statut_ia_blank_or_valide():
-    """Sans "Notifié" -- vide ou "Validé par le client" (première
-    validation, pas encore de cycle récurrent) -- reste FRST."""
-    for statut in ("", "Validé par le client"):
-        row = _base_row(**{"Statut agent IA": statut})
-        result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
-        assert len(result.ooff) == 1, f"statut={statut!r}"
-        assert result.ooff[0].type_sequence == "FRST"
 
 
 def test_generate_mandats_excludes_when_no_product_active():

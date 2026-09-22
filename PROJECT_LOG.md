@@ -3799,3 +3799,30 @@ Autre chantier ouvert en parallèle (pas commencé) : "Base de données :
 tenir à l'échelle (centaines de milliers/millions de lignes)" -- les
 données client sont en JSONB sans index dédié, à mesurer/indexer
 avant que le volume réel pose problème.
+
+### Faux signalement "mandats absents" + bug de lecture scripts/sql.sh (2026-09-22)
+
+Raphaël a signalé les mandats enregistrés absents de la Base de
+données. Vérifié directement en base (PostgREST, clé service_role) :
+les 74 mandats sont bien là, dans `trieur_data.prelevement_mandats`,
+org "Prélèvement" -- faux signalement, dû à la confusion entre l'onglet
+"Base de données" générique (table `records`, vide pour cet
+environnement, normal) et l'onglet "Mandats enregistrés" dans
+Prélèvement (la bonne vue, ajoutée en PR #59).
+
+En creusant, `scripts/sql.sh` avait un vrai bug de lecture : `exec_sql`
+(Jarvis-assistant, migration 0010) enveloppe la requête dans
+`select ... from (%s) as t` pour renvoyer les lignes -- un `;` final
+la rend syntaxiquement invalide, et la fonction retombe silencieusement
+sur un `EXECUTE` brut qui exécute bien le SELECT mais n'en récupère
+jamais le résultat (`rows: null`, sans erreur). Toutes mes lectures
+via ce script depuis son ajout renvoyaient donc `null`, jamais un vrai
+résultat -- corrigé en retirant le `;` final avant l'envoi. Ce bug
+touche potentiellement aussi Jarvis-assistant et melissa-nabet (même
+fonction, même script) -- pas corrigé là-bas, hors périmètre de ce
+dépôt.
+
+Chantiers "Détecter les doublons même sans IBAN" et "Calculer une
+colonne automatiquement" (thème Global/transverse) : mis en pause
+(`abandonne`) à la demande de Raphaël -- pas de besoin réel pour
+l'instant, priorité au concret (Prélèvement).

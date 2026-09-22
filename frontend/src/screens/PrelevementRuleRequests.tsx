@@ -471,7 +471,8 @@ export function PrelevementRuleRequests({
               <ActivityFeed events={r.events} />
               <div className="mt-1 flex items-center justify-between">
                 <span className="text-xs text-[var(--muted)]">
-                  Modifié le {new Date(r.updated_at).toLocaleDateString('fr-FR')}
+                  Créée le {formatEventTime(r.created_at)}
+                  {r.updated_at !== r.created_at && ` -- modifiée le ${formatEventTime(r.updated_at)}`}
                 </span>
                 {confirmingDeleteId === r.id ? (
                   <span className="flex items-center gap-1">

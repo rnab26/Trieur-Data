@@ -969,29 +969,25 @@ export function savePrelevementRules(
   })
 }
 
+export type PrelevementMandatRow = Record<string, string | number | null>
+
 export type PrelevementGenerateResult = {
   ooffCount: number
   rcurCount: number
   exclusCount: number
   steps: string[]
+  mandats: PrelevementMandatRow[]
+  filename: string
+  fileBase64: string
 }
 
-// Les en-têtes HTTP n'acceptent que de l'ASCII -- le résumé des étapes
-// (accents compris) arrive encodé en base64 UTF-8 depuis l'API.
-function decodeStepsHeader(raw: string | null): string[] {
-  if (!raw) return []
-  try {
-    const bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0))
-    return JSON.parse(new TextDecoder('utf-8').decode(bytes)) as string[]
-  } catch {
-    return []
-  }
-}
-
-// Envoie le fichier CRM brut, déclenche le téléchargement automatique
-// du classeur généré (3 onglets : OOFF/RCUR/Exclus), et renvoie les
-// compteurs (en-têtes de la réponse) pour que l'écran affiche un résumé
-// sans avoir à rouvrir le fichier téléchargé.
+// Envoie le fichier CRM brut et renvoie un aperçu du résultat (lignes de
+// l'onglet "Mandat" + résumé des étapes) SANS télécharger automatiquement
+// -- demandé par Raphaël (2026-09-22) : avant, le classeur se
+// téléchargeait directement, sans qu'on puisse voir le résultat avant de
+// l'enregistrer. Le classeur complet (4 onglets) revient encodé en
+// base64 ; downloadPrelevementFile ci-dessous le décode pour le
+// téléchargement, déclenché explicitement par un bouton "Télécharger".
 export async function generatePrelevementMandats(
   orgId: string,
   files: File[],
@@ -1007,24 +1003,47 @@ export async function generatePrelevementMandats(
   if (!res.ok) {
     return throwForErrorResponse(res)
   }
-  const blob = await safeReadBlob(res)
-  const disposition = res.headers.get('content-disposition') ?? ''
-  const match = /filename="?([^"]+)"?/.exec(disposition)
-  const filename = match ? match[1] : 'mandats.xlsx'
+  const data = (await res.json()) as {
+    counts: { ooff: number; rcur: number; exclus: number }
+    steps: string[]
+    mandats: PrelevementMandatRow[]
+    filename: string
+    file_base64: string
+  }
+  return {
+    ooffCount: data.counts.ooff,
+    rcurCount: data.counts.rcur,
+    exclusCount: data.counts.exclus,
+    steps: data.steps,
+    mandats: data.mandats,
+    filename: data.filename,
+    fileBase64: data.file_base64,
+  }
+}
 
+// Enregistre en base le lot de mandats affiché dans l'aperçu -- demandé
+// en anticipation de la future vue de consultation (chantier séparé).
+export function savePrelevementMandats(orgId: string, mandats: PrelevementMandatRow[]) {
+  return request<{ batch_id: string | null; n_saved: number }>(
+    `/orgs/${orgId}/prelevement/mandats`,
+    { method: 'POST', body: JSON.stringify({ mandats }) },
+  )
+}
+
+// Décode le classeur base64 renvoyé par generatePrelevementMandats et
+// déclenche son téléchargement -- séparé de la génération pour que
+// l'utilisateur puisse d'abord voir l'aperçu.
+export function downloadPrelevementFile(result: PrelevementGenerateResult) {
+  const bytes = Uint8Array.from(atob(result.fileBase64), (c) => c.charCodeAt(0))
+  const blob = new Blob([bytes], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = filename
+  a.download = result.filename
   document.body.appendChild(a)
   a.click()
   a.remove()
   URL.revokeObjectURL(url)
-
-  return {
-    ooffCount: Number(res.headers.get('x-ooff-count') ?? 0),
-    rcurCount: Number(res.headers.get('x-rcur-count') ?? 0),
-    exclusCount: Number(res.headers.get('x-exclus-count') ?? 0),
-    steps: decodeStepsHeader(res.headers.get('x-steps-b64')),
-  }
 }

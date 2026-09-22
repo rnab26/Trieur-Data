@@ -6,12 +6,19 @@ import { useAuth } from '@/lib/AuthContext'
 import { useOrgs } from '@/lib/useAccount'
 import {
   ApiError,
+  downloadPrelevementFile,
   generatePrelevementMandats,
   getPrelevementRules,
+  savePrelevementMandats,
   savePrelevementRules,
   type PrelevementGenerateResult,
   type PrelevementRules,
 } from '@/lib/api'
+
+// Nombre de lignes affichées dans l'aperçu -- au-delà, seul le fichier
+// téléchargé (via downloadPrelevementFile) montre tout, pour ne pas
+// rendre un tableau de centaines de lignes dans le navigateur mobile.
+const PREVIEW_ROW_LIMIT = 20
 
 // Génération des mandats de prélèvement -- reconstruit à partir du
 // fichier Excel du père de Raphaël (2026-09-21, voir PROJECT_LOG.md).
@@ -47,6 +54,9 @@ export function PrelevementScreen() {
   const [generating, setGenerating] = useState(false)
   const [generateError, setGenerateError] = useState<string | null>(null)
   const [result, setResult] = useState<PrelevementGenerateResult | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [savedCount, setSavedCount] = useState<number | null>(null)
 
   useEffect(() => {
     if (!orgId) return
@@ -124,6 +134,8 @@ export function PrelevementScreen() {
     setGenerating(true)
     setGenerateError(null)
     setResult(null)
+    setSaveError(null)
+    setSavedCount(null)
     try {
       const counts = await generatePrelevementMandats(orgId, selectedFiles)
       setResult(counts)
@@ -133,6 +145,20 @@ export function PrelevementScreen() {
       setGenerateError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
     } finally {
       setGenerating(false)
+    }
+  }
+
+  async function handleSaveToDatabase() {
+    if (!orgId || !result || result.mandats.length === 0) return
+    setSaving(true)
+    setSaveError(null)
+    try {
+      const saved = await savePrelevementMandats(orgId, result.mandats)
+      setSavedCount(saved.n_saved)
+    } catch (err) {
+      setSaveError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -336,12 +362,12 @@ export function PrelevementScreen() {
               </div>
               <div>
                 <Button onClick={() => void handleGenerate()} disabled={generating || selectedFiles.length === 0}>
-                  {generating ? 'Génération…' : '2. Générer et télécharger'}
+                  {generating ? 'Génération…' : '2. Générer un aperçu'}
                 </Button>
               </div>
               {generateError && <p className="text-sm text-[var(--danger)]">{generateError}</p>}
               {result && (
-                <div className="flex flex-col gap-2 rounded-md border border-[var(--border)] p-3">
+                <div className="flex flex-col gap-3 rounded-md border border-[var(--border)] p-3">
                   <p className="text-sm font-medium text-[var(--foreground)]">
                     Résumé du traitement
                   </p>
@@ -361,6 +387,60 @@ export function PrelevementScreen() {
                     Voir l'onglet "Exclus" du fichier téléchargé pour la raison précise de chaque
                     ligne exclue.
                   </p>
+
+                  {result.mandats.length > 0 ? (
+                    <div>
+                      <p className="mb-1 text-sm font-medium text-[var(--foreground)]">
+                        Aperçu ({Math.min(result.mandats.length, PREVIEW_ROW_LIMIT)} sur{' '}
+                        {result.mandats.length} mandat{result.mandats.length > 1 ? 's' : ''})
+                      </p>
+                      <div className="overflow-x-auto rounded-md border border-[var(--border)]">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="border-b border-[var(--border)] bg-[var(--muted-bg,transparent)]">
+                              {Object.keys(result.mandats[0]).map((col) => (
+                                <th key={col} className="whitespace-nowrap px-2 py-1 text-left font-medium">
+                                  {col}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {result.mandats.slice(0, PREVIEW_ROW_LIMIT).map((row, i) => (
+                              <tr key={i} className="border-b border-[var(--border)] last:border-b-0">
+                                {Object.keys(result.mandats[0]).map((col) => (
+                                  <td key={col} className="whitespace-nowrap px-2 py-1">
+                                    {row[col] ?? ''}
+                                  </td>
+                                ))}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-sm text-[var(--muted)]">Aucun mandat généré sur ce lot.</p>
+                  )}
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button onClick={() => downloadPrelevementFile(result)}>
+                      3. Télécharger le classeur (.xlsx)
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      onClick={() => void handleSaveToDatabase()}
+                      disabled={saving || result.mandats.length === 0}
+                    >
+                      {saving ? 'Enregistrement…' : 'Enregistrer dans la base de données'}
+                    </Button>
+                    {savedCount !== null && !saving && (
+                      <span className="text-sm text-[var(--foreground)]">
+                        ✅ {savedCount} mandat(s) enregistré(s)
+                      </span>
+                    )}
+                  </div>
+                  {saveError && <p className="text-sm text-[var(--danger)]">Erreur : {saveError}</p>}
                 </div>
               )}
             </CardContent>

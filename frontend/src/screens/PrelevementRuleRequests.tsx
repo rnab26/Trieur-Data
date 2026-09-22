@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -31,12 +31,21 @@ export function RuleQuestionBlock({
   const [comment, setComment] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Une option qui dit "préciser" n'est pas une réponse en soi -- juste
+  // cliquer dessus l'envoyait quand même, avec le champ libre encore
+  // vide la plupart du temps (bug réel signalé par Raphaël : des
+  // réponses "pas prises en compte", parce qu'elles partaient avant
+  // qu'il ait eu le temps de taper). Pour ces options-là, le clic
+  // n'envoie plus rien : il sélectionne l'option et donne le focus au
+  // champ, qui doit être rempli avant un bouton "Valider" séparé.
+  const [optionAPreciser, setOptionAPreciser] = useState<string | null>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
 
-  async function handleChoose(option: string) {
+  async function submit(option: string, commentaire: string | null) {
     setSubmitting(true)
     setError(null)
     try {
-      await answerPrelevementRuleRequestQuestion(orgId, requestId, question.id, option, comment.trim() || null)
+      await answerPrelevementRuleRequestQuestion(orgId, requestId, question.id, option, commentaire)
       onAnswered()
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
@@ -45,23 +54,52 @@ export function RuleQuestionBlock({
     }
   }
 
+  function handleChoose(option: string) {
+    if (option.toLowerCase().includes('préciser')) {
+      setOptionAPreciser(option)
+      // Laisse le temps au champ d'apparaître/se activer avant le focus.
+      setTimeout(() => inputRef.current?.focus(), 0)
+      return
+    }
+    void submit(option, comment.trim() || null)
+  }
+
+  function handleValiderPrecision() {
+    if (!optionAPreciser || !comment.trim()) return
+    void submit(optionAPreciser, comment.trim())
+  }
+
   return (
     <div className="mt-2 rounded-md border-2 border-[var(--danger)] bg-[var(--muted-bg)] p-3 text-sm">
       <p className="font-bold text-[var(--danger)]">🔴 Ta réponse est nécessaire</p>
       <p className="mt-1 font-medium">{question.question}</p>
       <div className="mt-2 flex flex-wrap gap-2">
         {question.options.map((option) => (
-          <Button key={option} type="button" variant="secondary" disabled={submitting} onClick={() => void handleChoose(option)}>
+          <Button
+            key={option}
+            type="button"
+            variant={optionAPreciser === option ? 'primary' : 'secondary'}
+            disabled={submitting}
+            onClick={() => handleChoose(option)}
+          >
             {option}
           </Button>
         ))}
       </div>
       <Input
+        ref={inputRef}
         className="mt-2"
-        placeholder="Préciser ta réponse (optionnel)…"
+        placeholder={optionAPreciser ? 'Écris ta précision ici, puis valide ci-dessous…' : 'Préciser ta réponse (optionnel)…'}
         value={comment}
         onChange={(e) => setComment(e.target.value)}
       />
+      {optionAPreciser && (
+        <div className="mt-2">
+          <Button type="button" disabled={submitting || !comment.trim()} onClick={handleValiderPrecision}>
+            {submitting ? 'Enregistrement…' : '✅ Valider cette réponse'}
+          </Button>
+        </div>
+      )}
       {error && <p className="mt-1 text-xs text-[var(--danger)]">Erreur : {error}</p>}
     </div>
   )
@@ -81,6 +119,38 @@ const STATUT_COLOR: Record<RuleRequestStatut, string> = {
   en_attente: 'text-[var(--muted)]',
   en_cours: 'text-[var(--primary)]',
   valide: 'text-[var(--success)]',
+}
+
+// Retour de Raphaël : certaines réponses données "ne sont pas prises en
+// compte et je ne les retrouve pas" -- une fois répondue, une question
+// disparaît complètement de l'écran (remplacée par le statut), sans
+// aucune trace de ce qui a été répondu. Repliable pour ne pas polluer
+// visuellement une demande déjà validée.
+function AnsweredQuestions({ questions }: { questions: RuleRequestQuestion[] }) {
+  const [open, setOpen] = useState(false)
+  if (questions.length === 0) return null
+  return (
+    <div className="mt-1">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="text-xs text-[var(--muted)] hover:text-[var(--foreground)]"
+      >
+        {open ? '▲' : '▼'} {questions.length} réponse{questions.length > 1 ? 's' : ''} donnée{questions.length > 1 ? 's' : ''}
+      </button>
+      {open && (
+        <ul className="mt-1 flex flex-col gap-2">
+          {questions.map((q) => (
+            <li key={q.id} className="rounded-md border border-[var(--border)] bg-[var(--card)] p-2 text-xs">
+              <p className="text-[var(--muted)]">{q.question}</p>
+              <p className="mt-1 font-medium">→ {q.answer}</p>
+              {q.comment && <p className="mt-0.5 text-[var(--muted)]">Précision : {q.comment}</p>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
 }
 
 // Demandes de modification des règles codées en dur du moteur
@@ -121,6 +191,25 @@ export function PrelevementRuleRequests({
   // logique de récupération.
   const [reloadNonce, setReloadNonce] = useState(0)
 
+  // Bug réel signalé par Raphaël ("la page saute et je dois revenir
+  // dessus") : répondre à une question, créer une demande ou modifier
+  // un champ recharge toute la liste -- la carte concernée change de
+  // hauteur (question qui disparaît, nouvelle carte qui apparaît...),
+  // ce qui déplace tout ce qui est en dessous et fait sauter le
+  // scroll. markScroll() note la position juste avant une action qui va
+  // recharger ; le useLayoutEffect la restaure juste après, avant que
+  // le navigateur peigne le nouveau rendu (donc sans clignotement).
+  const scrollToRestore = useRef<number | null>(null)
+  function markScroll() {
+    scrollToRestore.current = window.scrollY
+  }
+  useLayoutEffect(() => {
+    if (scrollToRestore.current !== null) {
+      window.scrollTo(0, scrollToRestore.current)
+      scrollToRestore.current = null
+    }
+  })
+
   useEffect(() => {
     let cancelled = false
     setLoading(true)
@@ -148,6 +237,7 @@ export function PrelevementRuleRequests({
     const titre = newTitre.trim()
     const demande = newDemande.trim()
     if (!titre || !demande) return
+    markScroll()
     setCreating(true)
     setError(null)
     try {
@@ -163,6 +253,7 @@ export function PrelevementRuleRequests({
   }
 
   async function persist(id: string, patch: Partial<{ titre: string; demande: string; statut: RuleRequestStatut }>) {
+    markScroll()
     setSavingId(id)
     setError(null)
     try {
@@ -176,6 +267,7 @@ export function PrelevementRuleRequests({
   }
 
   async function handleDelete(id: string) {
+    markScroll()
     setSavingId(id)
     setError(null)
     try {
@@ -191,6 +283,18 @@ export function PrelevementRuleRequests({
 
   const nonValidees = requests.filter((r) => r.statut !== 'valide').length
   const nbPendingQuestions = requests.reduce((n, r) => n + r.questions.filter((q) => !q.answered_at).length, 0)
+  // Comment éviter les doublons de règles (retour de Raphaël) : avertit
+  // dès que le titre en cours de frappe ressemble à une demande déjà
+  // créée, avant même de cliquer "Ajouter" -- jamais bloquant, juste un
+  // signal pour éviter d'ouvrir une deuxième demande sur le même sujet.
+  const newTitreNorm = newTitre.trim().toLowerCase()
+  const similarExistingTitres =
+    newTitreNorm.length < 3
+      ? []
+      : requests.filter((r) => {
+          const t = r.titre.trim().toLowerCase()
+          return t === newTitreNorm || t.includes(newTitreNorm) || newTitreNorm.includes(t)
+        })
 
   return (
     <div className="mt-2 border-t border-[var(--border)] pt-3">
@@ -281,9 +385,13 @@ export function PrelevementRuleRequests({
                   orgId={orgId}
                   requestId={r.id}
                   question={q}
-                  onAnswered={() => setReloadNonce((n) => n + 1)}
+                  onAnswered={() => {
+                    markScroll()
+                    setReloadNonce((n) => n + 1)
+                  }}
                 />
               ))}
+              <AnsweredQuestions questions={r.questions.filter((q) => q.answered_at)} />
               <div className="mt-1 flex items-center justify-between">
                 <span className="text-xs text-[var(--muted)]">
                   Modifié le {new Date(r.updated_at).toLocaleDateString('fr-FR')}
@@ -322,6 +430,28 @@ export function PrelevementRuleRequests({
           value={newTitre}
           onChange={(e) => setNewTitre(e.target.value)}
         />
+        {similarExistingTitres.length > 0 && (
+          <div className="rounded-md border border-[var(--primary)] bg-[var(--muted-bg)] p-2 text-xs">
+            <p className="font-medium">
+              ⚠️ Une demande avec un nom proche existe déjà -- pour éviter un doublon, ajoute plutôt ta
+              précision dans la demande existante (déroule "Historique des demandes" ci-dessus) :
+            </p>
+            <ul className="mt-1 list-disc pl-4">
+              {similarExistingTitres.map((r) => (
+                <li key={r.id}>
+                  "{r.titre}" ({STATUT_LABEL[r.statut]})
+                </li>
+              ))}
+            </ul>
+            <button
+              type="button"
+              onClick={() => setHistoryOpen(true)}
+              className="mt-1 text-[var(--primary)] hover:underline"
+            >
+              Voir l'historique
+            </button>
+          </div>
+        )}
         <textarea
           className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] p-2 text-sm"
           rows={2}

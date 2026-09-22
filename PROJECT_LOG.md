@@ -3957,48 +3957,42 @@ Déploiement Render vérifié "live" en direct après chaque merge (pas
 seulement la CI, qui ne teste que le backend Python) -- pratique
 adoptée depuis le raté de la PR #63/#64.
 
-### 🔴 BLOQUANT DÉCOUVERT : le backend Render ne déploie PAS `main` (2026-09-22)
+### ⚠️ FAUSSE ALERTE corrigée : le vrai backend est bien sur `main` (2026-09-22)
 
-En vérifiant le déploiement de la PR #68 (FRST), découverte que le
-service backend `trieur-data-api-test` (`srv-dami383m8hqs73d7v7jg`)
-est configuré sur la branche `fix/pipeline-full-parity`, pas `main` --
-alors que le frontend statique `trieur-data-app-test`
-(`srv-dami3b740ujc73b19j0g`) est bien sur `main`. Les deux branches
-ont divergé depuis le 18 sept. (`fix/pipeline-full-parity` a 17
-commits que `main` n'a pas ; `main` en a 121 que l'autre n'a pas).
+**Correction d'une erreur de diagnostic faite plus tôt dans cette même
+session** (le bloc ci-dessus l'affirmait à tort "BLOQUANT DÉCOUVERT").
+En vérifiant le déploiement de la PR #68, j'ai contrôlé le service
+`trieur-data-api-test` (`srv-dami383m8hqs73d7v7jg`, sur la branche
+périmée `fix/pipeline-full-parity`) et j'ai conclu que TOUT le module
+Prélèvement n'avait jamais été accessible en production. **C'était le
+mauvais service.** Le frontend réel (bundle JS de production
+inspecté) appelle en fait `https://trieur-data.onrender.com`, service
+`trieur-data` (`srv-dam321ff3r2c73ea13p0`) -- celui-là EST bien
+configuré sur `main`, `autoDeploy` actif, et son `/openapi.json`
+contient bien toutes les routes `/prelevement/*`. `trieur-data-api-test`
+est un service de test laissé de côté depuis la création du repo,
+jamais appelé par aucun frontend déployé -- sans rapport avec la
+production réelle.
 
-**Conséquence réelle, vérifiée** : `GET
-https://trieur-data-api-test.onrender.com/openapi.json` ne contient
-AUCUNE route `/prelevement/*` ni `/prelevement/rule-requests/*`. Le
-backend en ligne date d'avant la création du module Prélèvement
-entier. Donc : tout le travail Prélèvement (PR #47 à #68 -- génération
-de mandats SEPA, réglages, demandes de modification de règles,
-système de questions...) tourne bien sur `main`/en local/en test, mais
-n'a **jamais été accessible en production** -- le frontend affiche
-l'écran, mais chaque appel API échoue (404) contre le vrai backend
-déployé.
+**Root cause de mon erreur** : je n'ai jamais vérifié quelle URL le
+frontend appelle réellement (`VITE_API_URL`, baked dans le bundle) --
+j'ai juste supposé, par ressemblance de nom ("-test" vs "-test"), que
+`trieur-data-api-test` était le pendant backend de
+`trieur-data-app-test`. Faux : le frontend de test appelle le backend
+de PRODUCTION (`trieur-data`, sans suffixe). **Leçon pour toute
+session future sur ce repo** : pour vérifier quel backend est
+réellement utilisé, inspecter le bundle JS déployé
+(`grep -o 'https://[^"]*onrender\.com' dist/assets/index-*.js` ou
+équivalent sur le bundle servi), jamais deviner par le nom du service
+Render.
 
-**Pas de correctif possible sans clic** : aucun outil MCP Render
-disponible dans cette session ne permet de changer la branche d'un
-service existant (`get_service`/`list_services`/`trigger_deploy`/
-`update_environment_variables` -- rien pour PATCH le champ `branch`).
-Le token API Render n'est pas exposé dans l'environnement Bash non
-plus (aucun accès direct à l'API REST Render en contournement). Un
-vrai blocage technique, pas une préférence -- signalé à Raphaël pour
-qu'il fasse le changement (2 min, une seule fois) :
-
-1. https://dashboard.render.com/web/srv-dami383m8hqs73d7v7jg/settings
-2. Section "Build & Deploy" → champ "Branch"
-3. Remplacer `fix/pipeline-full-parity` par `main`
-4. Enregistrer -- `autoDeploy` est déjà activé, le déploiement de
-   `main` démarre automatiquement après l'enregistrement
-
-**À faire après ce changement, dans une session suivante** : vérifier
-que le déploiement backend passe "live", que `/openapi.json` contient
-bien les routes `/prelevement/*`, tester un vrai appel `/prelevement/
-generate` en production, et ne marquer `ed9c74b4` (FRST) "validé" et
-les autres chantiers "prêts pour la banque" qu'à partir de là -- rien
-de tout ça n'a jamais été testé en conditions réelles jusqu'ici.
+Le module Prélèvement (PR #47 à #69) EST donc bien accessible en
+production depuis sa création -- le "bloquant" annoncé plus tôt dans
+cette session (message à Raphaël compris) était une fausse alerte,
+maintenant corrigée. Prochaine session : vérifier un vrai appel
+`/prelevement/generate` en production sur
+`https://trieur-data.onrender.com` avant de marquer un chantier "prêt
+pour la banque".
 
 ### PR #69 : cumul de produits étendu + FRST/RCUR systématiques (2026-09-22)
 

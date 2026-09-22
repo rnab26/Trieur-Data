@@ -7,7 +7,7 @@ import {
   useSensors,
   type DragEndEvent,
 } from '@dnd-kit/core'
-import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
+import { SortableContext, horizontalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -63,18 +63,36 @@ const PREVIEW_ROW_LIMIT = 20
 // par Raphaël, 2026-09-21).
 const PRELEVEMENT_ORG_NAME = 'Prélèvement'
 
-// Une ligne réordonnable par glisser-déposer (Raphaël, 2026-09-22:
-// "plus pratique" que des flèches ↑↓) -- la poignée ⠿ est la seule zone
-// qui déclenche le drag, pour que cocher/décocher la case au doigt ne
-// déclenche jamais un glissement accidentel.
-function SortableColonneMandatRow({
+// A, B, C... Z, AA, AB... -- juste des repères visuels façon tableur,
+// comme demandé (Raphaël, 2026-09-22 : "les colonnes A, B, C etc"),
+// jamais une clé utilisée pour quoi que ce soit côté données.
+function lettreExcel(index: number): string {
+  let n = index
+  let s = ''
+  do {
+    s = String.fromCharCode(65 + (n % 26)) + s
+    n = Math.floor(n / 26) - 1
+  } while (n >= 0)
+  return s
+}
+
+// Une cellule d'en-tête de colonne, réordonnable par glisser-déposer
+// HORIZONTAL (Raphaël, 2026-09-22 : "un tableau Excel vraiment dans
+// l'aperçu" -- remplace l'ancienne liste verticale). La poignée ⠿ est
+// la seule zone qui déclenche le drag, pour que cocher/décocher la
+// case au doigt ne déclenche jamais un glissement accidentel.
+function SortableColonneMandatCell({
   colonne,
+  lettre,
+  note,
   removable,
   onToggleVisible,
   onRemove,
   onRename,
 }: {
   colonne: ColonneMandat
+  lettre: string
+  note: string
   removable: boolean
   onToggleVisible: () => void
   onRemove: () => void
@@ -100,58 +118,70 @@ function SortableColonneMandatRow({
   }
 
   return (
-    <li
+    <div
       ref={setNodeRef}
       style={{ transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1 }}
-      className="flex items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-1"
+      className={
+        'flex w-40 flex-shrink-0 flex-col border-r border-b border-[var(--border)] bg-[var(--card)] ' +
+        (colonne.visible ? '' : 'opacity-50')
+      }
     >
-      <span
-        {...attributes}
-        {...listeners}
-        className="touch-none cursor-grab select-none px-1 text-[var(--muted)]"
-        aria-label="Glisser pour réordonner"
-      >
-        ⠿
-      </span>
-      <input type="checkbox" checked={colonne.visible} onChange={onToggleVisible} />
-      {renaming ? (
-        <Input
-          autoFocus
-          className="h-7 flex-1 px-2 py-0.5 text-sm"
-          value={draftName}
-          onChange={(e) => setDraftName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') commitRename()
-            if (e.key === 'Escape') setRenaming(false)
-          }}
-          onBlur={commitRename}
-        />
-      ) : (
-        <span className={'flex-1 text-sm ' + (colonne.visible ? '' : 'text-[var(--muted)] line-through')}>
-          {colonne.cle}
+      <div className="flex items-center justify-between border-b border-[var(--border)] bg-[var(--muted-bg)] px-1.5 py-0.5">
+        <span className="text-[0.65rem] font-bold text-[var(--muted)]">{lettre}</span>
+        <span
+          {...attributes}
+          {...listeners}
+          className="touch-none cursor-grab select-none px-1 text-[var(--muted)]"
+          aria-label={`Glisser pour réordonner la colonne ${colonne.cle}`}
+        >
+          ⠿
         </span>
-      )}
-      {removable && !renaming && (
-        <>
-          <button
-            type="button"
-            onClick={startRename}
-            className="px-1 text-[var(--muted)] hover:text-[var(--foreground)]"
-            aria-label={`Renommer la colonne ${colonne.cle}`}
-          >
-            ✏️
-          </button>
-          <button
-            type="button"
-            onClick={onRemove}
-            className="px-1 text-[var(--danger)] hover:opacity-70"
-            aria-label={`Supprimer la colonne ${colonne.cle}`}
-          >
-            🗑️
-          </button>
-        </>
-      )}
-    </li>
+      </div>
+      <div className="flex flex-1 flex-col gap-1 p-1.5">
+        {renaming ? (
+          <Input
+            autoFocus
+            className="h-7 px-2 py-0.5 text-xs"
+            value={draftName}
+            onChange={(e) => setDraftName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commitRename()
+              if (e.key === 'Escape') setRenaming(false)
+            }}
+            onBlur={commitRename}
+          />
+        ) : (
+          <span className={'text-xs font-medium ' + (colonne.visible ? '' : 'line-through')}>{colonne.cle}</span>
+        )}
+        <p className="text-[0.65rem] leading-tight text-[var(--muted)]">{note}</p>
+        <div className="mt-auto flex items-center gap-1.5 pt-1">
+          <label className="flex items-center gap-1 text-[0.65rem] text-[var(--muted)]">
+            <input type="checkbox" checked={colonne.visible} onChange={onToggleVisible} />
+            visible
+          </label>
+          {removable && !renaming && (
+            <>
+              <button
+                type="button"
+                onClick={startRename}
+                className="ml-auto px-0.5 text-[var(--muted)] hover:text-[var(--foreground)]"
+                aria-label={`Renommer la colonne ${colonne.cle}`}
+              >
+                ✏️
+              </button>
+              <button
+                type="button"
+                onClick={onRemove}
+                className="px-0.5 text-[var(--danger)] hover:opacity-70"
+                aria-label={`Supprimer la colonne ${colonne.cle}`}
+              >
+                🗑️
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -185,6 +215,10 @@ export function PrelevementScreen() {
   // Sert seulement à savoir quelle colonne est supprimable (canonique =
   // jamais) -- voir "colonnes_mandat_canoniques" dans PrelevementRules.
   const [colonnesMandatCanoniques, setColonnesMandatCanoniques] = useState<string[]>([])
+  // D'où vient la valeur de chaque colonne canonique (Raphaël,
+  // 2026-09-22 : "je sais à quelle colonne s'attribue ces règles") --
+  // affiché sous le nom dans l'aperçu, source unique côté API.
+  const [colonnesMandatNotes, setColonnesMandatNotes] = useState<Record<string, string>>({})
   // Jeux de colonnes réutilisables (Raphaël, 2026-09-22 : "comme on
   // avait sur Streamlit") -- indépendant du chargement des réglages
   // (rules), pour ne pas coupler deux ressources qui n'ont rien à voir
@@ -194,6 +228,7 @@ export function PrelevementScreen() {
   const [savingPreset, setSavingPreset] = useState(false)
   const [deletingPresetId, setDeletingPresetId] = useState<string | null>(null)
   const [presetError, setPresetError] = useState<string | null>(null)
+  const [presetsPanelOpen, setPresetsPanelOpen] = useState(false)
   const [newPeriodiciteCode, setNewPeriodiciteCode] = useState('')
   const [newPeriodiciteTexte, setNewPeriodiciteTexte] = useState('')
   const [savingRules, setSavingRules] = useState(false)
@@ -298,6 +333,7 @@ export function PrelevementScreen() {
         setPeriodicites(data.periodicites)
         setColonnesMandat(data.colonnes_mandat)
         setColonnesMandatCanoniques(data.colonnes_mandat_canoniques)
+        setColonnesMandatNotes(data.colonnes_mandat_notes)
       })
       .catch((err: unknown) => {
         if (!cancelled) setRulesError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
@@ -815,33 +851,129 @@ export function PrelevementScreen() {
                     </div>
 
                   <div>
-                    <p className="mb-1 text-sm font-medium text-[var(--foreground)]">
-                      Colonnes du fichier de mandats -- glisse ⠿ pour réordonner, case à cocher pour
-                      masquer/afficher.
-                    </p>
-                    <DndContext
-                      sensors={dndSensors}
-                      collisionDetection={closestCenter}
-                      onDragEnd={handleColonneMandatDragEnd}
-                    >
-                      <SortableContext
-                        items={colonnesMandat.map((c) => c.cle)}
-                        strategy={verticalListSortingStrategy}
-                      >
-                        <ul className="flex flex-col gap-1">
-                          {colonnesMandat.map((c) => (
-                            <SortableColonneMandatRow
-                              key={c.cle}
-                              colonne={c}
-                              removable={!colonnesMandatCanoniques.includes(c.cle)}
-                              onToggleVisible={() => toggleColonneMandatVisible(c.cle)}
-                              onRemove={() => removeColonneMandatPersonnalisee(c.cle)}
-                              onRename={(nouveauNom) => renameColonneMandatPersonnalisee(c.cle, nouveauNom)}
+                    <div className="mb-1 flex items-center justify-between gap-2">
+                      <p className="text-sm font-medium text-[var(--foreground)]">
+                        Aperçu du fichier de mandats -- glisse ⠿ pour réordonner une colonne, décoche
+                        pour la masquer.
+                      </p>
+                      <Button variant="secondary" onClick={() => setPresetsPanelOpen((v) => !v)}>
+                        ⚙️ Jeux de colonnes
+                      </Button>
+                    </div>
+
+                    <div className="flex items-start gap-3">
+                      {/* Façon tableur (Raphaël, 2026-09-22 : "un tableau Excel
+                          vraiment dans l'aperçu") -- lettres A, B, C... en repère
+                          visuel au-dessus de chaque colonne, quelques lignes vides
+                          très légères en dessous pour montrer la forme du fichier
+                          sans données réelles. */}
+                      <div className="overflow-x-auto rounded-md border border-[var(--border)]">
+                        <DndContext
+                          sensors={dndSensors}
+                          collisionDetection={closestCenter}
+                          onDragEnd={handleColonneMandatDragEnd}
+                        >
+                          <SortableContext
+                            items={colonnesMandat.map((c) => c.cle)}
+                            strategy={horizontalListSortingStrategy}
+                          >
+                            <div className="flex">
+                              {colonnesMandat.map((c, i) => (
+                                <SortableColonneMandatCell
+                                  key={c.cle}
+                                  colonne={c}
+                                  lettre={lettreExcel(i)}
+                                  note={
+                                    colonnesMandatNotes[c.cle] ??
+                                    'Colonne personnalisée -- toujours vide, à remplir après export.'
+                                  }
+                                  removable={!colonnesMandatCanoniques.includes(c.cle)}
+                                  onToggleVisible={() => toggleColonneMandatVisible(c.cle)}
+                                  onRemove={() => removeColonneMandatPersonnalisee(c.cle)}
+                                  onRename={(nouveauNom) => renameColonneMandatPersonnalisee(c.cle, nouveauNom)}
+                                />
+                              ))}
+                            </div>
+                          </SortableContext>
+                        </DndContext>
+                        {[0, 1, 2].map((ligne) => (
+                          <div key={ligne} className="flex opacity-30">
+                            {colonnesMandat.map((c) => (
+                              <div
+                                key={c.cle}
+                                className="h-5 w-40 flex-shrink-0 border-r border-b border-[var(--border)]"
+                              />
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Jeux de colonnes réutilisables (Raphaël, 2026-09-22 :
+                          "comme on avait sur Streamlit") -- petit panneau à CÔTÉ
+                          de l'aperçu, pas un écran à part : appliquer un jeu
+                          remplace juste les colonnes ci-dessus (il faut encore
+                          "Enregistrer les réglages" pour que ça s'applique
+                          vraiment au générateur, comme toute autre modification). */}
+                      {presetsPanelOpen && (
+                        <div className="w-56 flex-shrink-0 rounded-md border border-[var(--border)] bg-[var(--card)] p-2">
+                          <p className="mb-1 text-xs font-medium text-[var(--foreground)]">
+                            Jeux de colonnes -- clique pour appliquer.
+                          </p>
+                          {colonnesMandatPresets.length === 0 && (
+                            <p className="text-xs text-[var(--muted)]">Aucun jeu enregistré pour l'instant.</p>
+                          )}
+                          {colonnesMandatPresets.length > 0 && (
+                            <ul className="flex flex-col gap-1">
+                              {colonnesMandatPresets.map((p) => (
+                                <li
+                                  key={p.id}
+                                  className="flex items-center gap-1 rounded-md border border-[var(--border)] py-0.5 pl-1.5 pr-0.5 text-xs"
+                                >
+                                  <button
+                                    type="button"
+                                    onClick={() => applyColonnesMandatPreset(p)}
+                                    className="flex-1 text-left hover:text-[var(--primary)]"
+                                  >
+                                    {p.name} ({p.colonnes.filter((c) => c.visible).length})
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleDeleteColonnesMandatPreset(p.id)}
+                                    disabled={deletingPresetId === p.id}
+                                    className="px-1 text-[var(--danger)] hover:opacity-70"
+                                    aria-label={`Supprimer le jeu ${p.name}`}
+                                  >
+                                    🗑️
+                                  </button>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                          <div className="mt-2 flex flex-col gap-1.5">
+                            <Input
+                              placeholder="Nom du jeu (ex. Export banque)"
+                              className="h-8 px-2 py-1"
+                              value={newPresetName}
+                              onChange={(e) => setNewPresetName(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') void handleSaveColonnesMandatPreset()
+                              }}
                             />
-                          ))}
-                        </ul>
-                      </SortableContext>
-                    </DndContext>
+                            <Button
+                              variant="secondary"
+                              onClick={() => void handleSaveColonnesMandatPreset()}
+                              disabled={savingPreset || !newPresetName.trim()}
+                            >
+                              {savingPreset ? 'Enregistrement…' : '💾 Enregistrer la liste actuelle'}
+                            </Button>
+                          </div>
+                          {presetError && (
+                            <p className="mt-1 text-xs text-[var(--danger)]">Erreur : {presetError}</p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
                     <div className="mt-2 flex items-center gap-2">
                       <Input
                         placeholder="Nom de la nouvelle colonne (ex. Code société)"
@@ -860,70 +992,6 @@ export function PrelevementScreen() {
                       Une colonne ajoutée est toujours vide dans le fichier généré (aucune source dans le
                       CRM) -- à remplir toi-même après export.
                     </p>
-
-                    {/* Jeux de colonnes réutilisables (Raphaël, 2026-09-22 :
-                        "comme on avait sur Streamlit") -- dans le MÊME bloc que
-                        la liste ci-dessus, pas un écran à part : appliquer un
-                        jeu remplace juste la liste de travail ci-dessus (il
-                        faut encore "Enregistrer les réglages" pour que ça
-                        s'applique vraiment au générateur, comme toute autre
-                        modification de cette liste). */}
-                    <div className="mt-3 border-t border-dashed border-[var(--border)] pt-2">
-                      <p className="mb-1 text-xs font-medium text-[var(--foreground)]">
-                        Jeux de colonnes enregistrés -- clique pour appliquer à la liste ci-dessus.
-                      </p>
-                      {colonnesMandatPresets.length === 0 && (
-                        <p className="text-xs text-[var(--muted)]">Aucun jeu enregistré pour l'instant.</p>
-                      )}
-                      {colonnesMandatPresets.length > 0 && (
-                        <ul className="flex flex-wrap gap-1.5">
-                          {colonnesMandatPresets.map((p) => (
-                            <li
-                              key={p.id}
-                              className="flex items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--card)] py-0.5 pl-2.5 pr-1 text-xs"
-                            >
-                              <button
-                                type="button"
-                                onClick={() => applyColonnesMandatPreset(p)}
-                                className="hover:text-[var(--primary)]"
-                              >
-                                {p.name} ({p.colonnes.filter((c) => c.visible).length})
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => void handleDeleteColonnesMandatPreset(p.id)}
-                                disabled={deletingPresetId === p.id}
-                                className="px-1 text-[var(--danger)] hover:opacity-70"
-                                aria-label={`Supprimer le jeu ${p.name}`}
-                              >
-                                🗑️
-                              </button>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                      <div className="mt-2 flex items-center gap-2">
-                        <Input
-                          placeholder="Nom du jeu (ex. Export banque)"
-                          className="h-8 max-w-xs px-2 py-1"
-                          value={newPresetName}
-                          onChange={(e) => setNewPresetName(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') void handleSaveColonnesMandatPreset()
-                          }}
-                        />
-                        <Button
-                          variant="secondary"
-                          onClick={() => void handleSaveColonnesMandatPreset()}
-                          disabled={savingPreset || !newPresetName.trim()}
-                        >
-                          {savingPreset ? 'Enregistrement…' : '💾 Enregistrer la liste actuelle sous ce nom'}
-                        </Button>
-                      </div>
-                      {presetError && (
-                        <p className="mt-1 text-xs text-[var(--danger)]">Erreur : {presetError}</p>
-                      )}
-                    </div>
                   </div>
 
                   <div>

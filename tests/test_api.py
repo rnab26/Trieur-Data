@@ -1715,6 +1715,18 @@ def test_prelevement_rules_defaults_colonnes_mandat_to_full_canonical_order(clie
     assert all(c["visible"] for c in colonnes)
 
 
+def test_prelevement_rules_colonnes_mandat_notes_cover_every_canonical_column(client_factory):
+    """"je sais à quelle colonne s'attribue ces règles" (Raphaël,
+    2026-09-22) -- une note pour CHAQUE colonne canonique, jamais une
+    colonne sans explication affichable sur l'aperçu."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.get("/orgs/org-1/prelevement/rules", headers={"Authorization": f"Bearer {TOKEN}"})
+    notes = res.json()["colonnes_mandat_notes"]
+    assert set(notes.keys()) == set(MANDAT_COLONNES_CANONIQUES)
+    assert all(v.strip() for v in notes.values())
+
+
 def test_prelevement_rules_roundtrip_colonnes_mandat(client_factory):
     fake = _make_client(profiles=[ADMIN_PROFILE])
     tc = client_factory(fake)

@@ -1627,6 +1627,104 @@ def test_prelevement_rules_forbidden_for_non_admin(client_factory):
     assert res.status_code == 403
 
 
+def test_prelevement_rules_prefills_frais_par_produit_and_periodicites(client_factory):
+    """Frais par produit et libellés de périodicité (Raphaël, 2026-09-22) :
+    tant que rien n'a été personnalisé, l'écran doit montrer ce qui
+    s'applique RÉELLEMENT (frais_setup_eur pour chaque produit connu,
+    libellés par défaut du moteur) -- jamais un écran vide."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.get("/orgs/org-1/prelevement/rules", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 200
+    body = res.json()
+    assert set(body["produits_connus"]) == set(body["frais_par_produit"].keys())
+    assert all(v == 20.0 for v in body["frais_par_produit"].values())
+    assert body["periodicites"]["mensuelle"] == "Tous les 1 mois"
+
+
+def test_prelevement_rules_roundtrip_frais_par_produit_and_periodicites(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    res = tc.post(
+        "/orgs/org-1/prelevement/rules",
+        json={
+            "frais_par_produit": {"Optilife": 30.0, "Carte MGS": 25.0},
+            "periodicites": {"mensuelle": "Chaque mois"},
+        },
+        headers=headers,
+    )
+    assert res.status_code == 200
+    assert res.json()["frais_par_produit"] == {"Optilife": 30.0, "Carte MGS": 25.0}
+    assert res.json()["periodicites"] == {"mensuelle": "Chaque mois"}
+
+    res = tc.get("/orgs/org-1/prelevement/rules", headers=headers)
+    body = res.json()
+    assert body["frais_par_produit"]["Optilife"] == 30.0
+    # Produit non personnalisé : absent du dict enregistré -- pas de
+    # pré-remplissage une fois qu'au moins un réglage existe (le dict
+    # enregistré en base fait foi tel quel, jamais complété en silence).
+    assert "IMMO" not in body["frais_par_produit"]
+    assert body["periodicites"] == {"mensuelle": "Chaque mois"}
+
+
+def test_prelevement_rules_rejects_unknown_produit(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/prelevement/rules",
+        json={"frais_par_produit": {"Produit inventé": 10.0}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_prelevement_rules_rejects_negative_frais_par_produit(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/prelevement/rules",
+        json={"frais_par_produit": {"Optilife": -1.0}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_prelevement_rules_rejects_empty_periodicite_explication(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/prelevement/rules",
+        json={"periodicites": {"mensuelle": "   "}},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_prelevement_generate_uses_frais_par_produit(client_factory):
+    """Bout en bout : les frais par produit enregistrés s'appliquent
+    réellement à la génération, pas seulement à l'affichage."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    res = tc.post(
+        "/orgs/org-1/prelevement/rules",
+        json={"frais_par_produit": {"Optilife": 30.0}},
+        headers=headers,
+    )
+    assert res.status_code == 200
+
+    res = tc.post(
+        "/orgs/org-1/prelevement/generate",
+        files=[("files", ("export.csv", _PRELEVEMENT_CSV, "text/csv"))],
+        headers=headers,
+    )
+    assert res.status_code == 200
+    mandats = res.json()["mandats"]
+    assert len(mandats) == 1
+    assert mandats[0]["Montant EUR"] == 129.0  # 99 (Optilife) + 30 (override)
+
+
 _PRELEVEMENT_CSV = (
     "Référence du client,Nom complet,RUM,Statut,Type de prélèvement,"
     "Périodicité (Mensuel/trimestre/annuel),IBAN,BIC,Date de premier prélèvement,"

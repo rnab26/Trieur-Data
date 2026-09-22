@@ -48,6 +48,16 @@ export function PrelevementScreen() {
   const [nature, setNature] = useState<'CORE' | 'B2B'>('CORE')
   const [delayDays, setDelayDays] = useState(3)
   const [fraisSetupEur, setFraisSetupEur] = useState(20)
+  // Frais par produit + libellés de périodicité (Raphaël, 2026-09-22) --
+  // réglables directement dans l'écran, jamais codés en dur (voir
+  // trieur/prelevement.py). Toujours des listes COMPLÈTES en mémoire
+  // (pré-remplies par l'API tant que rien n'a été personnalisé), même
+  // convention que les colonnes maîtres : "Enregistrer" renvoie
+  // l'intégralité, pas un correctif partiel.
+  const [fraisParProduit, setFraisParProduit] = useState<Record<string, number>>({})
+  const [periodicites, setPeriodicites] = useState<Record<string, string>>({})
+  const [newPeriodiciteCode, setNewPeriodiciteCode] = useState('')
+  const [newPeriodiciteTexte, setNewPeriodiciteTexte] = useState('')
   const [savingRules, setSavingRules] = useState(false)
   const [rulesSaved, setRulesSaved] = useState(false)
   const [rulesExplainOpen, setRulesExplainOpen] = useState(false)
@@ -76,6 +86,8 @@ export function PrelevementScreen() {
         setNature(data.nature)
         setDelayDays(data.delay_days)
         setFraisSetupEur(data.frais_setup_eur)
+        setFraisParProduit(data.frais_par_produit)
+        setPeriodicites(data.periodicites)
       })
       .catch((err: unknown) => {
         if (!cancelled) setRulesError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
@@ -96,14 +108,48 @@ export function PrelevementScreen() {
         nature,
         delayDays,
         fraisSetupEur,
+        fraisParProduit,
+        periodicites,
       })
       setRules(updated)
+      setFraisParProduit(updated.frais_par_produit)
+      setPeriodicites(updated.periodicites)
       setRulesSaved(true)
     } catch (err) {
       setRulesError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
     } finally {
       setSavingRules(false)
     }
+  }
+
+  function updateFraisProduit(produit: string, value: number) {
+    setFraisParProduit((prev) => ({ ...prev, [produit]: value }))
+  }
+
+  function updatePeriodiciteTexte(code: string, texte: string) {
+    setPeriodicites((prev) => ({ ...prev, [code]: texte }))
+  }
+
+  function removePeriodicite(code: string) {
+    if (!window.confirm(`Supprimer le libellé de périodicité « ${code} » ?`)) return
+    setPeriodicites((prev) => {
+      const next = { ...prev }
+      delete next[code]
+      return next
+    })
+  }
+
+  function addPeriodicite() {
+    const code = newPeriodiciteCode.trim().toLowerCase()
+    const texte = newPeriodiciteTexte.trim()
+    if (!code || !texte) return
+    if (code in periodicites) {
+      setRulesError('Ce code de périodicité existe déjà.')
+      return
+    }
+    setPeriodicites((prev) => ({ ...prev, [code]: texte }))
+    setNewPeriodiciteCode('')
+    setNewPeriodiciteTexte('')
   }
 
   function handleFilesSelected(files: File[]) {
@@ -287,21 +333,83 @@ export function PrelevementScreen() {
                         onChange={(e) => setDelayDays(Number(e.target.value) || 0)}
                       />
                     </div>
+                  </div>
+
+                  {rules && rules.produits_connus.length > 0 && (
                     <div>
-                      <label htmlFor="prelevement-frais" className="mb-1 block text-sm text-[var(--muted)]">
-                        Frais de dossier par produit, au 1er prélèvement (€)
-                      </label>
+                      <p className="mb-2 text-sm text-[var(--muted)]">
+                        Frais de dossier par produit, au 1er prélèvement (€) -- réglable produit par
+                        produit, amené à évoluer avec l'activité.
+                      </p>
+                      <div className="flex flex-col gap-2">
+                        {rules.produits_connus.map((produit) => (
+                          <div key={produit} className="flex items-center gap-2">
+                            <span className="w-56 flex-shrink-0 truncate text-sm" title={produit}>
+                              {produit}
+                            </span>
+                            <Input
+                              type="number"
+                              min={0}
+                              step="0.01"
+                              className="w-24"
+                              value={fraisParProduit[produit] ?? fraisSetupEur}
+                              onChange={(e) => updateFraisProduit(produit, Number(e.target.value) || 0)}
+                            />
+                            <span className="text-sm text-[var(--muted)]">€</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div>
+                    <p className="mb-2 text-sm text-[var(--muted)]">
+                      Libellés de périodicité -- ajoute/renomme/supprime un code de périodicité et son
+                      explication affichée dans le mandat.
+                    </p>
+                    <ul className="flex flex-col gap-2">
+                      {Object.entries(periodicites).map(([code, texte]) => (
+                        <li key={code} className="flex items-center gap-2">
+                          <span className="w-40 flex-shrink-0 truncate text-sm" title={code}>
+                            {code}
+                          </span>
+                          <Input
+                            className="max-w-xs"
+                            value={texte}
+                            onChange={(e) => updatePeriodiciteTexte(code, e.target.value)}
+                          />
+                          <Button variant="danger" onClick={() => removePeriodicite(code)}>
+                            🗑️
+                          </Button>
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
                       <Input
-                        id="prelevement-frais"
-                        type="number"
-                        min={0}
-                        step="0.01"
-                        className="w-24"
-                        value={fraisSetupEur}
-                        onChange={(e) => setFraisSetupEur(Number(e.target.value) || 0)}
+                        placeholder="Code (ex. bimensuelle)"
+                        className="max-w-[10rem]"
+                        value={newPeriodiciteCode}
+                        onChange={(e) => setNewPeriodiciteCode(e.target.value)}
                       />
+                      <Input
+                        placeholder="Explication (ex. Tous les 15 jours)"
+                        className="max-w-xs"
+                        value={newPeriodiciteTexte}
+                        onChange={(e) => setNewPeriodiciteTexte(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') addPeriodicite()
+                        }}
+                      />
+                      <Button
+                        variant="secondary"
+                        onClick={addPeriodicite}
+                        disabled={!newPeriodiciteCode.trim() || !newPeriodiciteTexte.trim()}
+                      >
+                        ➕ Ajouter
+                      </Button>
                     </div>
                   </div>
+
                   <div>
                     <Button onClick={() => void handleSaveRules()} disabled={savingRules}>
                       {savingRules ? 'Enregistrement…' : 'Enregistrer les réglages'}

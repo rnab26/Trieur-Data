@@ -377,13 +377,13 @@ export function PrelevementScreen() {
                     </div>
                   </div>
 
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   {rules && rules.produits_connus.length > 0 && (
                     <div>
-                      <p className="mb-2 text-sm text-[var(--muted)]">
-                        Frais de dossier par produit, au 1er prélèvement (€) -- réglable produit par
-                        produit, amené à évoluer avec l'activité.
+                      <p className="mb-1 text-xs text-[var(--muted)]">
+                        Frais de dossier par produit (€), au 1er prélèvement.
                       </p>
-                      <table className="w-full max-w-sm text-sm">
+                      <table className="w-full text-sm">
                         <tbody>
                           {rules.produits_connus.map((produit) => (
                             <tr key={produit} className="border-t border-[var(--border)] first:border-t-0">
@@ -422,15 +422,14 @@ export function PrelevementScreen() {
                   )}
 
                   <div>
-                    <p className="mb-2 text-sm text-[var(--muted)]">
-                      Libellés de périodicité -- ajoute/renomme/supprime un code de périodicité et son
-                      explication affichée dans le mandat.
+                    <p className="mb-1 text-xs text-[var(--muted)]">
+                      Libellés de périodicité -- ajoute/renomme/supprime.
                     </p>
-                    <table className="w-full max-w-md text-sm">
+                    <table className="w-full text-sm">
                       <tbody>
                         {Object.entries(periodicites).map(([code, texte]) => (
                           <tr key={code} className="border-t border-[var(--border)] first:border-t-0">
-                            <td className="w-28 truncate py-1 pr-2 text-xs text-[var(--muted)]" title={code}>
+                            <td className="w-20 truncate py-1 pr-1 text-xs text-[var(--muted)]" title={code}>
                               {code}
                             </td>
                             <td className="py-1">
@@ -454,7 +453,10 @@ export function PrelevementScreen() {
                         ))}
                       </tbody>
                     </table>
-                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                  </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
                       <Input
                         placeholder="Code (ex. bimensuelle)"
                         className="h-8 max-w-[10rem] px-2 py-1"
@@ -478,7 +480,6 @@ export function PrelevementScreen() {
                         ➕ Ajouter
                       </Button>
                     </div>
-                  </div>
 
                   <div>
                     <Button onClick={() => void handleSaveRules()} disabled={savingRules}>

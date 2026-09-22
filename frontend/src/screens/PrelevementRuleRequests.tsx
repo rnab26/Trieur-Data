@@ -206,10 +206,7 @@ export function PrelevementRuleRequests({
         </ul>
       )}
 
-      <div
-        ref={formRef}
-        className="flex flex-col gap-2 rounded-md border border-dashed border-[var(--border)] p-2"
-      >
+      <div className="flex flex-col gap-2 rounded-md border border-dashed border-[var(--border)] p-2">
         <p className="text-xs font-medium text-[var(--muted)]">Nouvelle demande</p>
         <Input
           placeholder="Nom de la règle (ex. Critère de RCUR)"
@@ -217,7 +214,6 @@ export function PrelevementRuleRequests({
           onChange={(e) => setNewTitre(e.target.value)}
         />
         <textarea
-          ref={demandeRef}
           className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] p-2 text-sm"
           rows={2}
           placeholder="Changement souhaité, en détail..."

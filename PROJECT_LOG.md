@@ -3539,3 +3539,39 @@ En marge, 2 autres chantiers notés côté Cockpit pour la suite :
   que chaque environnement puisse moduler sa vue Base de données à sa
   façon, et pouvoir MODIFIER une vue enregistrée existante (aujourd'hui
   seulement créer/supprimer).
+
+### PR #50 : tri par colonne + vues enregistrées modifiables (2026-09-22)
+
+Clarifié avec Raphaël avant de coder (question posée : la checklist de
+valeurs distinctes par colonne façon Sheets aurait été un chantier
+nettement plus lourd, nouvel endpoint + nouvelle UI par en-tête) --
+réponse : ce qui manquait vraiment, c'est le **tri par colonne**. Les
+filtres par colonne existaient déjà (contient/ne contient pas/égal
+à/vide/non vide, combinés en ET), donc pas retouchés.
+
+- **Vues modifiables** : le backend (`save_saved_view`, upsert par
+  `user_id, org_id, name`) remplaçait déjà une vue existante en cas de
+  même nom, mais rien dans l'interface ne le rendait accessible --
+  ajout d'un bouton "Mettre à jour" par vue enregistrée (avec
+  confirmation avant écrasement).
+- **Tri par colonne** : clic sur un en-tête (1er clic = croissant, 2e =
+  décroissant, 3e = retire le tri), indicateur ▲/▼, numérique si les
+  deux valeurs comparées le sont sinon alphabétique (locale FR), valeurs
+  vides toujours en fin. Appliqué côté client sur le lot déjà chargé --
+  même portée que la recherche/les filtres par colonne existants (déjà
+  documentés comme limités au lot affiché, pas à tout l'historique ;
+  pas une nouvelle limite introduite ici).
+
+`npx tsc --noEmit` et `npm run lint` propres, CI verte du premier coup.
+Chantier "Filtres façon Google Sheets + vues enregistrées modifiables"
+marqué terminé.
+
+---
+
+**Bilan de cette session de finitions Prélèvement (2026-09-21/22)** :
+validation d'un lot réel de 87 mandats (87/87 cohérents avec le Drive),
+correctif du bug NaN (PR #46), verrouillage de l'environnement (PR
+#48), aperçu avant téléchargement + enregistrement en base (PR #49),
+tri par colonne + vues modifiables (PR #50). Reste ouvert et reporté
+explicitement par Raphaël : la vue Base de données dédiée aux mandats
+Prélèvement, une fois que son père aura validé les étapes actuelles.

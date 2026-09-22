@@ -1012,6 +1012,38 @@ export function savePrelevementRules(
   })
 }
 
+// Jeux de colonnes réutilisables pour le fichier de mandats (Raphaël,
+// 2026-09-22 : "comme on avait sur Streamlit") -- un instantané complet
+// de colonnes_mandat, nommé, appliqué en un clic (côté écran : charge
+// juste `colonnes` dans l'état local, pas d'appel serveur pour ça).
+export type ColonnesMandatPreset = {
+  id: string
+  org_id: string
+  name: string
+  colonnes: ColonneMandat[]
+  created_at: string
+}
+
+export function listPrelevementColonnesMandatPresets(orgId: string) {
+  return request<ColonnesMandatPreset[]>(`/orgs/${orgId}/prelevement/colonnes-mandat-presets`)
+}
+
+// Enregistrer sous un nom déjà pris REMPLACE le jeu existant côté API
+// (jamais un doublon visuellement identique).
+export function savePrelevementColonnesMandatPreset(orgId: string, name: string, colonnes: ColonneMandat[]) {
+  return request<ColonnesMandatPreset>(`/orgs/${orgId}/prelevement/colonnes-mandat-presets`, {
+    method: 'POST',
+    body: JSON.stringify({ name, colonnes }),
+  })
+}
+
+export function deletePrelevementColonnesMandatPreset(orgId: string, presetId: string) {
+  return request<{ id: string; removed: boolean }>(
+    `/orgs/${orgId}/prelevement/colonnes-mandat-presets/${presetId}`,
+    { method: 'DELETE' },
+  )
+}
+
 // ---------------------------------------------------------------
 // Demandes de modification des règles codées en dur (2026-09-22) --
 // file d'attente écrite depuis l'écran, jamais appliquée

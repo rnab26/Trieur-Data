@@ -28,6 +28,7 @@ impayés, réconciliation du relevé bancaire.
 
 from __future__ import annotations
 
+import calendar
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -122,7 +123,7 @@ _MOTIF_SUFFIXES: list[tuple[str, str]] = [
 # Produits connus du moteur -- SEULE source de vérité pour le réglage
 # "Frais de dossier par produit" (voir PrelevementRules.frais_par_produit
 # ci-dessous) : la liste des produits elle-même reste codée en dur
-# (couplée à la fusion spéciale MYJURIS+IMMO et au nom exact des colonnes
+# (couplée au groupe de produits cumulés et au nom exact des colonnes
 # de l'export CRM, décision de Raphaël 2026-09-22 de ne PAS la rendre
 # éditable en direct), mais le MONTANT de frais par produit, lui, l'est.
 PRODUITS_CONNUS: list[str] = [col for col, _ in _MOTIF_SUFFIXES]
@@ -434,31 +435,24 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
             exclure("Aucun produit actif (tous les montants produits sont à 0)")
             continue
 
-        # MYJURIS + IMMO fusionnés en UN SEUL mandat "-J-AU" quand les
-        # deux sont actifs -- seule exception à la règle "un mandat par
-        # produit" ci-dessous, trouvée le 2026-09-21 en croisant le vrai
-        # fichier de remise bancaire (2 clients confirmés : montant RCUR
-        # = somme exacte des deux colonnes, FRST = RCUR + 2x les frais
-        # de dossier -- jamais observé combiné avec un autre produit).
-        if amounts[COL_MYJURIS] > 0 and amounts[COL_IMMO] > 0:
-            reste = [(c, s) for c, s in produits_actifs if c not in (COL_MYJURIS, COL_IMMO)]
-            mandats_bundles: list[tuple[str, list[str]]] = [("-J-AU", [COL_MYJURIS, COL_IMMO])]
-            mandats_bundles += [(s, [c]) for c, s in reste]
-        else:
-            mandats_bundles = [(s, [c]) for c, s in produits_actifs]
-
-        # FRST (1er prélèvement, avec frais de dossier) vs RCUR
-        # (récurrent, sans frais) -- "Statut agent IA" commence par
-        # "Notifié" = le client a reçu la notification obligatoire
-        # avant un prélèvement RÉCURRENT (règle SEPA), donc RCUR. Sinon
-        # (vide, "Validé par le client", autre) -- FRST. Bug réel
-        # corrigé le 2026-09-22 (signalé par Raphaël : "aucun
-        # prélèvement n'est récurrent") : l'ancienne règle ("Total frais
-        # de dossier" > 0 -> FRST) ne concordait qu'à 63% avec le vrai
-        # historique des remises bancaires du Drive -- voir COL_STATUT_IA
-        # ci-dessus pour le détail de la vérification (95,3% de
-        # concordance sur le nouveau signal).
-        type_sequence = "RCUR" if statut_ia_lower.startswith("notifié") else "FRST"
+        # Cumul en UN SEUL mandat pour le groupe MYJURIS & MYHOSPI, Admin
+        # & Aide a dom, Auditif, IMMO, VETO -- étendu le 2026-09-22 sur
+        # demande du père de Raphaël (question posée et confirmée par
+        # lui : "un seul mandat cumulé pour ces produits", suffixe
+        # combiné proposé et accepté). Remplace l'ancienne règle plus
+        # étroite où seul le duo MYJURIS+IMMO fusionnait (trouvée le
+        # 2026-09-21 sur le vrai fichier de remise bancaire). OPTILIFE et
+        # CARTE MGS restent chacun leur propre mandat, hors du groupe.
+        # "Contrat MYMO casse & perte appareil auditif" reste IGNORÉ,
+        # confirmé par le père de Raphaël (question posée, réponse : "la
+        # retirer -- continuer à l'ignorer comme aujourd'hui").
+        GROUPE_CUMUL = {COL_MYJURIS, COL_ADMIN_AIDE, COL_AUDITIF, COL_IMMO, COL_VETO}
+        groupe_actif = [(c, s) for c, s in produits_actifs if c in GROUPE_CUMUL]
+        hors_groupe = [(c, s) for c, s in produits_actifs if c not in GROUPE_CUMUL]
+        mandats_bundles: list[tuple[str, list[str]]] = []
+        if groupe_actif:
+            mandats_bundles.append(("".join(s for _, s in groupe_actif), [c for c, _ in groupe_actif]))
+        mandats_bundles += [(s, [c]) for c, s in hors_groupe]
 
         # Date de signature du mandat = la date de création du contrat
         # dans le CRM, PAS la date à laquelle ce fichier est généré --
@@ -469,15 +463,7 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
         date_effet_raw = _parse_date(_get(row, COL_DATE_EFFET, keyed))
         date_effet = date_effet_raw.strftime("%d/%m/%Y") if date_effet_raw else ""
 
-        # "Explication périodicité" (ex. "Tous les 1 mois") : laissée
-        # vide pour un 1er prélèvement (FRST) -- elle ne décrit que la
-        # récurrence des prélèvements SUIVANTS, vérifié contre le
-        # fichier de référence.
-        explication = "" if type_sequence == "FRST" else _explication_periodicite(
-            _get(row, COL_PERIODICITE, keyed), rules.periodicites,
-        )
-
-        # UN MANDAT PAR PRODUIT ACTIF (sauf le duo MYJURIS+IMMO ci-dessus),
+        # UN MANDAT PAR PRODUIT ACTIF (sauf le groupe cumulé ci-dessus),
         # jamais un mandat unique combinant tous les produits -- règle
         # trouvée le 2026-09-21 en croisant ce fichier CRM avec le vrai
         # fichier de remise bancaire du Drive (lecture seule) : un
@@ -488,17 +474,25 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
         # produit(s) du mandat -- "Total cotisation et frais de dossier"
         # ne sert plus à rien ici, il ne correspond à aucun montant réel
         # (vérifié faux sur plus de 10 clients croisés). Les frais de
-        # dossier sont comptés une fois PAR PRODUIT du mandat (2x pour
-        # le duo MYJURIS+IMMO, confirmé sur le vrai fichier).
+        # dossier sont comptés une fois PAR PRODUIT du mandat.
+        #
+        # Chaque mandat génère maintenant SYSTÉMATIQUEMENT DEUX lignes,
+        # FRST puis RCUR -- changé le 2026-09-22 sur demande du père de
+        # Raphaël (question posée, risque de double prélèvement signalé
+        # explicitement : confirmé "toujours FRST+RCUR pour tout le
+        # monde, la règle de notification [Statut agent IA] ne
+        # s'applique plus"). "Statut agent IA" continue seulement à
+        # servir à l'EXCLUSION (Refusé/Annuler) ci-dessus, plus à choisir
+        # FRST ou RCUR. La ligne RCUR reprend la date du 1er prélèvement
+        # décalée de la périodicité du contrat (repli 1 mois si la
+        # périodicité n'est pas reconnue).
         for suffix, cols in mandats_bundles:
             montant_produits = sum(amounts[c] for c in cols)
-            frais = (
-                sum(rules.frais_par_produit.get(c, rules.frais_setup_eur) for c in cols)
-                if type_sequence == "FRST"
-                else 0.0
-            )
-            montant = montant_produits + frais
-            mandat = MandatRow(
+            frais = sum(rules.frais_par_produit.get(c, rules.frais_setup_eur) for c in cols)
+            explication = _explication_periodicite(_get(row, COL_PERIODICITE, keyed), rules.periodicites)
+            date_rcur = _add_months(date_premiere, _mois_periodicite(_get(row, COL_PERIODICITE, keyed)))
+
+            mandat_frst = MandatRow(
                 reference_client=ref_client,
                 nom=nom,
                 rum=rum,
@@ -513,18 +507,46 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
                     to_telephone(_get(row, COL_TELEPHONE, keyed))
                     or to_telephone(_get(row, COL_MOBILE, keyed))
                 ),
-                type_sequence=type_sequence,
-                montant_eur=round(montant, 2),
+                type_sequence="FRST",
+                montant_eur=round(montant_produits + frais, 2),
                 devise="EUR",
                 date_signature_mandat=date_signature.strftime("%d/%m/%Y"),
                 date_premiere_echeance=date_premiere.strftime("%d/%m/%Y"),
                 date_effet=date_effet,
                 periodicite=str(_get(row, COL_PERIODICITE, keyed) or ""),
+                explication_periodicite="",
+                motif=build_motif(rum, suffix),
+            )
+            result.mandats.append(mandat_frst)
+            result.ooff.append(mandat_frst)
+
+            mandat_rcur = MandatRow(
+                reference_client=ref_client,
+                nom=nom,
+                rum=rum,
+                iban=iban,
+                bic=pad_bic(_get(row, COL_BIC, keyed)),
+                adresse=str(_get(row, COL_ADRESSE, keyed) or ""),
+                ville=str(_get(row, COL_VILLE, keyed) or ""),
+                code_postal=str(_get(row, COL_CODE_POSTAL, keyed) or ""),
+                pays="FR",
+                email=str(_get(row, COL_EMAIL, keyed) or ""),
+                telephone=(
+                    to_telephone(_get(row, COL_TELEPHONE, keyed))
+                    or to_telephone(_get(row, COL_MOBILE, keyed))
+                ),
+                type_sequence="RCUR",
+                montant_eur=round(montant_produits, 2),
+                devise="EUR",
+                date_signature_mandat=date_signature.strftime("%d/%m/%Y"),
+                date_premiere_echeance=date_rcur.strftime("%d/%m/%Y"),
+                date_effet=date_effet,
+                periodicite=str(_get(row, COL_PERIODICITE, keyed) or ""),
                 explication_periodicite=explication,
                 motif=build_motif(rum, suffix),
             )
-            result.mandats.append(mandat)
-            (result.ooff if type_sequence == "FRST" else result.rcur).append(mandat)
+            result.mandats.append(mandat_rcur)
+            result.rcur.append(mandat_rcur)
 
     return result
 
@@ -537,6 +559,32 @@ _PERIODICITE_EXPLICATIONS = {
     "annuel": "Tous les 12 mois",
     "annuelle": "Tous les 12 mois",
 }
+
+# Nombre de mois correspondant, pour décaler la date de la ligne RCUR
+# par rapport à la ligne FRST (voir generate_mandats -- demande du père
+# de Raphaël du 2026-09-22 de toujours générer les deux lignes). Repli
+# à 1 mois si la périodicité n'est pas reconnue, jamais une exception
+# bloquante pour une seule ligne mal renseignée.
+_PERIODICITE_MOIS = {
+    "mensuelle": 1,
+    "bimestrielle": 2,
+    "trimestrielle": 3,
+    "semestrielle": 6,
+    "annuel": 12,
+    "annuelle": 12,
+}
+
+
+def _mois_periodicite(raw: object) -> int:
+    return _PERIODICITE_MOIS.get(str(raw or "").strip().lower(), 1)
+
+
+def _add_months(d: date, months: int) -> date:
+    mois_total = d.month - 1 + months
+    annee = d.year + mois_total // 12
+    mois = mois_total % 12 + 1
+    jour = min(d.day, calendar.monthrange(annee, mois)[1])
+    return date(annee, mois, jour)
 
 
 def _explication_periodicite(raw: object, overrides: dict[str, str] | None = None) -> str:
@@ -567,19 +615,23 @@ def explain_rules(rules: PrelevementRules) -> list[dict[str, str]]:
             "titre": "Un mandat par produit actif",
             "detail": (
                 "Jamais un mandat combiné : un client avec 2 produits actifs "
-                "génère 2 lignes, chacune avec son propre montant et son propre "
-                "motif \"MGS-{RUM}{suffixe}\". Exception : MYJURIS et IMMO actifs "
-                "ensemble fusionnent en un seul mandat \"-J-AU\" (montants "
-                "additionnés, frais comptés 2 fois)."
+                "hors groupe génère 2 lignes, chacune avec son propre montant "
+                "et son propre motif \"MGS-{RUM}{suffixe}\". Exception : "
+                "MYJURIS & MYHOSPI, Admin & Aide a dom, Auditif, IMMO et VETO "
+                "actifs ensemble fusionnent en un seul mandat cumulé (suffixe "
+                "combiné, montants additionnés, frais comptés une fois par "
+                "produit du groupe). \"Contrat MYMO casse & perte appareil "
+                "auditif\" reste ignoré."
             ),
         },
         {
-            "titre": "FRST (1er prélèvement) vs RCUR (récurrent)",
+            "titre": "FRST (1er prélèvement) et RCUR (récurrent)",
             "detail": (
-                "\"Statut agent IA\" commence par \"Notifié\" (notification "
-                "préalable obligatoire avant un prélèvement récurrent, règle "
-                "SEPA) -> RCUR. Sinon (vide, \"Validé par le client\", autre) -> "
-                "FRST."
+                "Chaque mandat génère systématiquement DEUX lignes : FRST à "
+                "la date du 1er prélèvement (avec frais), puis RCUR à cette "
+                "même date décalée de la périodicité du contrat (sans frais). "
+                "\"Statut agent IA\" ne sert plus qu'à l'exclusion "
+                "(Refusé/Annuler), plus à choisir entre FRST et RCUR."
             ),
         },
         {

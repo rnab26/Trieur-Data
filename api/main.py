@@ -2311,7 +2311,15 @@ async def post_prelevement_generate(
     raisons_exclusion: dict[str, int] = {}
     for e in result.exclus:
         raisons_exclusion[e.raison] = raisons_exclusion.get(e.raison, 0) + 1
-    n_fusions = sum(1 for m in result.mandats if m.motif.endswith("-J-AU"))
+    # Un mandat "fusionné" (groupe cumulé) a plus d'un code produit dans
+    # son motif après "MGS-{RUM}" (ex. "-J-AD-IM-AU-V"), un mandat
+    # normal n'en a qu'un (ex. "-O"). Compté sur les lignes FRST
+    # uniquement (result.ooff) -- une seule par mandat, jamais les deux
+    # lignes FRST+RCUR du même mandat comptées deux fois (2026-09-22,
+    # depuis que chaque mandat génère systématiquement les deux lignes).
+    n_fusions = sum(
+        1 for m in result.ooff if m.motif[len(f"MGS-{m.rum}"):].count("-") > 1
+    )
     summary = {
         "n_fichiers": n_fichiers,
         "n_lignes": n_lignes,

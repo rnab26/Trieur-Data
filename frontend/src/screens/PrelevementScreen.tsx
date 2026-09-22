@@ -863,7 +863,7 @@ export function PrelevementScreen() {
                       </tr>
                       {result.summary.nFusions > 0 && (
                         <tr>
-                          <td className="pr-4 py-0.5 text-[var(--muted)]">Fusionnés MYJURIS+IMMO</td>
+                          <td className="pr-4 py-0.5 text-[var(--muted)]">Mandats fusionnés (produits cumulés)</td>
                           <td className="py-0.5 text-right font-medium text-[var(--foreground)]">
                             {result.summary.nFusions}
                           </td>

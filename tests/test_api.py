@@ -1722,8 +1722,9 @@ def test_prelevement_generate_uses_frais_par_produit(client_factory):
     )
     assert res.status_code == 200
     mandats = res.json()["mandats"]
-    assert len(mandats) == 1
-    assert mandats[0]["Montant EUR"] == 129.0  # 99 (Optilife) + 30 (override)
+    assert len(mandats) == 2  # FRST + RCUR, générés systématiquement
+    frst = next(m for m in mandats if m["Type séquence"] == "FRST")
+    assert frst["Montant EUR"] == 129.0  # 99 (Optilife) + 30 (override)
 
 
 _PRELEVEMENT_CSV = (
@@ -1752,7 +1753,7 @@ def test_prelevement_generate_returns_ooff_rcur_and_exclus(client_factory):
     assert res.status_code == 200
     body = res.json()
     assert body["counts"]["ooff"] == 1
-    assert body["counts"]["rcur"] == 0
+    assert body["counts"]["rcur"] == 1  # générée systématiquement en plus de FRST
     assert body["counts"]["exclus"] == 1
 
 
@@ -1760,9 +1761,10 @@ def test_prelevement_generate_returns_mandat_rows_and_file_for_preview(client_fa
     """Aperçu avant téléchargement demandé par Raphaël (2026-09-22) : le
     endpoint renvoie du JSON (lignes de l'onglet "Mandat" + classeur
     encodé en base64), plus de téléchargement automatique côté serveur.
-    Structure du classeur inchangée : Mandat, First, RCUR, Exclus --
+    Structure du classeur inchangée : Mandat, FRST, RCUR, Exclus --
     jamais "OOFF" (renommé), jamais de colonne "Nature" (réglage global,
-    pas une donnée par ligne)."""
+    pas une donnée par ligne). Chaque mandat génère systématiquement une
+    ligne FRST et une ligne RCUR (2026-09-22)."""
     import base64
 
     import openpyxl
@@ -1776,7 +1778,7 @@ def test_prelevement_generate_returns_mandat_rows_and_file_for_preview(client_fa
     )
     assert res.status_code == 200
     body = res.json()
-    assert len(body["mandats"]) == 1
+    assert len(body["mandats"]) == 2  # FRST + RCUR
     assert body["mandats"][0]["RUM"] == "RUM1"
     assert "Nature" not in body["mandats"][0]
     assert "Date d'effet" in body["mandats"][0]
@@ -1855,8 +1857,9 @@ def test_prelevement_generate_summary_describes_processing(client_factory):
     assert summary["n_exclus"] == 1
     assert len(summary["exclusions"]) == 1
     assert summary["exclusions"][0]["n"] == 1
-    assert summary["n_mandats"] == 1
+    assert summary["n_mandats"] == 2  # FRST + RCUR
     assert summary["n_first"] == 1
+    assert summary["n_rcur"] == 1
 
 
 _PRELEVEMENT_CSV_NO_PHONE = (
@@ -1886,10 +1889,12 @@ def test_prelevement_generate_reports_missing_phone_without_blocking(client_fact
     assert res.status_code == 200
     body = res.json()
     assert body["counts"]["ooff"] == 1  # le mandat part quand même
-    assert body["counts"]["sans_telephone"] == 1
-    assert len(body["telephones_manquants"]) == 1
+    # 2 lignes sans téléphone : FRST + RCUR générées systématiquement
+    # pour ce mandat, depuis le 2026-09-22.
+    assert body["counts"]["sans_telephone"] == 2
+    assert len(body["telephones_manquants"]) == 2
     assert body["telephones_manquants"][0]["reference_client"] == "MGS-1"
-    assert body["summary"]["n_sans_telephone"] == 1
+    assert body["summary"]["n_sans_telephone"] == 2
 
 
 def test_prelevement_mandats_saved_to_database(client_factory):
@@ -1905,7 +1910,7 @@ def test_prelevement_mandats_saved_to_database(client_factory):
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     mandats = gen_res.json()["mandats"]
-    assert len(mandats) == 1
+    assert len(mandats) == 2  # FRST + RCUR, générés systématiquement
 
     res = tc.post(
         "/orgs/org-1/prelevement/mandats",
@@ -1914,11 +1919,11 @@ def test_prelevement_mandats_saved_to_database(client_factory):
     )
     assert res.status_code == 200
     body = res.json()
-    assert body["n_saved"] == 1
+    assert body["n_saved"] == 2
     assert body["batch_id"]
 
     stored = fake.postgrest.tables["prelevement_mandats"]
-    assert len(stored) == 1
+    assert len(stored) == 2
     assert stored[0]["org_id"] == "org-1"
     assert stored[0]["rum"] == "RUM1"
     assert stored[0]["montant_eur"] == mandats[0]["Montant EUR"]
@@ -1949,14 +1954,16 @@ def test_prelevement_mandats_forbidden_for_non_admin(client_factory):
 
 
 def _save_one_mandat(tc) -> str:
-    """Génère et enregistre un seul mandat, renvoie son id -- fixture
-    partagée par les tests de la vue de consultation ci-dessous."""
+    """Génère et enregistre un seul mandat (la ligne FRST -- generate
+    en renvoie toujours deux, FRST + RCUR, depuis le 2026-09-22), renvoie
+    son id -- fixture partagée par les tests de la vue de consultation
+    ci-dessous."""
     gen_res = tc.post(
         "/orgs/org-1/prelevement/generate",
         files=[("files", ("export.csv", _PRELEVEMENT_CSV, "text/csv"))],
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
-    mandats = gen_res.json()["mandats"]
+    mandats = [m for m in gen_res.json()["mandats"] if m["Type séquence"] == "FRST"]
     save_res = tc.post(
         "/orgs/org-1/prelevement/mandats",
         json={"mandats": mandats},

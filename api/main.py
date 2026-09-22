@@ -82,6 +82,7 @@ from trieur.db import (
     remove_record_tag,
     resolve_dedup_alert,
     save_org_master_columns,
+    save_prelevement_mandats,
     save_prelevement_rules,
     save_saved_view,
     save_user_column_set,
@@ -2273,6 +2274,24 @@ async def post_prelevement_generate(
         "filename": f"mandats_{file_base}.xlsx",
         "file_base64": base64.b64encode(buffer.getvalue()).decode("ascii"),
     }
+
+
+class PrelevementMandatsSave(BaseModel):
+    mandats: list[dict]
+
+
+@app.post("/orgs/{org_id}/prelevement/mandats")
+def post_prelevement_mandats(
+    org_id: str, body: PrelevementMandatsSave, ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    """Enregistre en base le lot de mandats généré par /prelevement/generate
+    (les mêmes lignes que l'aperçu -- le frontend renvoie tel quel le
+    contenu de `mandats`). Demandé par Raphaël (2026-09-22) en
+    anticipation de la future vue de consultation (chantier séparé) :
+    doit vraiment persister, pas un accusé de réception vide."""
+    if not body.mandats:
+        raise HTTPException(status_code=400, detail="Aucun mandat à enregistrer.")
+    return save_prelevement_mandats(ctx.client, org_id, body.mandats, ctx.user.id)
 
 
 # ---------------------------------------------------------------

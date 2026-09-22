@@ -1733,6 +1733,62 @@ def test_prelevement_generate_steps_describe_processing(client_factory):
     assert "mandat" in joined.lower()
 
 
+def test_prelevement_mandats_saved_to_database(client_factory):
+    """Bouton "Enregistré dans la base de données" demandé par Raphaël
+    (2026-09-22), en anticipation de la future vue de consultation :
+    doit vraiment persister les mandats, pas un accusé de réception
+    vide. Un seul batch_id pour toutes les lignes d'un même appel."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    gen_res = tc.post(
+        "/orgs/org-1/prelevement/generate",
+        files=[("files", ("export.csv", _PRELEVEMENT_CSV, "text/csv"))],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    mandats = gen_res.json()["mandats"]
+    assert len(mandats) == 1
+
+    res = tc.post(
+        "/orgs/org-1/prelevement/mandats",
+        json={"mandats": mandats},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["n_saved"] == 1
+    assert body["batch_id"]
+
+    stored = fake.postgrest.tables["prelevement_mandats"]
+    assert len(stored) == 1
+    assert stored[0]["org_id"] == "org-1"
+    assert stored[0]["rum"] == "RUM1"
+    assert stored[0]["montant_eur"] == mandats[0]["Montant EUR"]
+    assert stored[0]["batch_id"] == body["batch_id"]
+    assert stored[0]["created_by"] == "user-1"
+
+
+def test_prelevement_mandats_rejects_empty_payload(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/prelevement/mandats",
+        json={"mandats": []},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_prelevement_mandats_forbidden_for_non_admin(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/prelevement/mandats",
+        json={"mandats": [{"RUM": "RUM1"}]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 403
+
+
 def test_create_and_list_sections(client_factory):
     fake = _make_client(profiles=[ADMIN_PROFILE])
     tc = client_factory(fake)

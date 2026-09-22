@@ -1021,6 +1021,15 @@ export async function generatePrelevementMandats(
   }
 }
 
+// Enregistre en base le lot de mandats affiché dans l'aperçu -- demandé
+// en anticipation de la future vue de consultation (chantier séparé).
+export function savePrelevementMandats(orgId: string, mandats: PrelevementMandatRow[]) {
+  return request<{ batch_id: string | null; n_saved: number }>(
+    `/orgs/${orgId}/prelevement/mandats`,
+    { method: 'POST', body: JSON.stringify({ mandats }) },
+  )
+}
+
 // Décode le classeur base64 renvoyé par generatePrelevementMandats et
 // déclenche son téléchargement -- séparé de la génération pour que
 // l'utilisateur puisse d'abord voir l'aperçu.

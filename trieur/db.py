@@ -1159,3 +1159,64 @@ def save_prelevement_rules(
         .execute()
     )
     return res.data[0]
+
+
+# Clés du dict renvoyé par api/main.py:_mandat_dict -> colonnes de
+# trieur_data.prelevement_mandats (migration 0023). Une seule source de
+# vérité pour ce mapping -- utilisée par save_prelevement_mandats
+# ci-dessous, jamais reconstruite ailleurs.
+_MANDAT_DICT_TO_COLUMN = {
+    "Référence client": "reference_client",
+    "Nom": "nom",
+    "RUM": "rum",
+    "Type séquence": "type_sequence",
+    "Motif": "motif",
+    "Montant EUR": "montant_eur",
+    "Devise": "devise",
+    "IBAN": "iban",
+    "BIC": "bic",
+    "Adresse": "adresse",
+    "Ville": "ville",
+    "Code postal": "code_postal",
+    "Pays": "pays",
+    "Email": "email",
+    "Téléphone": "telephone",
+    "Date signature mandat": "date_signature_mandat",
+    "Date première échéance": "date_premiere_echeance",
+    "Date d'effet": "date_effet",
+    "Périodicité": "periodicite",
+    "Explication périodicité": "explication_periodicite",
+    "ICS": "ics",
+}
+
+
+def save_prelevement_mandats(
+    client: Client, org_id: str, mandats: list[dict], user_id: str,
+) -> dict:
+    """Enregistre un lot de mandats générés (voir _mandat_dict dans
+    api/main.py) sous un même batch_id -- demandé par Raphaël (2026-09-22)
+    en anticipation, avant que la vue de consultation dédiée existe.
+    N'écrase jamais un lot précédent : chaque appel crée un nouveau
+    batch_id, donc générer deux fois le même fichier crée deux lots
+    distincts (pas de déduplication ici, volontairement -- hors
+    périmètre de ce chantier)."""
+    import uuid
+    from datetime import datetime, timezone
+
+    if not mandats:
+        return {"batch_id": None, "n_saved": 0}
+
+    batch_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    rows = [
+        {
+            "org_id": org_id,
+            "batch_id": batch_id,
+            "created_by": user_id,
+            "created_at": now,
+            **{col: m.get(key) for key, col in _MANDAT_DICT_TO_COLUMN.items()},
+        }
+        for m in mandats
+    ]
+    _td(client, "prelevement_mandats").insert(rows).execute()
+    return {"batch_id": batch_id, "n_saved": len(rows)}

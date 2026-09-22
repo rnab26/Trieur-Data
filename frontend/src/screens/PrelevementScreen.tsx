@@ -9,6 +9,7 @@ import {
   downloadPrelevementFile,
   generatePrelevementMandats,
   getPrelevementRules,
+  savePrelevementMandats,
   savePrelevementRules,
   type PrelevementGenerateResult,
   type PrelevementRules,
@@ -53,6 +54,9 @@ export function PrelevementScreen() {
   const [generating, setGenerating] = useState(false)
   const [generateError, setGenerateError] = useState<string | null>(null)
   const [result, setResult] = useState<PrelevementGenerateResult | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [savedCount, setSavedCount] = useState<number | null>(null)
 
   useEffect(() => {
     if (!orgId) return
@@ -130,6 +134,8 @@ export function PrelevementScreen() {
     setGenerating(true)
     setGenerateError(null)
     setResult(null)
+    setSaveError(null)
+    setSavedCount(null)
     try {
       const counts = await generatePrelevementMandats(orgId, selectedFiles)
       setResult(counts)
@@ -139,6 +145,20 @@ export function PrelevementScreen() {
       setGenerateError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
     } finally {
       setGenerating(false)
+    }
+  }
+
+  async function handleSaveToDatabase() {
+    if (!orgId || !result || result.mandats.length === 0) return
+    setSaving(true)
+    setSaveError(null)
+    try {
+      const saved = await savePrelevementMandats(orgId, result.mandats)
+      setSavedCount(saved.n_saved)
+    } catch (err) {
+      setSaveError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -403,11 +423,24 @@ export function PrelevementScreen() {
                     <p className="text-sm text-[var(--muted)]">Aucun mandat généré sur ce lot.</p>
                   )}
 
-                  <div>
+                  <div className="flex flex-wrap items-center gap-2">
                     <Button onClick={() => downloadPrelevementFile(result)}>
                       3. Télécharger le classeur (.xlsx)
                     </Button>
+                    <Button
+                      variant="secondary"
+                      onClick={() => void handleSaveToDatabase()}
+                      disabled={saving || result.mandats.length === 0}
+                    >
+                      {saving ? 'Enregistrement…' : 'Enregistrer dans la base de données'}
+                    </Button>
+                    {savedCount !== null && !saving && (
+                      <span className="text-sm text-[var(--foreground)]">
+                        ✅ {savedCount} mandat(s) enregistré(s)
+                      </span>
+                    )}
                   </div>
+                  {saveError && <p className="text-sm text-[var(--danger)]">Erreur : {saveError}</p>}
                 </div>
               )}
             </CardContent>

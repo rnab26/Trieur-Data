@@ -43,7 +43,7 @@ const STATUT_BADGE: Record<PrelevementRuleRequest['statut'], string> = {
   en_attente: '⏳ Pas encore examinée',
   en_cours: '🔧 En cours de codage',
   a_verifier: '🧪 Codée -- à valider',
-  valide: '✅ Validée',
+  valide: '✅ Certifiée',
 }
 
 // Version compacte (juste l'icône) -- utilisée sur les pastilles

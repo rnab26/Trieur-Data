@@ -507,7 +507,7 @@ export function PrelevementRuleRequests({
           </span>
           {nonValidees > 0 && (
             <span className="rounded-full bg-[var(--primary)] px-2 py-0.5 text-[0.65rem] font-bold text-[var(--primary-foreground)]">
-              {nonValidees} en cours
+              {nonValidees} pas encore certifiée{nonValidees > 1 ? 's' : ''}
             </span>
           )}
         </button>

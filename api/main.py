@@ -84,6 +84,9 @@ from trieur.db import (
     count_prelevement_mandats,
     add_prelevement_rule_request_event,
     add_prelevement_rule_request_question,
+    delete_prelevement_colonnes_mandat_preset,
+    list_prelevement_colonnes_mandat_presets,
+    save_prelevement_colonnes_mandat_preset,
     answer_prelevement_rule_request_question,
     create_prelevement_rule_request,
     delete_prelevement_mandat,
@@ -2271,6 +2274,50 @@ def post_prelevement_rules(
         "produits_connus": PRODUITS_CONNUS,
         "explication": explain_rules(rules),
     }
+
+
+# ---------------------------------------------------------------
+# Jeux de colonnes réutilisables pour le fichier de mandats (Raphaël,
+# 2026-09-22 : "enregistrer des jeux de colonnes préalables... comme
+# on avait sur Streamlit") -- un instantané nommé de colonnes_mandat,
+# appliqué en un clic côté écran (pas d'endpoint "appliquer" : le
+# front charge juste `colonnes` dans son état local, comme pour
+# PersonalColumnSets/colonnes maîtres).
+# ---------------------------------------------------------------
+
+@app.get("/orgs/{org_id}/prelevement/colonnes-mandat-presets")
+def list_prelevement_colonnes_mandat_presets_endpoint(
+    org_id: str, ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    return list_prelevement_colonnes_mandat_presets(ctx.client, org_id)
+
+
+class PrelevementColonnesMandatPresetCreate(BaseModel):
+    name: str
+    colonnes: list[ColonneMandat]
+
+
+@app.post("/orgs/{org_id}/prelevement/colonnes-mandat-presets")
+def post_prelevement_colonnes_mandat_preset(
+    org_id: str, body: PrelevementColonnesMandatPresetCreate, ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Nom du jeu de colonnes vide.")
+    if not body.colonnes:
+        raise HTTPException(status_code=400, detail="Aucune colonne à enregistrer.")
+    colonnes = [{"cle": c.cle.strip(), "visible": c.visible} for c in body.colonnes]
+    if any(not c["cle"] for c in colonnes):
+        raise HTTPException(status_code=400, detail="Nom de colonne vide.")
+    return save_prelevement_colonnes_mandat_preset(ctx.client, org_id, name, colonnes, ctx.user.id)
+
+
+@app.delete("/orgs/{org_id}/prelevement/colonnes-mandat-presets/{preset_id}")
+def delete_prelevement_colonnes_mandat_preset_endpoint(
+    org_id: str, preset_id: str, ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    delete_prelevement_colonnes_mandat_preset(ctx.client, preset_id, org_id)
+    return {"id": preset_id, "removed": True}
 
 
 @app.post("/orgs/{org_id}/prelevement/generate")

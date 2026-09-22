@@ -1476,3 +1476,56 @@ def add_prelevement_rule_request_event(client: Client, request_id: str, message:
         .execute()
     )
     return res.data[0]
+
+
+# ---------------------------------------------------------------
+# Jeux de colonnes réutilisables pour le fichier de mandats (migration
+# 0030, Raphaël 2026-09-22) -- un instantané complet de colonnes_mandat
+# (ordre + visibilité), nommé, pour appliquer une disposition déjà
+# préparée en un clic plutôt que de tout refaire à la main.
+# ---------------------------------------------------------------
+
+def list_prelevement_colonnes_mandat_presets(client: Client, org_id: str) -> list[dict]:
+    res = (
+        _td(client, "prelevement_colonnes_mandat_presets")
+        .select("*")
+        .eq("org_id", org_id)
+        .order("name", desc=False)
+        .execute()
+    )
+    return res.data or []
+
+
+def save_prelevement_colonnes_mandat_preset(
+    client: Client, org_id: str, name: str, colonnes: list[dict], user_id: str,
+) -> dict:
+    # upsert sur (org_id, lower(name)) -- enregistrer sous un nom déjà
+    # pris REMPLACE le jeu existant plutôt que d'échouer ou d'en créer
+    # un second identique visuellement (même règle que colonnes_mandat
+    # lui-même : la dernière version enregistrée fait foi).
+    existing = list_prelevement_colonnes_mandat_presets(client, org_id)
+    match = next((p for p in existing if p["name"].strip().lower() == name.strip().lower()), None)
+    if match:
+        res = (
+            _td(client, "prelevement_colonnes_mandat_presets")
+            .update({"colonnes": colonnes, "name": name, "created_by": user_id})
+            .eq("id", match["id"])
+            .execute()
+        )
+        return res.data[0]
+    res = (
+        _td(client, "prelevement_colonnes_mandat_presets")
+        .insert({"org_id": org_id, "name": name, "colonnes": colonnes, "created_by": user_id})
+        .execute()
+    )
+    return res.data[0]
+
+
+def delete_prelevement_colonnes_mandat_preset(client: Client, preset_id: str, org_id: str) -> None:
+    (
+        _td(client, "prelevement_colonnes_mandat_presets")
+        .delete()
+        .eq("id", preset_id)
+        .eq("org_id", org_id)
+        .execute()
+    )

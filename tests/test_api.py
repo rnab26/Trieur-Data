@@ -1807,6 +1807,88 @@ def test_prelevement_generate_shows_custom_column_empty(client_factory):
     assert mandat["Ma colonne perso"] in ("", None)
 
 
+def test_prelevement_colonnes_mandat_preset_create_list_and_delete(client_factory):
+    """Jeux de colonnes réutilisables (Raphaël, 2026-09-22 : "comme on
+    avait sur Streamlit") -- enregistrer un instantané nommé, le
+    retrouver, le supprimer."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    colonnes = [{"cle": "RUM", "visible": True}, {"cle": "Nom", "visible": False}]
+
+    res = tc.post(
+        "/orgs/org-1/prelevement/colonnes-mandat-presets",
+        json={"name": "Export banque", "colonnes": colonnes},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    preset = res.json()
+    assert preset["name"] == "Export banque"
+    assert preset["colonnes"] == colonnes
+    assert preset["org_id"] == "org-1"
+
+    res = tc.get("/orgs/org-1/prelevement/colonnes-mandat-presets", headers=headers)
+    assert res.status_code == 200
+    assert [p["name"] for p in res.json()] == ["Export banque"]
+
+    res = tc.delete(f"/orgs/org-1/prelevement/colonnes-mandat-presets/{preset['id']}", headers=headers)
+    assert res.status_code == 200
+    res = tc.get("/orgs/org-1/prelevement/colonnes-mandat-presets", headers=headers)
+    assert res.json() == []
+
+
+def test_prelevement_colonnes_mandat_preset_save_same_name_replaces(client_factory):
+    """Enregistrer sous un nom déjà pris REMPLACE le jeu existant --
+    jamais un doublon visuellement identique."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    tc.post(
+        "/orgs/org-1/prelevement/colonnes-mandat-presets",
+        json={"name": "Export banque", "colonnes": [{"cle": "RUM", "visible": True}]},
+        headers=headers,
+    )
+    res = tc.post(
+        "/orgs/org-1/prelevement/colonnes-mandat-presets",
+        json={"name": "export banque", "colonnes": [{"cle": "Nom", "visible": False}]},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    res = tc.get("/orgs/org-1/prelevement/colonnes-mandat-presets", headers=headers)
+    presets = res.json()
+    assert len(presets) == 1
+    assert presets[0]["colonnes"] == [{"cle": "Nom", "visible": False}]
+
+
+def test_prelevement_colonnes_mandat_preset_rejects_empty(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    res = tc.post(
+        "/orgs/org-1/prelevement/colonnes-mandat-presets",
+        json={"name": "  ", "colonnes": [{"cle": "RUM", "visible": True}]},
+        headers=headers,
+    )
+    assert res.status_code == 400
+    res = tc.post(
+        "/orgs/org-1/prelevement/colonnes-mandat-presets",
+        json={"name": "X", "colonnes": []},
+        headers=headers,
+    )
+    assert res.status_code == 400
+
+
+def test_prelevement_colonnes_mandat_preset_forbidden_for_non_admin(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/prelevement/colonnes-mandat-presets",
+        json={"name": "X", "colonnes": [{"cle": "RUM", "visible": True}]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 403
+
+
 def test_prelevement_generate_respects_colonnes_mandat_order_and_visibility(client_factory):
     """Bout en bout : l'ordre/visibilité personnalisés s'appliquent
     réellement à l'aperçu de génération, pas seulement à l'affichage des

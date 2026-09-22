@@ -19,13 +19,17 @@ import { PrelevementRuleRequests, RuleQuestionBlock } from './PrelevementRuleReq
 import {
   ApiError,
   createPrelevementRuleRequest,
+  deletePrelevementColonnesMandatPreset,
   downloadPrelevementFile,
   generatePrelevementMandats,
   getPrelevementRules,
+  listPrelevementColonnesMandatPresets,
   listPrelevementRuleRequests,
+  savePrelevementColonnesMandatPreset,
   savePrelevementMandats,
   savePrelevementRules,
   type ColonneMandat,
+  type ColonnesMandatPreset,
   type PrelevementGenerateResult,
   type PrelevementRuleRequest,
   type PrelevementRules,
@@ -68,15 +72,33 @@ function SortableColonneMandatRow({
   removable,
   onToggleVisible,
   onRemove,
+  onRename,
 }: {
   colonne: ColonneMandat
   removable: boolean
   onToggleVisible: () => void
   onRemove: () => void
+  // Seule une colonne personnalisée (removable) peut être renommée --
+  // le nom d'une colonne canonique est la clé attendue par le
+  // générateur, jamais éditable (Raphaël, 2026-09-22).
+  onRename: (nouveauNom: string) => boolean
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: colonne.cle,
   })
+  const [renaming, setRenaming] = useState(false)
+  const [draftName, setDraftName] = useState(colonne.cle)
+
+  function startRename() {
+    setDraftName(colonne.cle)
+    setRenaming(true)
+  }
+
+  function commitRename() {
+    const ok = onRename(draftName.trim())
+    if (ok) setRenaming(false)
+  }
+
   return (
     <li
       ref={setNodeRef}
@@ -92,18 +114,42 @@ function SortableColonneMandatRow({
         ⠿
       </span>
       <input type="checkbox" checked={colonne.visible} onChange={onToggleVisible} />
-      <span className={'flex-1 text-sm ' + (colonne.visible ? '' : 'text-[var(--muted)] line-through')}>
-        {colonne.cle}
-      </span>
-      {removable && (
-        <button
-          type="button"
-          onClick={onRemove}
-          className="px-1 text-[var(--danger)] hover:opacity-70"
-          aria-label={`Supprimer la colonne ${colonne.cle}`}
-        >
-          🗑️
-        </button>
+      {renaming ? (
+        <Input
+          autoFocus
+          className="h-7 flex-1 px-2 py-0.5 text-sm"
+          value={draftName}
+          onChange={(e) => setDraftName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') commitRename()
+            if (e.key === 'Escape') setRenaming(false)
+          }}
+          onBlur={commitRename}
+        />
+      ) : (
+        <span className={'flex-1 text-sm ' + (colonne.visible ? '' : 'text-[var(--muted)] line-through')}>
+          {colonne.cle}
+        </span>
+      )}
+      {removable && !renaming && (
+        <>
+          <button
+            type="button"
+            onClick={startRename}
+            className="px-1 text-[var(--muted)] hover:text-[var(--foreground)]"
+            aria-label={`Renommer la colonne ${colonne.cle}`}
+          >
+            ✏️
+          </button>
+          <button
+            type="button"
+            onClick={onRemove}
+            className="px-1 text-[var(--danger)] hover:opacity-70"
+            aria-label={`Supprimer la colonne ${colonne.cle}`}
+          >
+            🗑️
+          </button>
+        </>
       )}
     </li>
   )
@@ -139,6 +185,15 @@ export function PrelevementScreen() {
   // Sert seulement à savoir quelle colonne est supprimable (canonique =
   // jamais) -- voir "colonnes_mandat_canoniques" dans PrelevementRules.
   const [colonnesMandatCanoniques, setColonnesMandatCanoniques] = useState<string[]>([])
+  // Jeux de colonnes réutilisables (Raphaël, 2026-09-22 : "comme on
+  // avait sur Streamlit") -- indépendant du chargement des réglages
+  // (rules), pour ne pas coupler deux ressources qui n'ont rien à voir
+  // niveau backend.
+  const [colonnesMandatPresets, setColonnesMandatPresets] = useState<ColonnesMandatPreset[]>([])
+  const [newPresetName, setNewPresetName] = useState('')
+  const [savingPreset, setSavingPreset] = useState(false)
+  const [deletingPresetId, setDeletingPresetId] = useState<string | null>(null)
+  const [presetError, setPresetError] = useState<string | null>(null)
   const [newPeriodiciteCode, setNewPeriodiciteCode] = useState('')
   const [newPeriodiciteTexte, setNewPeriodiciteTexte] = useState('')
   const [savingRules, setSavingRules] = useState(false)
@@ -252,6 +307,64 @@ export function PrelevementScreen() {
     }
   }, [orgId])
 
+  useEffect(() => {
+    if (!orgId) return
+    let cancelled = false
+    listPrelevementColonnesMandatPresets(orgId)
+      .then((data) => {
+        if (!cancelled) setColonnesMandatPresets(data)
+      })
+      .catch(() => {
+        // Silencieux : un jeu de colonnes est un raccourci, pas une donnée
+        // critique -- une erreur réseau ponctuelle ne doit pas bloquer le
+        // reste des réglages ni ajouter une alerte de plus à l'écran.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [orgId])
+
+  function applyColonnesMandatPreset(preset: ColonnesMandatPreset) {
+    setColonnesMandat(preset.colonnes)
+  }
+
+  async function handleSaveColonnesMandatPreset() {
+    if (!orgId) return
+    const name = newPresetName.trim()
+    if (!name) return
+    setSavingPreset(true)
+    setPresetError(null)
+    try {
+      const saved = await savePrelevementColonnesMandatPreset(orgId, name, colonnesMandat)
+      setColonnesMandatPresets((prev) => {
+        const idx = prev.findIndex((p) => p.id === saved.id)
+        if (idx === -1) return [...prev, saved].sort((a, b) => a.name.localeCompare(b.name))
+        const next = [...prev]
+        next[idx] = saved
+        return next
+      })
+      setNewPresetName('')
+    } catch (err) {
+      setPresetError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+    } finally {
+      setSavingPreset(false)
+    }
+  }
+
+  async function handleDeleteColonnesMandatPreset(id: string) {
+    if (!orgId) return
+    setDeletingPresetId(id)
+    setPresetError(null)
+    try {
+      await deletePrelevementColonnesMandatPreset(orgId, id)
+      setColonnesMandatPresets((prev) => prev.filter((p) => p.id !== id))
+    } catch (err) {
+      setPresetError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+    } finally {
+      setDeletingPresetId(null)
+    }
+  }
+
   async function handleSaveRules() {
     if (!orgId) return
     setSavingRules(true)
@@ -347,6 +460,27 @@ export function PrelevementScreen() {
 
   function removeColonneMandatPersonnalisee(cle: string) {
     setColonnesMandat((prev) => prev.filter((c) => c.cle !== cle))
+  }
+
+  // "pouvoir la renommer après coup" (Raphaël, 2026-09-22) -- seul le
+  // nom change, position et visibilité restent celles de la ligne.
+  // Retourne false (et affiche l'erreur) si le nouveau nom est vide ou
+  // déjà pris, pour que la ligne reste en édition plutôt que de
+  // silencieusement perdre la saisie.
+  function renameColonneMandatPersonnalisee(ancienCle: string, nouveauCle: string): boolean {
+    if (!nouveauCle) {
+      setRulesError('Nom de colonne vide.')
+      return false
+    }
+    if (
+      nouveauCle.toLowerCase() !== ancienCle.toLowerCase() &&
+      colonnesMandat.some((c) => c.cle.toLowerCase() === nouveauCle.toLowerCase())
+    ) {
+      setRulesError('Une colonne porte déjà ce nom.')
+      return false
+    }
+    setColonnesMandat((prev) => prev.map((c) => (c.cle === ancienCle ? { ...c, cle: nouveauCle } : c)))
+    return true
   }
 
   // distance: 5 -- laisse le temps à un simple tap (cocher la case, par
@@ -702,6 +836,7 @@ export function PrelevementScreen() {
                               removable={!colonnesMandatCanoniques.includes(c.cle)}
                               onToggleVisible={() => toggleColonneMandatVisible(c.cle)}
                               onRemove={() => removeColonneMandatPersonnalisee(c.cle)}
+                              onRename={(nouveauNom) => renameColonneMandatPersonnalisee(c.cle, nouveauNom)}
                             />
                           ))}
                         </ul>
@@ -725,6 +860,70 @@ export function PrelevementScreen() {
                       Une colonne ajoutée est toujours vide dans le fichier généré (aucune source dans le
                       CRM) -- à remplir toi-même après export.
                     </p>
+
+                    {/* Jeux de colonnes réutilisables (Raphaël, 2026-09-22 :
+                        "comme on avait sur Streamlit") -- dans le MÊME bloc que
+                        la liste ci-dessus, pas un écran à part : appliquer un
+                        jeu remplace juste la liste de travail ci-dessus (il
+                        faut encore "Enregistrer les réglages" pour que ça
+                        s'applique vraiment au générateur, comme toute autre
+                        modification de cette liste). */}
+                    <div className="mt-3 border-t border-dashed border-[var(--border)] pt-2">
+                      <p className="mb-1 text-xs font-medium text-[var(--foreground)]">
+                        Jeux de colonnes enregistrés -- clique pour appliquer à la liste ci-dessus.
+                      </p>
+                      {colonnesMandatPresets.length === 0 && (
+                        <p className="text-xs text-[var(--muted)]">Aucun jeu enregistré pour l'instant.</p>
+                      )}
+                      {colonnesMandatPresets.length > 0 && (
+                        <ul className="flex flex-wrap gap-1.5">
+                          {colonnesMandatPresets.map((p) => (
+                            <li
+                              key={p.id}
+                              className="flex items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--card)] py-0.5 pl-2.5 pr-1 text-xs"
+                            >
+                              <button
+                                type="button"
+                                onClick={() => applyColonnesMandatPreset(p)}
+                                className="hover:text-[var(--primary)]"
+                              >
+                                {p.name} ({p.colonnes.filter((c) => c.visible).length})
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleDeleteColonnesMandatPreset(p.id)}
+                                disabled={deletingPresetId === p.id}
+                                className="px-1 text-[var(--danger)] hover:opacity-70"
+                                aria-label={`Supprimer le jeu ${p.name}`}
+                              >
+                                🗑️
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      <div className="mt-2 flex items-center gap-2">
+                        <Input
+                          placeholder="Nom du jeu (ex. Export banque)"
+                          className="h-8 max-w-xs px-2 py-1"
+                          value={newPresetName}
+                          onChange={(e) => setNewPresetName(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') void handleSaveColonnesMandatPreset()
+                          }}
+                        />
+                        <Button
+                          variant="secondary"
+                          onClick={() => void handleSaveColonnesMandatPreset()}
+                          disabled={savingPreset || !newPresetName.trim()}
+                        >
+                          {savingPreset ? 'Enregistrement…' : '💾 Enregistrer la liste actuelle sous ce nom'}
+                        </Button>
+                      </div>
+                      {presetError && (
+                        <p className="mt-1 text-xs text-[var(--danger)]">Erreur : {presetError}</p>
+                      )}
+                    </div>
                   </div>
 
                   <div>

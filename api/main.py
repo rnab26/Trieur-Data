@@ -157,6 +157,47 @@ MANDAT_COLONNES_CANONIQUES: list[str] = [
     "Reference_facture", "Libelle", "Référence client", "Motif", "Date d'effet",
 ]
 
+# D'où vient la valeur de chaque colonne du fichier de mandats --
+# demande du père de Raphaël (2026-09-22, "il faut que je sache à
+# quelle colonne s'attribue ces règles... cette logique doit être
+# visuelle pas que derrière le code") : affiché sur l'aperçu, à côté du
+# nom de chaque colonne. Purement informatif (renvoie vers le VRAI
+# comportement décrit par explain_rules() dans trieur/prelevement.py,
+# jamais une deuxième description qui pourrait diverger) -- toute
+# colonne ajoutée/retirée dans MANDAT_COLONNES_CANONIQUES doit mettre à
+# jour cette liste dans le même commit.
+MANDAT_COLONNES_NOTES: dict[str, str] = {
+    "Nom": "Copié tel quel du CRM (\"Nom complet\").",
+    "Prenom": "Toujours vide -- le CRM n'a qu'un champ \"Nom complet\", jamais coupé au hasard.",
+    "Email": "Copié tel quel du CRM.",
+    "Telephone": "Règle \"Numéro de téléphone\" : Téléphone en priorité, repli sur Mobile.",
+    "Adresse": "Copié tel quel du CRM.",
+    "Ville": "Copié tel quel du CRM.",
+    "Code_postal": "Copié tel quel du CRM.",
+    "Pays": "Toujours \"FR\".",
+    "IBAN": "Du CRM, normalisé et vérifié (contrôle mod-97) -- règle \"Exclusions\".",
+    "BIC": "Du CRM, complété à 11 caractères si besoin.",
+    "ICS_Crediteur": "Toujours vide -- demande explicite du père de Raphaël.",
+    "RUM": "Copié tel quel du CRM.",
+    "Type_prelevement": "Règle \"FRST (1er prélèvement) et RCUR (récurrent)\".",
+    "Montant_EUR": "Règle \"Montant du mandat\".",
+    "Devise": "Toujours \"EUR\".",
+    "Date_signature_mandat": "Date de création du contrat dans le CRM (repli sur aujourd'hui si absente).",
+    "Date_premiere_echeance": "Règles \"Date du premier prélèvement\", \"date d'effet\" et \"décalage remise\".",
+    "Periodicite": "Copiée telle quelle du CRM.",
+    "Explication_periodicite": "Traduite depuis la périodicité du CRM (réglable dans \"Réglages\").",
+    "Frequence_mois": "Déduite de la périodicité du contrat (1, 3, 12 mois...).",
+    "Jour_prelevement": "Jour du mois de Date_premiere_echeance.",
+    "Prochaine_echeance": "Date_premiere_echeance + périodicité du contrat.",
+    "Date_fin": "Toujours vide -- aucune source dans le CRM.",
+    "Statut": "Toujours vide -- aucune source dans le CRM.",
+    "Reference_facture": "Règle \"MOTIF -> Référence Facture\" -- même valeur que Motif.",
+    "Libelle": "\"intégré le {date de génération du fichier}\".",
+    "Référence client": "Copiée telle quelle du CRM.",
+    "Motif": "Règle \"Un mandat par produit actif\" -- \"MGS-{RUM}{suffixe produit}\".",
+    "Date d'effet": "Copiée telle quelle du CRM (mandat Optilife uniquement).",
+}
+
 # CORS : dev local (Vite) + domaine de production (à ajuster une fois le
 # vrai nom de domaine Render connu -- placeholder demandé explicitement).
 app.add_middleware(
@@ -2201,6 +2242,7 @@ def get_prelevement_rules_endpoint(org_id: str, ctx: AuthCtx = Depends(require_c
         # colonne", Raphaël 2026-09-22) -- une seule source de vérité,
         # jamais dupliquée côté frontend.
         "colonnes_mandat_canoniques": MANDAT_COLONNES_CANONIQUES,
+        "colonnes_mandat_notes": MANDAT_COLONNES_NOTES,
         "produits_connus": PRODUITS_CONNUS,
         "explication": explain_rules(rules),
     }
@@ -2271,6 +2313,7 @@ def post_prelevement_rules(
         "colonnes_mandat": saved.get("colonnes_mandat")
         or [{"cle": c, "visible": True} for c in MANDAT_COLONNES_CANONIQUES],
         "colonnes_mandat_canoniques": MANDAT_COLONNES_CANONIQUES,
+        "colonnes_mandat_notes": MANDAT_COLONNES_NOTES,
         "produits_connus": PRODUITS_CONNUS,
         "explication": explain_rules(rules),
     }

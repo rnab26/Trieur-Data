@@ -974,6 +974,11 @@ export type PrelevementRules = {
   // personnalisée ("➕ ajouter une colonne", 2026-09-22) côté écran ;
   // source de vérité unique, jamais dupliquée côté front.
   colonnes_mandat_canoniques: string[]
+  // Note courte par colonne : d'où vient sa valeur (règle du moteur ou
+  // copie directe du CRM) -- affichée sur l'aperçu (Raphaël,
+  // 2026-09-22 : "je sais à quelle colonne s'attribue ces règles...
+  // visuel, pas que derrière le code").
+  colonnes_mandat_notes: Record<string, string>
   // Liste fixe des produits gérés par le moteur -- informative, jamais
   // éditable depuis l'écran (voir PROJECT_LOG.md, 2026-09-22 : couplée
   // au groupe de produits cumulés en un seul mandat et au nom des

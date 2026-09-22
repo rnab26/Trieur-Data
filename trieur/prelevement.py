@@ -101,21 +101,21 @@ COL_DATE_EFFET = "Date d'effet du nouveau contrat (OPTILIFE)"
 # fichier "3_creations_des_mandats" (onglet "3 Sheet1", colonne Motif).
 # Sert aussi maintenant à ÉCLATER un client en plusieurs mandats -- voir
 # generate_mandats.
-# "-AU"/IMMO et non "-IM" -- corrigé le 2026-09-21 en croisant 5 clients
-# du CRM avec le vrai fichier de remise bancaire du Drive (lecture
-# seule) : la colonne IMMO correspond systématiquement au suffixe
-# "-AU" dans les vraies remises envoyées, jamais "-IM" (la formule
-# d'origine reverse-engineered avait les deux lettres inversées).
-# "Auditif" n'apparaît jamais rempli dans aucun fichier vu jusqu'ici --
-# suffixe "-IM" laissé par déduction, à revérifier le jour où elle sera
-# utilisée pour de vrai.
+# Auditif="-AU", IMMO="-IM" -- formule d'origine du père de Raphaël,
+# RÉTABLIE le 2026-09-22 (question posée sur le conflit avec la
+# correction du 21/09, réponse explicite et sans ambiguïté : "revenir
+# à ma formule... la correction du 21/09 était une erreur"). Historique
+# : la correction du 21/09 avait inversé les deux lettres en croisant 5
+# clients réels, mais le père de Raphaël l'a tranchée fausse en
+# connaissance de cause -- ne pas la réinverser sans nouvelle demande
+# explicite de sa part.
 _MOTIF_SUFFIXES: list[tuple[str, str]] = [
     (COL_OPTILIFE, "-O"),
     (COL_CARTE_MGS, "-M"),
     (COL_MYJURIS, "-J"),
     (COL_ADMIN_AIDE, "-AD"),
-    (COL_AUDITIF, "-IM"),
-    (COL_IMMO, "-AU"),
+    (COL_AUDITIF, "-AU"),
+    (COL_IMMO, "-IM"),
     (COL_VETO, "-V"),
 ]
 
@@ -126,6 +126,13 @@ _MOTIF_SUFFIXES: list[tuple[str, str]] = [
 # de l'export CRM, décision de Raphaël 2026-09-22 de ne PAS la rendre
 # éditable en direct), mais le MONTANT de frais par produit, lui, l'est.
 PRODUITS_CONNUS: list[str] = [col for col, _ in _MOTIF_SUFFIXES]
+
+# Rang de chaque produit dans l'ordre canonique du moteur -- sert de
+# départage pour le décalage des dates de remise (voir generate_mandats,
+# demande du père de Raphaël 2026-09-22, réponse : "ordre des produits
+# tel que défini dans le moteur"). Un mandat cumulé (groupe) prend le
+# rang de son produit le PLUS PRIORITAIRE dans cet ordre.
+_RANG_PRODUIT: dict[str, int] = {col: i for i, (col, _) in enumerate(_MOTIF_SUFFIXES)}
 
 
 def _norm_key(s: str) -> str:
@@ -478,11 +485,13 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
         # du traitement). La ligne RCUR reprend
         # la date du 1er prélèvement décalée de la périodicité du
         # contrat (repli 1 mois si la périodicité n'est pas reconnue).
+        # Phase 1 : calcule le montant et la date de 1er prélèvement DE
+        # BASE de chaque mandat (avant décalage remise ci-dessous), pour
+        # pouvoir les classer.
+        bundle_infos = []
         for suffix, cols in mandats_bundles:
             montant_produits = sum(amounts[c] for c in cols)
             frais = sum(rules.frais_par_produit.get(c, rules.frais_setup_eur) for c in cols)
-            explication = _explication_periodicite(_get(row, COL_PERIODICITE, keyed), rules.periodicites)
-
             # Date d'effet -- UNIQUEMENT pour le mandat Optilife (jamais
             # les autres produits) -- demande du père de Raphaël,
             # 2026-09-22, deux questions posées et confirmées :
@@ -493,12 +502,59 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
             #   ci-dessus) + 1 mois.
             if cols == [COL_OPTILIFE]:
                 if date_effet_raw is not None and date_effet_raw > today:
-                    date_premiere_ligne = _add_months(date_effet_raw, 1)
+                    date_base = _add_months(date_effet_raw, 1)
                 else:
-                    date_premiere_ligne = _add_months(date_premiere, 1)
+                    date_base = _add_months(date_premiere, 1)
             else:
-                date_premiere_ligne = date_premiere
+                date_base = date_premiere
+            bundle_infos.append({
+                "suffix": suffix,
+                "cols": cols,
+                "montant_produits": montant_produits,
+                "frais": frais,
+                "date_base": date_base,
+            })
 
+        # Phase 2 : décalage remise -- si le contrat a PLUSIEURS mandats,
+        # éviter de tous les prélever le même jour (demande du père de
+        # Raphaël, 2026-09-22, questions posées et confirmées) : le
+        # mandat FRST au montant le plus élevé garde sa date normale,
+        # les autres décalent d'un mois de plus chacun, dans l'ordre
+        # décroissant du montant. Égalité de montant -> départagé par
+        # l'ordre canonique des produits dans le moteur (réponse
+        # confirmée). Le décalage s'applique aussi aux lignes RCUR qui
+        # en découlent (réponse confirmée) -- automatique ici puisque
+        # date_rcur ci-dessous part de la date FRST déjà décalée. Un
+        # seul mandat sur le contrat -> aucun décalage (comportement
+        # inchangé).
+        def _rang_bundle(cols: list[str]) -> int:
+            return min(_RANG_PRODUIT[c] for c in cols)
+
+        if len(bundle_infos) > 1:
+            ordered = sorted(
+                bundle_infos,
+                key=lambda b: (-(b["montant_produits"] + b["frais"]), _rang_bundle(b["cols"])),
+            )
+            # Le décalage de chaque mandat est relatif à la date du mandat
+            # ANCRE (le plus gros montant), pas à sa propre date de base --
+            # sinon deux mandats dont les dates de base diffèrent déjà
+            # (ex. Optilife + sa règle "date d'effet" ci-dessus) peuvent
+            # retomber sur le même jour par coïncidence, ce qui annule
+            # l'objectif même de la règle ("éviter de tous prélever d'un
+            # coup").
+            date_ancre = ordered[0]["date_base"]
+            for rang, b in enumerate(ordered):
+                b["date_premiere_ligne"] = _add_months(date_ancre, rang)
+        else:
+            bundle_infos[0]["date_premiere_ligne"] = bundle_infos[0]["date_base"]
+
+        explication = _explication_periodicite(_get(row, COL_PERIODICITE, keyed), rules.periodicites)
+
+        for b in bundle_infos:
+            suffix = b["suffix"]
+            montant_produits = b["montant_produits"]
+            frais = b["frais"]
+            date_premiere_ligne = b["date_premiere_ligne"]
             date_rcur = _add_months(date_premiere_ligne, _mois_periodicite(_get(row, COL_PERIODICITE, keyed)))
 
             mandat_frst = MandatRow(
@@ -685,6 +741,17 @@ def explain_rules(rules: PrelevementRules) -> list[dict[str, str]]:
                 "la date du 1er prélèvement normale) : date d'effet renseignée et "
                 "future (> aujourd'hui) -> date d'effet + 1 mois. Sinon (pas de "
                 "date d'effet, ou déjà passée) -> date du 1er prélèvement + 1 mois."
+            ),
+        },
+        {
+            "titre": "décalage remise",
+            "detail": (
+                "Si un contrat a plusieurs mandats actifs : celui au montant FRST "
+                "le plus élevé garde sa date de 1er prélèvement normale, les autres "
+                "décalent d'un mois de plus chacun (par montant décroissant). "
+                "Égalité de montant -> départagé par l'ordre canonique des produits "
+                "du moteur (Optilife, Carte MGS, MYJURIS...). La ligne RCUR "
+                "correspondante suit le même décalage."
             ),
         },
     ]

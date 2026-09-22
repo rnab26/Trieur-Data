@@ -37,6 +37,7 @@ export function SavedViews({
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [updatingId, setUpdatingId] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -79,6 +80,32 @@ export function SavedViews({
       setSaveError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function handleUpdate(view: SavedView) {
+    // Réenregistre la recherche/les filtres/les colonnes ACTUELS sous le
+    // nom de cette vue existante -- le backend fait un upsert par
+    // (compte, environnement, nom), donc ça remplace bien la même ligne,
+    // pas une nouvelle. Demandé par Raphaël (2026-09-22) : pouvoir
+    // corriger une vue enregistrée si un critère près a changé, sans
+    // devoir la supprimer et la recréer.
+    if (
+      !window.confirm(
+        `Remplacer la vue « ${view.name} » par la recherche/les filtres actuels ?`,
+      )
+    ) {
+      return
+    }
+    setUpdatingId(view.id)
+    setActionError(null)
+    try {
+      const updated = await saveSavedView(orgId, { name: view.name, search, colFilters, visibleCols })
+      setViews((prev) => (prev ?? []).map((v) => (v.id === view.id ? updated : v)))
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+    } finally {
+      setUpdatingId(null)
     }
   }
 
@@ -145,6 +172,14 @@ export function SavedViews({
                   </span>
                   <Button variant="secondary" onClick={() => handleApply(v)}>
                     Appliquer
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    onClick={() => void handleUpdate(v)}
+                    disabled={updatingId === v.id}
+                    title="Remplace cette vue par la recherche/les filtres actuellement affichés"
+                  >
+                    {updatingId === v.id ? 'Mise à jour…' : 'Mettre à jour'}
                   </Button>
                   <Button
                     variant="danger"

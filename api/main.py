@@ -82,6 +82,7 @@ from trieur.db import (
     list_sections,
     list_user_column_sets,
     count_prelevement_mandats,
+    add_prelevement_rule_request_event,
     add_prelevement_rule_request_question,
     answer_prelevement_rule_request_question,
     create_prelevement_rule_request,
@@ -2715,6 +2716,26 @@ def patch_prelevement_rule_request_question(
     if updated is None:
         raise HTTPException(status_code=404, detail="Question introuvable.")
     return updated
+
+
+class PrelevementRuleRequestEventCreate(BaseModel):
+    message: str
+
+
+@app.post("/orgs/{org_id}/prelevement/rule-requests/{request_id}/events")
+def post_prelevement_rule_request_event(
+    org_id: str, request_id: str, body: PrelevementRuleRequestEventCreate,
+    ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    """Une session Claude Code note ici, en quelques mots, ce qu'elle est
+    en train de faire sur cette demande (lecture du code, correctif en
+    cours, PR ouverte, déployé...) -- voir migration 0029. `org_id` sert
+    seulement de garde d'accès (l'appartenance réelle passe par la RLS
+    via request_id -> prelevement_rule_requests.org_id)."""
+    message = body.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Message vide.")
+    return add_prelevement_rule_request_event(ctx.client, request_id, message)
 
 
 # ---------------------------------------------------------------

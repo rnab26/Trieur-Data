@@ -2434,6 +2434,66 @@ def test_prelevement_rule_request_question_forbidden_for_non_admin(client_factor
     assert res.status_code == 403
 
 
+def test_prelevement_rule_request_event_create(client_factory):
+    """Journal d'activité en direct sur une demande (Raphaël,
+    2026-09-22) -- une session Claude Code note ici ce qu'elle est en
+    train de faire, visible sur le site en quasi direct."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    created = tc.post(
+        "/orgs/org-1/prelevement/rule-requests",
+        json={"titre": "Critère RCUR", "demande": "Ajouter un 3e statut déclencheur"},
+        headers=headers,
+    ).json()
+
+    res = tc.post(
+        f"/orgs/org-1/prelevement/rule-requests/{created['id']}/events",
+        json={"message": "Je regarde le code existant"},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    event = res.json()
+    assert event["request_id"] == created["id"]
+    assert event["message"] == "Je regarde le code existant"
+
+    res = tc.post(
+        f"/orgs/org-1/prelevement/rule-requests/{created['id']}/events",
+        json={"message": "PR créée, CI en cours"},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    assert res.json()["message"] == "PR créée, CI en cours"
+
+
+def test_prelevement_rule_request_event_rejects_empty(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    created = tc.post(
+        "/orgs/org-1/prelevement/rule-requests",
+        json={"titre": "X", "demande": "Y"},
+        headers=headers,
+    ).json()
+    res = tc.post(
+        f"/orgs/org-1/prelevement/rule-requests/{created['id']}/events",
+        json={"message": "   "},
+        headers=headers,
+    )
+    assert res.status_code == 400
+
+
+def test_prelevement_rule_request_event_forbidden_for_non_admin(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/prelevement/rule-requests/does-not-exist/events",
+        json={"message": "Je regarde"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 403
+
+
 def test_create_and_list_sections(client_factory):
     fake = _make_client(profiles=[ADMIN_PROFILE])
     tc = client_factory(fake)

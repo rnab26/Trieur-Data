@@ -9,9 +9,41 @@ import {
   listPrelevementRuleRequests,
   updatePrelevementRuleRequest,
   type PrelevementRuleRequest,
+  type RuleRequestEvent,
   type RuleRequestQuestion,
   type RuleRequestStatut,
 } from '@/lib/api'
+
+// "il faut s'en rapprocher le plus possible [d'une session avec toi]"
+// (Raphaël, 2026-09-22) : le père de Raphaël ne voit une demande
+// avancer qu'après coup, au statut suivant (⏳ -> 🔧 -> ✅), sans savoir
+// ce qui se passe entre-temps. Ce fil affiche, sous chaque demande, les
+// messages courts qu'une session Claude Code note en travaillant
+// dessus ("je regarde le code existant", "PR créée, CI en cours"...) --
+// pas un vrai chat (pas de réponse possible ici, voir RuleQuestionBlock
+// pour ça), juste la narration en quasi direct de ce qui se passe.
+function formatEventTime(iso: string) {
+  const d = new Date(iso)
+  return d.toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
+function ActivityFeed({ events }: { events: RuleRequestEvent[] }) {
+  if (events.length === 0) return null
+  const sorted = [...events].sort((a, b) => a.created_at.localeCompare(b.created_at))
+  return (
+    <div className="mt-2 rounded-md border border-[var(--border)] bg-[var(--muted-bg)] p-2">
+      <p className="mb-1 text-xs font-medium text-[var(--muted)]">💬 Ce que je fais sur cette demande</p>
+      <ul className="flex flex-col gap-1">
+        {sorted.map((e) => (
+          <li key={e.id} className="text-xs">
+            <span className="text-[var(--muted)]">{formatEventTime(e.created_at)}</span>{' '}
+            <span>{e.message}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
 
 // Réponse à une question à choix cliquables posée par une session
 // Claude Code sur une demande de règle ambiguë -- même principe que
@@ -212,20 +244,38 @@ export function PrelevementRuleRequests({
 
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
-    setError(null)
-    listPrelevementRuleRequests(orgId)
-      .then((data) => {
-        if (!cancelled) setRequests(data)
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
+    function load(showSpinner: boolean) {
+      if (showSpinner) {
+        setLoading(true)
+        setError(null)
+      }
+      listPrelevementRuleRequests(orgId)
+        .then((data) => {
+          if (!cancelled) {
+            setRequests(data)
+            setError(null)
+          }
+        })
+        .catch((err: unknown) => {
+          // Silencieux pour le rafraîchissement automatique en arrière-plan
+          // (showSpinner=false) -- une erreur réseau ponctuelle toutes les
+          // 15s ne doit pas remplacer l'écran par un message d'erreur tant
+          // que le dernier chargement réussi reste affiché.
+          if (!cancelled && showSpinner) setError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false)
+        })
+    }
+    load(true)
+    // Rapprocher le fil d'activité d'un vrai chat (Raphaël, 2026-09-22) :
+    // pas de vrai temps réel (Supabase Realtime non câblé ici), mais un
+    // polling léger pour voir les messages de la session Claude Code
+    // apparaître sans avoir à recharger la page.
+    const interval = setInterval(() => load(false), 15000)
     return () => {
       cancelled = true
+      clearInterval(interval)
     }
   }, [orgId, refreshKey, reloadNonce])
 
@@ -241,8 +291,11 @@ export function PrelevementRuleRequests({
     setCreating(true)
     setError(null)
     try {
+      // L'API de création ne renvoie pas les sous-listes questions/events
+      // (pas d'embed sur cet endpoint) -- une demande neuve n'en a de
+      // toute façon aucune.
       const created = await createPrelevementRuleRequest(orgId, titre, demande)
-      setRequests((prev) => [...prev, created])
+      setRequests((prev) => [...prev, { ...created, questions: [], events: [] }])
       setNewTitre('')
       setNewDemande('')
     } catch (err) {
@@ -257,8 +310,13 @@ export function PrelevementRuleRequests({
     setSavingId(id)
     setError(null)
     try {
+      // Bug réel trouvé en cours de route : l'API de modification ne
+      // renvoie pas non plus questions/events -- remplacer l'objet entier
+      // par `updated` les effaçait silencieusement de l'écran après un
+      // simple renommage, jusqu'au rechargement suivant. Fusion au lieu
+      // de remplacement : seuls les champs modifiés changent.
       const updated = await updatePrelevementRuleRequest(orgId, id, patch)
-      setRequests((prev) => prev.map((r) => (r.id === id ? updated : r)))
+      setRequests((prev) => prev.map((r) => (r.id === id ? { ...r, ...updated } : r)))
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
     } finally {
@@ -283,6 +341,15 @@ export function PrelevementRuleRequests({
 
   const nonValidees = requests.filter((r) => r.statut !== 'valide').length
   const nbPendingQuestions = requests.reduce((n, r) => n + r.questions.filter((q) => !q.answered_at).length, 0)
+  // Vue générale ("soit sur chaque règle... soit générale", Raphaël,
+  // 2026-09-22) : le dernier message toutes demandes en_cours confondues,
+  // visible sans dérouler l'historique ni ouvrir une demande en
+  // particulier -- "qu'est-ce que Claude est en train de faire là,
+  // maintenant".
+  const latestActivity = requests
+    .filter((r) => r.statut === 'en_cours')
+    .flatMap((r) => r.events.map((e) => ({ requestTitre: r.titre, event: e })))
+    .sort((a, b) => b.event.created_at.localeCompare(a.event.created_at))[0]
   // Comment éviter les doublons de règles (retour de Raphaël) : avertit
   // dès que le titre en cours de frappe ressemble à une demande déjà
   // créée, avant même de cliquer "Ajouter" -- jamais bloquant, juste un
@@ -299,6 +366,15 @@ export function PrelevementRuleRequests({
   return (
     <div className="mt-2 border-t border-[var(--border)] pt-3">
       {error && <p className="mb-2 text-sm text-[var(--danger)]">Erreur : {error}</p>}
+
+      {latestActivity && (
+        <p className="mb-2 rounded-md border border-[var(--primary)] bg-[var(--muted-bg)] p-2 text-xs">
+          <span className="font-bold">🔧 Là, maintenant :</span>{' '}
+          <span className="font-medium">{latestActivity.requestTitre}</span> --{' '}
+          {latestActivity.event.message}{' '}
+          <span className="text-[var(--muted)]">({formatEventTime(latestActivity.event.created_at)})</span>
+        </p>
+      )}
 
       {nbPendingQuestions > 0 && (
         <p className="mb-2 rounded-md bg-[var(--danger)] p-2 text-sm font-bold text-white">
@@ -392,6 +468,7 @@ export function PrelevementRuleRequests({
                 />
               ))}
               <AnsweredQuestions questions={r.questions.filter((q) => q.answered_at)} />
+              <ActivityFeed events={r.events} />
               <div className="mt-1 flex items-center justify-between">
                 <span className="text-xs text-[var(--muted)]">
                   Modifié le {new Date(r.updated_at).toLocaleDateString('fr-FR')}

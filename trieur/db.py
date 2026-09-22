@@ -1370,7 +1370,10 @@ def list_prelevement_rule_requests(client: Client, org_id: str) -> list[dict]:
     attente s'il y en a une, sans requête supplémentaire par demande."""
     res = (
         _td(client, "prelevement_rule_requests")
-        .select("*, questions:prelevement_rule_request_questions(*)")
+        .select(
+            "*, questions:prelevement_rule_request_questions(*),"
+            " events:prelevement_rule_request_events(*)"
+        )
         .eq("org_id", org_id)
         .order("created_at", desc=False)
         .execute()
@@ -1456,3 +1459,20 @@ def answer_prelevement_rule_request_question(
         .execute()
     )
     return res.data[0] if res.data else None
+
+
+# ---------------------------------------------------------------
+# Journal d'activité en direct sur une demande (migration 0029,
+# Raphaël 2026-09-22) -- une session Claude Code y écrit un court
+# message à chaque étape clé pendant qu'elle travaille sur la
+# demande, pour que ce soit visible sur le site en quasi direct
+# plutôt que découvert après coup dans PROJECT_LOG.md.
+# ---------------------------------------------------------------
+
+def add_prelevement_rule_request_event(client: Client, request_id: str, message: str) -> dict:
+    res = (
+        _td(client, "prelevement_rule_request_events")
+        .insert({"request_id": request_id, "message": message})
+        .execute()
+    )
+    return res.data[0]

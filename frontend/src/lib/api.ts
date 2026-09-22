@@ -1033,6 +1033,17 @@ export type RuleRequestQuestion = {
   answered_at: string | null
 }
 
+// Journal d'activité en direct sur une demande (2026-09-22) -- une
+// session Claude Code y écrit un court message à chaque étape clé
+// pendant qu'elle travaille dessus, pour que ce soit visible sur le
+// site en quasi direct plutôt que découvert après coup.
+export type RuleRequestEvent = {
+  id: string
+  request_id: string
+  message: string
+  created_at: string
+}
+
 export type PrelevementRuleRequest = {
   id: string
   org_id: string
@@ -1046,6 +1057,7 @@ export type PrelevementRuleRequest = {
   // que l'écran affiche le statut ET une question en attente sans appel
   // séparé par demande.
   questions: RuleRequestQuestion[]
+  events: RuleRequestEvent[]
 }
 
 export function listPrelevementRuleRequests(orgId: string) {

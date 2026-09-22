@@ -1782,7 +1782,7 @@ def test_prelevement_generate_returns_mandat_rows_and_file_for_preview(client_fa
     assert "Date d'effet" in body["mandats"][0]
 
     wb = openpyxl.load_workbook(io.BytesIO(base64.b64decode(body["file_base64"])))
-    assert wb.sheetnames == ["Mandat", "First", "RCUR", "Exclus"]
+    assert wb.sheetnames == ["Mandat", "FRST", "RCUR", "Exclus"]
 
 
 def test_prelevement_generate_reachable_cross_origin(client_factory):

@@ -2219,7 +2219,7 @@ async def post_prelevement_generate(
     -- avant, le classeur se téléchargeait automatiquement, sans que
     l'utilisateur puisse voir le résultat avant de l'enregistrer sur son
     téléphone), le résumé des étapes, et le classeur complet encodé en
-    base64 (4 onglets : Mandat, First, RCUR, Exclus) que le frontend
+    base64 (4 onglets : Mandat, FRST, RCUR, Exclus) que le frontend
     décode pour le téléchargement -- rien n'est écrit en base, ce
     endpoint ne fait que transformer des fichiers en un autre, comme
     l'import multi-fichiers du Trieur de Data. Plusieurs fichiers =
@@ -2289,8 +2289,8 @@ async def post_prelevement_generate(
         (df_mandat if not df_mandat.empty else pd.DataFrame(columns=["Aucun mandat"])).to_excel(
             writer, index=False, sheet_name="Mandat",
         )
-        (df_first if not df_first.empty else pd.DataFrame(columns=["Aucun mandat First"])).to_excel(
-            writer, index=False, sheet_name="First",
+        (df_first if not df_first.empty else pd.DataFrame(columns=["Aucun mandat FRST"])).to_excel(
+            writer, index=False, sheet_name="FRST",
         )
         (df_rcur if not df_rcur.empty else pd.DataFrame(columns=["Aucun mandat RCUR"])).to_excel(
             writer, index=False, sheet_name="RCUR",

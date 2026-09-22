@@ -8,6 +8,7 @@ import { PrelevementMandatsPanel } from './PrelevementMandatsPanel'
 import { PrelevementRuleRequests } from './PrelevementRuleRequests'
 import {
   ApiError,
+  createPrelevementRuleRequest,
   downloadPrelevementFile,
   generatePrelevementMandats,
   getPrelevementRules,
@@ -62,11 +63,21 @@ export function PrelevementScreen() {
   const [savingRules, setSavingRules] = useState(false)
   const [rulesSaved, setRulesSaved] = useState(false)
   const [rulesExplainOpen, setRulesExplainOpen] = useState(false)
-  // Titre pré-rempli dans "Demandes de modification de règles" quand on
-  // clique "✏️ Demander une modification" sur une règle du panneau
-  // ci-dessous (Raphaël, 2026-09-22) -- évite de retaper le nom de la
-  // règle à la main.
-  const [ruleRequestPrefill, setRuleRequestPrefill] = useState<string | null>(null)
+  // Formulaire de demande de modification directement SOUS la règle
+  // concernée (Raphaël, 2026-09-22 : "que ça repasse en bas, ça
+  // embrouille -- laisse-le juste en dessous, les demandes ne passent
+  // en bas [dans la liste] que pour de nouvelles règles"). `openRuleIdx`
+  // = index dans rules.explication du formulaire actuellement ouvert
+  // (un seul à la fois), le texte tapé et l'état d'envoi lui sont
+  // propres. `ruleRequestsRefreshKey` fait recharger la liste du
+  // dessous (PrelevementRuleRequests) après un ajout depuis ici, sans
+  // dupliquer sa logique de récupération.
+  const [openRuleIdx, setOpenRuleIdx] = useState<number | null>(null)
+  const [ruleFormText, setRuleFormText] = useState('')
+  const [ruleFormSubmitting, setRuleFormSubmitting] = useState(false)
+  const [ruleFormError, setRuleFormError] = useState<string | null>(null)
+  const [ruleFormSentTitre, setRuleFormSentTitre] = useState<string | null>(null)
+  const [ruleRequestsRefreshKey, setRuleRequestsRefreshKey] = useState(0)
 
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [selectedFiles, setSelectedFiles] = useState<File[]>([])
@@ -156,6 +167,31 @@ export function PrelevementScreen() {
     setPeriodicites((prev) => ({ ...prev, [code]: texte }))
     setNewPeriodiciteCode('')
     setNewPeriodiciteTexte('')
+  }
+
+  function openRuleForm(index: number) {
+    setOpenRuleIdx((prev) => (prev === index ? null : index))
+    setRuleFormText('')
+    setRuleFormError(null)
+  }
+
+  async function submitRuleForm(titre: string) {
+    const demande = ruleFormText.trim()
+    if (!orgId || !demande) return
+    setRuleFormSubmitting(true)
+    setRuleFormError(null)
+    try {
+      await createPrelevementRuleRequest(orgId, titre, demande)
+      setOpenRuleIdx(null)
+      setRuleFormText('')
+      setRuleFormSentTitre(titre)
+      setRuleRequestsRefreshKey((k) => k + 1)
+      setTimeout(() => setRuleFormSentTitre(null), 4000)
+    } catch (err) {
+      setRuleFormError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+    } finally {
+      setRuleFormSubmitting(false)
+    }
   }
 
   function handleFilesSelected(files: File[]) {
@@ -484,13 +520,44 @@ export function PrelevementScreen() {
                         <p className="text-sm font-medium text-[var(--foreground)]">{r.titre}</p>
                         <button
                           type="button"
-                          onClick={() => setRuleRequestPrefill(r.titre)}
+                          onClick={() => openRuleForm(i)}
                           className="text-xs text-[var(--primary)] hover:underline"
                         >
-                          ✏️ Demander une modification
+                          {openRuleIdx === i ? 'Annuler' : '✏️ Demander une modification'}
                         </button>
                       </div>
                       <p className="text-sm text-[var(--muted)]">{r.detail}</p>
+
+                      {ruleFormSentTitre === r.titre && openRuleIdx !== i && (
+                        <p className="mt-1 text-xs text-[var(--success)]">
+                          ✅ Demande enregistrée, visible dans "Demandes de modification de règles"
+                          ci-dessous.
+                        </p>
+                      )}
+
+                      {openRuleIdx === i && (
+                        <div className="mt-2 flex flex-col gap-2 rounded-md border border-[var(--border)] p-2">
+                          <textarea
+                            autoFocus
+                            className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] p-2 text-sm"
+                            rows={2}
+                            placeholder="Changement souhaité pour cette règle, en détail..."
+                            value={ruleFormText}
+                            onChange={(e) => setRuleFormText(e.target.value)}
+                          />
+                          {ruleFormError && (
+                            <p className="text-xs text-[var(--danger)]">Erreur : {ruleFormError}</p>
+                          )}
+                          <div>
+                            <Button
+                              onClick={() => void submitRuleForm(r.titre)}
+                              disabled={ruleFormSubmitting || !ruleFormText.trim()}
+                            >
+                              {ruleFormSubmitting ? 'Enregistrement…' : 'Envoyer la demande'}
+                            </Button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -498,11 +565,7 @@ export function PrelevementScreen() {
             </div>
           )}
 
-          <PrelevementRuleRequests
-            orgId={orgId}
-            prefillTitre={ruleRequestPrefill}
-            onPrefillConsumed={() => setRuleRequestPrefill(null)}
-          />
+          <PrelevementRuleRequests orgId={orgId} refreshKey={ruleRequestsRefreshKey} />
 
           <Card>
             <CardContent className="flex flex-col gap-3">

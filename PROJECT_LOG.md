@@ -4365,3 +4365,37 @@ Au passage : date et heure de création affichées partout où une
 demande de règle apparaît (liste des demandes, sélecteur
 d'attribution du panneau "Modèles tableau", panneau "Règles
 appliquées"). 6 nouveaux tests, 512 passent.
+
+### PR #86 : Optilife -- décalage déplacé du FRST vers le RCUR (2026-09-22)
+
+Réponse reçue sur la question posée en PR #85 ("Oui exactement, ça
+remplace l'ancienne règle") : le FRST Optilife redevient standard
+(plus de décalage lié à la date d'effet), c'est désormais le RCUR
+Optilife qui prend +1 mois (sur la date d'effet si future, sinon sur
+la date du FRST). Le décalage "remise" (plusieurs mandats/contrat)
+reste inchangé, ancré sur la date FRST normale. 9 tests mis à jour,
+513 passent. Déployé et vérifié `live`.
+
+### PR #87 + #88 : vrai cycle de validation des demandes de règles (2026-09-22)
+
+Retour de Raphaël : le système de statuts (⏳/🔧/✅) était confus --
+une session Claude Code passait seule une demande codée à "valide",
+sans qu'un humain ne confirme qu'elle marche réellement. Résultat :
+quand ce n'était pas le cas, une NOUVELLE demande était recréée
+plutôt que de corriger celle-ci (doublons).
+
+Nouveau cycle en 4 statuts : `en_attente` -> `en_cours` -> `a_verifier`
+(codé + déployé, en attente d'un humain) -> `valide`/**"Certifiée"**
+(confirmé, verrouillé) OU retour à `en_cours` (bouton "✏️ Corriger" --
+la précision s'ajoute à la MÊME demande, jamais une nouvelle ligne).
+Encadré orange (nouvelle couleur `--warning`) sur chaque demande
+`a_verifier`, avec les boutons "✅ Ça fonctionne, je certifie" /
+"✏️ Ça ne marche pas, corriger". Bannière globale si au moins une
+demande attend une validation. Migration 0031 (contrainte CHECK sur
+`statut`). **CLAUDE.md mis à jour : toute session Claude Code pose
+désormais `a_verifier` après un déploiement vérifié `live`, jamais
+`valide` directement.**
+
+La règle Optilife (PR #86) a été repassée à `a_verifier` -- en attente
+de la validation de Raphaël/son père sur le site. 514 tests passent.
+Déployé et vérifié `live`.

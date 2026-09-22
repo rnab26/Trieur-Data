@@ -4290,3 +4290,31 @@ règle du moteur dans `explain_rules()`, jamais une description
 dupliquée). Jeux de colonnes déplacés dans un petit panneau à côté de
 la grille (bouton ⚙️), toujours dans le même aperçu. Déployé et
 vérifié `live`.
+
+### PR #83 : panneau "Modèles tableau" -- modèles + attribution de règles (2026-09-22)
+
+Raphaël a validé une maquette (artefact) avant codage -- premier
+"one-shot" de la session : bouton "📊✏️ Modèles tableau ⚙️" ouvrant une
+seule box repliable regroupant tout ce qui touche aux colonnes.
+
+- **Modèles enregistrés** : créer, ✏️ modifier (renommer -- nouveau
+  `PATCH /colonnes-mandat-presets/{id}`), supprimer, "Sélectionner"
+  applique le modèle à la grille de travail ET mémorise le choix, pour
+  que "💾 Enregistrer" (dans le panneau, distinct du bouton global
+  "Enregistrer les réglages") sache quel modèle mettre à jour.
+- **Attribution de règle** sur une colonne personnalisée : nouveau
+  champ `rule_request_id` (simple référence jsonb, jamais vérifiée par
+  contrainte). Choisis une demande déjà en file, ou décris-en une
+  nouvelle directement sous la colonne -- même mécanisme que "+
+  Nouvelle règle" ailleurs, donc visible immédiatement dans "Règles
+  appliquées par le moteur > + nouvelles règles", traitée à la
+  session suivante, puis rejoint "Règles appliquées" une fois codée.
+- **Titre en gras éditable** partout où une demande de règle se crée
+  (panneau Modèles tableau, formulaire "Demander une modification"
+  sous chaque règle du moteur, "+ Nouvelle règle") -- avant,
+  auto-généré et invisible à un endroit, non éditable à un autre.
+
+7 nouveaux tests, 506 passent. Déployé et vérifié `live`.
+
+**Toutes les demandes de règles de la file sont `valide` -- plus
+aucune en attente.**

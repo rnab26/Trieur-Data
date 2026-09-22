@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -31,18 +31,16 @@ const STATUT_COLOR: Record<RuleRequestStatut, string> = {
 // message -- jamais codé/appliqué depuis cet écran lui-même.
 export function PrelevementRuleRequests({
   orgId,
-  prefillTitre,
-  onPrefillConsumed,
+  refreshKey,
 }: {
   orgId: string
-  // Rempli quand on clique "✏️ Demander une modification" sur une règle
-  // du panneau "Règles appliquées par le moteur" ci-dessus (Raphaël,
-  // 2026-09-22 : "je ne veux pas retaper le nom de la règle à la
-  // main") -- change de valeur à chaque clic (même règle reclique deux
-  // fois = même chaîne, donc onPrefillConsumed est appelé pour que le
-  // parent puisse remettre à zéro et permettre un reclique identique.
-  prefillTitre?: string | null
-  onPrefillConsumed?: () => void
+  // Incrémenté par le parent après un ajout fait depuis le formulaire
+  // inline sous une règle du panneau "Règles appliquées par le moteur"
+  // (Raphaël, 2026-09-22 : le point d'entrée pour MODIFIER une règle
+  // existante est directement dessous, pas ici -- cette liste ne sert
+  // de formulaire de saisie que pour une règle qui n'existe pas encore)
+  // -- fait recharger sans dupliquer la logique de récupération.
+  refreshKey?: number
 }) {
   const [requests, setRequests] = useState<PrelevementRuleRequest[]>([])
   const [loading, setLoading] = useState(true)
@@ -51,17 +49,6 @@ export function PrelevementRuleRequests({
   const [newTitre, setNewTitre] = useState('')
   const [newDemande, setNewDemande] = useState('')
   const [creating, setCreating] = useState(false)
-  const formRef = useRef<HTMLDivElement | null>(null)
-  const demandeRef = useRef<HTMLTextAreaElement | null>(null)
-
-  useEffect(() => {
-    if (!prefillTitre) return
-    setNewTitre(prefillTitre)
-    formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    demandeRef.current?.focus()
-    onPrefillConsumed?.()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [prefillTitre])
 
   const [savingId, setSavingId] = useState<string | null>(null)
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null)
@@ -83,7 +70,7 @@ export function PrelevementRuleRequests({
     return () => {
       cancelled = true
     }
-  }, [orgId])
+  }, [orgId, refreshKey])
 
   async function handleCreate() {
     const titre = newTitre.trim()
@@ -134,10 +121,10 @@ export function PrelevementRuleRequests({
     <div className="mb-4 rounded-lg border border-[var(--border)] p-3">
       <h2 className="text-sm font-semibold">📝 Demandes de modification de règles</h2>
       <p className="mt-1 mb-3 text-xs text-[var(--muted)]">
-        Pour les règles codées en dur (exclusions, First/RCUR, liste des produits...), pas modifiables
-        directement ci-dessus. Écris ici le changement souhaité -- ça s'enregistre, ça ne code rien tout
-        seul. Envoie ensuite un message à la session Claude Code pour qu'elle traite les demandes en
-        attente.
+        Historique de toutes les demandes, quel que soit leur statut. Pour modifier une règle
+        existante, utilise "✏️ Demander une modification" juste en dessous d'elle, plus haut -- le
+        formulaire ci-dessous ne sert qu'à proposer une règle qui n'existe pas encore. Envoie ensuite
+        un message à la session Claude Code pour qu'elle traite les demandes en attente.
       </p>
 
       {loading && <p className="text-sm text-[var(--muted)]">Chargement…</p>}

@@ -171,16 +171,16 @@ function AppContent() {
 
   return (
     <div>
-      <nav className="flex items-center justify-between gap-1 border-b border-[var(--border)] bg-[var(--card)] px-4 pt-2">
+      <nav className="flex items-center justify-between gap-1 shadow-[inset_0_-1px_0_var(--border)] bg-[var(--card)] px-4 pt-2">
         <div className="flex gap-1">
           {onglets.map(([key, label]) => (
             <button
               key={key}
               onClick={() => setEcran(key)}
               className={
-                'rounded-t-md px-3 py-2 text-sm font-medium ' +
+                'min-h-11 rounded-t-lg px-4 text-sm font-medium ' +
                 (ecran === key
-                  ? 'bg-[var(--background)] text-[var(--foreground)]'
+                  ? 'bg-[var(--background)] text-[var(--foreground)] font-semibold shadow-[inset_0_0_0_1px_var(--border)]'
                   : 'text-[var(--muted)] hover:text-[var(--foreground)]')
               }
             >

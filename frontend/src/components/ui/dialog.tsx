@@ -19,7 +19,7 @@ export function Dialog({
       role="presentation"
     >
       <div
-        className="w-full max-w-lg rounded-lg border border-[var(--border)] bg-[var(--card)] p-4 shadow-lg max-h-[85vh] overflow-y-auto"
+        className="w-full max-w-lg rounded-xl bg-[var(--card)] p-4 shadow-[var(--ring-card),0_20px_25px_-5px_rgb(0_0_0/0.1)] max-h-[85vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"

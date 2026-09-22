@@ -3826,3 +3826,29 @@ Chantiers "Détecter les doublons même sans IBAN" et "Calculer une
 colonne automatiquement" (thème Global/transverse) : mis en pause
 (`abandonne`) à la demande de Raphaël -- pas de besoin réel pour
 l'instant, priorité au concret (Prélèvement).
+
+### PR #60 : frais par produit et libellés de périodicité réglables (2026-09-22)
+
+Raphaël a demandé à pouvoir modifier certaines règles de Prélèvement
+directement dans l'écran, sans coder à chaque fois. Discussion sur le
+découpage (chemin "en direct, sans redéploiement" vs "je code et je
+teste") -- pas de tri automatique (jugé trop risqué à construire pour
+un domaine bancaire) : la scission se fait par ce qui est réglable ou
+non dans l'écran "Réglages", tout le reste passe par message.
+
+**Réglable en direct** (ce PR) : frais de dossier par produit
+(au lieu d'un seul montant pour tous), libellés de périodicité
+(ajout/modification/suppression). Migration 0024
+(`frais_par_produit`, `periodicites`, jsonb sur
+`prelevement_rules`), appliquée directement via `scripts/sql.sh`.
+Moteur (`generate_mandats`) applique le montant par produit avec repli
+sur l'ancien réglage global si absent -- aucune régression sur les
+réglages existants. Écran pré-rempli avec les valeurs par défaut tant
+que rien n'est personnalisé, jamais vide.
+
+**Reste du code** (hors périmètre, volontairement) : la liste des
+produits eux-mêmes (couplée à la fusion spéciale MYJURIS+IMMO et au
+nom exact des colonnes de l'export CRM -- trop risqué en direct),
+les exclusions, le classement FRST/RCUR. 10 nouveaux tests (moteur +
+API + un test bout-en-bout confirmant l'application réelle). CI verte,
+mergé.

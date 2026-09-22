@@ -3763,3 +3763,39 @@ calqué sur `--danger`, clair + sombre) pour les mandats First/RCUR
 générés. Pas de changement backend. Vérifié : `tsc --noEmit` propre,
 `npm run lint` propre (hors avertissement préexistant sans rapport),
 suite pytest complète (449 tests) en sanity check.
+
+### PR #58 : confirmation avant enregistrement en base (2026-09-22)
+
+Raphaël a redemandé un sélecteur d'environnement + confirmation sur le
+bouton "Enregistrer dans la base de données" (écran Prélèvement) --
+contradiction signalée avec sa demande du 21/09 (verrouillage sur
+l'environnement Prélèvement, décidé pour éviter une erreur de clic).
+Question posée, réponse : garder le verrouillage, ajouter seulement la
+confirmation manquante. `window.confirm` avant l'appel, même
+convention que `MasterColumnsPanel.removeAt`. Mergée.
+
+### PR #59 : vue de consultation des mandats enregistrés (en cours)
+
+Chantier Cockpit "Vue Base de données dédiée aux mandats Prélèvement"
+débloqué -- Raphaël a demandé d'avancer côté Base de données en
+général (créer des colonnes, éditer/filtrer/exporter façon mini-CRM,
+plusieurs "onglets" = environnements, tenir à l'échelle). État des
+lieux : l'essentiel existait déjà côté Base de données générique
+(colonnes maîtres, édition manuelle, modification/suppression en
+masse, filtres, export, plusieurs environnements). Ce qui manquait
+vraiment : une vue pour consulter les mandats déjà enregistrés (table
+`trieur_data.prelevement_mandats`, en place depuis PR #49 mais jamais
+exposée).
+
+Nouvel onglet "Mandats enregistrés" dans l'écran Prélèvement.
+Backend : `GET/PATCH/DELETE /orgs/{org_id}/prelevement/mandats(...)` +
+export CSV/Excel -- même socle que les endpoints `/records`
+génériques, adapté aux colonnes fixes de cette table (pas de
+"colonnes maîtres" à gérer). 12 nouveaux tests (liste, recherche,
+édition, 404, modif/suppression en masse + garde-fou champ inconnu,
+export). CI en cours.
+
+Autre chantier ouvert en parallèle (pas commencé) : "Base de données :
+tenir à l'échelle (centaines de milliers/millions de lignes)" -- les
+données client sont en JSONB sans index dédié, à mesurer/indexer
+avant que le volume réel pose problème.

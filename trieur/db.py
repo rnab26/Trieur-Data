@@ -1351,9 +1351,13 @@ def delete_prelevement_mandat(client: Client, mandat_id: str, org_id: str) -> No
 # ---------------------------------------------------------------
 
 def list_prelevement_rule_requests(client: Client, org_id: str) -> list[dict]:
+    """Inclut les questions posées sur chaque demande (embed PostgREST,
+    alias "questions" -- voir migration 0026) : un seul aller-retour
+    pour que l'écran affiche, par règle, le statut ET la question en
+    attente s'il y en a une, sans requête supplémentaire par demande."""
     res = (
         _td(client, "prelevement_rule_requests")
-        .select("*")
+        .select("*, questions:prelevement_rule_request_questions(*)")
         .eq("org_id", org_id)
         .order("created_at", desc=False)
         .execute()
@@ -1401,3 +1405,41 @@ def update_prelevement_rule_request(
 
 def delete_prelevement_rule_request(client: Client, request_id: str, org_id: str) -> None:
     _td(client, "prelevement_rule_requests").delete().eq("id", request_id).eq("org_id", org_id).execute()
+
+
+# ---------------------------------------------------------------
+# Questions à choix cliquables sur une demande de modification de
+# règle (migration 0026, Raphaël 2026-09-22) -- même principe que
+# chantier_questions côté Cockpit : une session Claude Code pose la
+# question ici quand la demande n'est pas claire, plutôt que dans le
+# chat ; la réponse vit dans la même table, lue par la session
+# suivante.
+# ---------------------------------------------------------------
+
+def add_prelevement_rule_request_question(
+    client: Client, request_id: str, question: str, options: list[str],
+) -> dict:
+    res = (
+        _td(client, "prelevement_rule_request_questions")
+        .insert({"request_id": request_id, "question": question, "options": options})
+        .execute()
+    )
+    return res.data[0]
+
+
+def answer_prelevement_rule_request_question(
+    client: Client, question_id: str, answer: str, comment: str | None,
+) -> dict | None:
+    from datetime import datetime, timezone
+
+    res = (
+        _td(client, "prelevement_rule_request_questions")
+        .update({
+            "answer": answer,
+            "comment": comment,
+            "answered_at": datetime.now(timezone.utc).isoformat(),
+        })
+        .eq("id", question_id)
+        .execute()
+    )
+    return res.data[0] if res.data else None

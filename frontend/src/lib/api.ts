@@ -1005,6 +1005,21 @@ export function savePrelevementRules(
 export const RULE_REQUEST_STATUTS = ['en_attente', 'en_cours', 'valide'] as const
 export type RuleRequestStatut = (typeof RULE_REQUEST_STATUTS)[number]
 
+// Question à choix cliquables posée par une session Claude Code sur une
+// demande ambiguë (2026-09-22) -- même principe que ChantierQuestion
+// côté Cockpit, rattachée ici à une demande de règle Prélèvement plutôt
+// qu'à un chantier.
+export type RuleRequestQuestion = {
+  id: string
+  request_id: string
+  question: string
+  options: string[]
+  answer: string | null
+  comment: string | null
+  created_at: string
+  answered_at: string | null
+}
+
 export type PrelevementRuleRequest = {
   id: string
   org_id: string
@@ -1013,10 +1028,28 @@ export type PrelevementRuleRequest = {
   statut: RuleRequestStatut
   created_at: string
   updated_at: string
+  // Toujours présent (liste vide si aucune question posée) -- l'API
+  // l'inclut directement dans la même réponse (embed PostgREST), pour
+  // que l'écran affiche le statut ET une question en attente sans appel
+  // séparé par demande.
+  questions: RuleRequestQuestion[]
 }
 
 export function listPrelevementRuleRequests(orgId: string) {
   return request<PrelevementRuleRequest[]>(`/orgs/${orgId}/prelevement/rule-requests`)
+}
+
+export function answerPrelevementRuleRequestQuestion(
+  orgId: string,
+  requestId: string,
+  questionId: string,
+  answer: string,
+  comment: string | null,
+) {
+  return request<RuleRequestQuestion>(
+    `/orgs/${orgId}/prelevement/rule-requests/${requestId}/questions/${questionId}`,
+    { method: 'PATCH', body: JSON.stringify({ answer, comment }) },
+  )
 }
 
 export function createPrelevementRuleRequest(orgId: string, titre: string, demande: string) {

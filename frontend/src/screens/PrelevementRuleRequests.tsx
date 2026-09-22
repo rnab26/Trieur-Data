@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -29,7 +29,21 @@ const STATUT_COLOR: Record<RuleRequestStatut, string> = {
 // souhaité, ça s'enregistre en base (statut de départ "En attente"),
 // et une session Claude Code la traite quand on le lui demande par
 // message -- jamais codé/appliqué depuis cet écran lui-même.
-export function PrelevementRuleRequests({ orgId }: { orgId: string }) {
+export function PrelevementRuleRequests({
+  orgId,
+  prefillTitre,
+  onPrefillConsumed,
+}: {
+  orgId: string
+  // Rempli quand on clique "✏️ Demander une modification" sur une règle
+  // du panneau "Règles appliquées par le moteur" ci-dessus (Raphaël,
+  // 2026-09-22 : "je ne veux pas retaper le nom de la règle à la
+  // main") -- change de valeur à chaque clic (même règle reclique deux
+  // fois = même chaîne, donc onPrefillConsumed est appelé pour que le
+  // parent puisse remettre à zéro et permettre un reclique identique.
+  prefillTitre?: string | null
+  onPrefillConsumed?: () => void
+}) {
   const [requests, setRequests] = useState<PrelevementRuleRequest[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -37,6 +51,17 @@ export function PrelevementRuleRequests({ orgId }: { orgId: string }) {
   const [newTitre, setNewTitre] = useState('')
   const [newDemande, setNewDemande] = useState('')
   const [creating, setCreating] = useState(false)
+  const formRef = useRef<HTMLDivElement | null>(null)
+  const demandeRef = useRef<HTMLTextAreaElement | null>(null)
+
+  useEffect(() => {
+    if (!prefillTitre) return
+    setNewTitre(prefillTitre)
+    formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    demandeRef.current?.focus()
+    onPrefillConsumed?.()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefillTitre])
 
   const [savingId, setSavingId] = useState<string | null>(null)
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null)
@@ -194,7 +219,10 @@ export function PrelevementRuleRequests({ orgId }: { orgId: string }) {
         </ul>
       )}
 
-      <div className="flex flex-col gap-2 rounded-md border border-dashed border-[var(--border)] p-2">
+      <div
+        ref={formRef}
+        className="flex flex-col gap-2 rounded-md border border-dashed border-[var(--border)] p-2"
+      >
         <p className="text-xs font-medium text-[var(--muted)]">Nouvelle demande</p>
         <Input
           placeholder="Nom de la règle (ex. Critère de RCUR)"
@@ -202,6 +230,7 @@ export function PrelevementRuleRequests({ orgId }: { orgId: string }) {
           onChange={(e) => setNewTitre(e.target.value)}
         />
         <textarea
+          ref={demandeRef}
           className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] p-2 text-sm"
           rows={2}
           placeholder="Changement souhaité, en détail..."

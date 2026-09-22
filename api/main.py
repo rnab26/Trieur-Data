@@ -81,9 +81,13 @@ from trieur.db import (
     list_sections,
     list_user_column_sets,
     count_prelevement_mandats,
+    create_prelevement_rule_request,
     delete_prelevement_mandat,
+    delete_prelevement_rule_request,
     get_prelevement_mandat,
+    list_prelevement_rule_requests,
     MANDAT_DISPLAY_COLUMNS,
+    update_prelevement_rule_request,
     remove_membership,
     remove_record_tag,
     resolve_dedup_alert,
@@ -2483,6 +2487,81 @@ def patch_prelevement_mandat(
     if not ok:
         raise HTTPException(status_code=404, detail="Mandat introuvable (déjà supprimé ?).")
     return {"id": mandat_id, "data": body.data, "updated": True}
+
+
+# ---------------------------------------------------------------
+# Demandes de modification des règles codées en dur (Raphaël,
+# 2026-09-22) : une file d'attente écrite depuis l'écran, jamais
+# appliquée automatiquement -- une session Claude Code la traite sur
+# demande explicite (code + tests + PR), puis met à jour le statut ici.
+# ---------------------------------------------------------------
+
+RULE_REQUEST_STATUTS = ("en_attente", "en_cours", "valide")
+
+
+@app.get("/orgs/{org_id}/prelevement/rule-requests")
+def list_prelevement_rule_requests_endpoint(org_id: str, ctx: AuthCtx = Depends(require_cockpit_access)):
+    return list_prelevement_rule_requests(ctx.client, org_id)
+
+
+class PrelevementRuleRequestCreate(BaseModel):
+    titre: str
+    demande: str
+
+
+@app.post("/orgs/{org_id}/prelevement/rule-requests")
+def post_prelevement_rule_request(
+    org_id: str, body: PrelevementRuleRequestCreate, ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    titre = body.titre.strip()
+    demande = body.demande.strip()
+    if not titre:
+        raise HTTPException(status_code=400, detail="Titre vide.")
+    if not demande:
+        raise HTTPException(status_code=400, detail="Demande vide.")
+    return create_prelevement_rule_request(ctx.client, org_id, titre, demande, ctx.user.id)
+
+
+class PrelevementRuleRequestUpdate(BaseModel):
+    titre: Optional[str] = None
+    demande: Optional[str] = None
+    statut: Optional[str] = None
+
+
+@app.patch("/orgs/{org_id}/prelevement/rule-requests/{request_id}")
+def patch_prelevement_rule_request(
+    org_id: str, request_id: str, body: PrelevementRuleRequestUpdate,
+    ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    data: dict = {}
+    if body.titre is not None:
+        titre = body.titre.strip()
+        if not titre:
+            raise HTTPException(status_code=400, detail="Titre vide.")
+        data["titre"] = titre
+    if body.demande is not None:
+        demande = body.demande.strip()
+        if not demande:
+            raise HTTPException(status_code=400, detail="Demande vide.")
+        data["demande"] = demande
+    if body.statut is not None:
+        if body.statut not in RULE_REQUEST_STATUTS:
+            raise HTTPException(status_code=400, detail="Statut invalide.")
+        data["statut"] = body.statut
+    if not data:
+        raise HTTPException(status_code=400, detail="Rien à modifier.")
+    updated = update_prelevement_rule_request(ctx.client, request_id, org_id, data, ctx.user.id)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Demande introuvable (déjà supprimée ?).")
+    return updated
+
+
+@app.delete("/orgs/{org_id}/prelevement/rule-requests/{request_id}")
+def delete_prelevement_rule_request_endpoint(
+    org_id: str, request_id: str, ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    delete_prelevement_rule_request(ctx.client, request_id, org_id)
+    return {"id": request_id, "removed": True}
 
 
 # ---------------------------------------------------------------

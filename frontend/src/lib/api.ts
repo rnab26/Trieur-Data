@@ -994,6 +994,56 @@ export function savePrelevementRules(
   })
 }
 
+// ---------------------------------------------------------------
+// Demandes de modification des règles codées en dur (2026-09-22) --
+// file d'attente écrite depuis l'écran, jamais appliquée
+// automatiquement : Raphaël/son père décrivent le changement souhaité,
+// une session Claude Code la traite ensuite (code + tests + PR) et
+// met à jour `statut` ici même.
+// ---------------------------------------------------------------
+
+export const RULE_REQUEST_STATUTS = ['en_attente', 'en_cours', 'valide'] as const
+export type RuleRequestStatut = (typeof RULE_REQUEST_STATUTS)[number]
+
+export type PrelevementRuleRequest = {
+  id: string
+  org_id: string
+  titre: string
+  demande: string
+  statut: RuleRequestStatut
+  created_at: string
+  updated_at: string
+}
+
+export function listPrelevementRuleRequests(orgId: string) {
+  return request<PrelevementRuleRequest[]>(`/orgs/${orgId}/prelevement/rule-requests`)
+}
+
+export function createPrelevementRuleRequest(orgId: string, titre: string, demande: string) {
+  return request<PrelevementRuleRequest>(`/orgs/${orgId}/prelevement/rule-requests`, {
+    method: 'POST',
+    body: JSON.stringify({ titre, demande }),
+  })
+}
+
+export function updatePrelevementRuleRequest(
+  orgId: string,
+  requestId: string,
+  patch: Partial<{ titre: string; demande: string; statut: RuleRequestStatut }>,
+) {
+  return request<PrelevementRuleRequest>(`/orgs/${orgId}/prelevement/rule-requests/${requestId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  })
+}
+
+export function deletePrelevementRuleRequest(orgId: string, requestId: string) {
+  return request<{ id: string; removed: boolean }>(
+    `/orgs/${orgId}/prelevement/rule-requests/${requestId}`,
+    { method: 'DELETE' },
+  )
+}
+
 export type PrelevementMandatRow = Record<string, string | number | null>
 
 export type PrelevementMissingPhone = { referenceClient: string; nom: string; motif: string }

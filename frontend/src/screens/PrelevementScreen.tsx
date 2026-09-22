@@ -5,6 +5,7 @@ import { Input } from '@/components/ui/input'
 import { useAuth } from '@/lib/AuthContext'
 import { useOrgs } from '@/lib/useAccount'
 import { PrelevementMandatsPanel } from './PrelevementMandatsPanel'
+import { PrelevementRuleRequests } from './PrelevementRuleRequests'
 import {
   ApiError,
   downloadPrelevementFile,
@@ -341,24 +342,41 @@ export function PrelevementScreen() {
                         Frais de dossier par produit, au 1er prélèvement (€) -- réglable produit par
                         produit, amené à évoluer avec l'activité.
                       </p>
-                      <div className="flex flex-col gap-2">
-                        {rules.produits_connus.map((produit) => (
-                          <div key={produit} className="flex items-center gap-2">
-                            <span className="w-56 flex-shrink-0 truncate text-sm" title={produit}>
-                              {produit}
-                            </span>
-                            <Input
-                              type="number"
-                              min={0}
-                              step="0.01"
-                              className="w-24"
-                              value={fraisParProduit[produit] ?? fraisSetupEur}
-                              onChange={(e) => updateFraisProduit(produit, Number(e.target.value) || 0)}
-                            />
-                            <span className="text-sm text-[var(--muted)]">€</span>
-                          </div>
-                        ))}
-                      </div>
+                      <table className="w-full max-w-sm text-sm">
+                        <tbody>
+                          {rules.produits_connus.map((produit) => (
+                            <tr key={produit} className="border-t border-[var(--border)] first:border-t-0">
+                              <td className="truncate py-1 pr-2" title={produit}>
+                                {produit}
+                              </td>
+                              <td className="py-1">
+                                <div className="flex items-center gap-1">
+                                  <Input
+                                    type="number"
+                                    min={0}
+                                    step="0.01"
+                                    className="h-8 w-20 px-2 py-1"
+                                    value={fraisParProduit[produit] ?? fraisSetupEur}
+                                    onChange={(e) => updateFraisProduit(produit, Number(e.target.value) || 0)}
+                                  />
+                                  <span className="text-xs text-[var(--muted)]">€</span>
+                                  {fraisParProduit[produit] !== undefined &&
+                                    fraisParProduit[produit] !== fraisSetupEur && (
+                                      <button
+                                        type="button"
+                                        title={`Revenir à ${fraisSetupEur}€ (valeur par défaut)`}
+                                        onClick={() => updateFraisProduit(produit, fraisSetupEur)}
+                                        className="text-xs text-[var(--muted)] hover:text-[var(--foreground)]"
+                                      >
+                                        ↺
+                                      </button>
+                                    )}
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
                     </div>
                   )}
 
@@ -367,33 +385,44 @@ export function PrelevementScreen() {
                       Libellés de périodicité -- ajoute/renomme/supprime un code de périodicité et son
                       explication affichée dans le mandat.
                     </p>
-                    <ul className="flex flex-col gap-2">
-                      {Object.entries(periodicites).map(([code, texte]) => (
-                        <li key={code} className="flex items-center gap-2">
-                          <span className="w-40 flex-shrink-0 truncate text-sm" title={code}>
-                            {code}
-                          </span>
-                          <Input
-                            className="max-w-xs"
-                            value={texte}
-                            onChange={(e) => updatePeriodiciteTexte(code, e.target.value)}
-                          />
-                          <Button variant="danger" onClick={() => removePeriodicite(code)}>
-                            🗑️
-                          </Button>
-                        </li>
-                      ))}
-                    </ul>
+                    <table className="w-full max-w-md text-sm">
+                      <tbody>
+                        {Object.entries(periodicites).map(([code, texte]) => (
+                          <tr key={code} className="border-t border-[var(--border)] first:border-t-0">
+                            <td className="w-28 truncate py-1 pr-2 text-xs text-[var(--muted)]" title={code}>
+                              {code}
+                            </td>
+                            <td className="py-1">
+                              <Input
+                                className="h-8 px-2 py-1"
+                                value={texte}
+                                onChange={(e) => updatePeriodiciteTexte(code, e.target.value)}
+                              />
+                            </td>
+                            <td className="py-1 pl-1">
+                              <button
+                                type="button"
+                                onClick={() => removePeriodicite(code)}
+                                className="text-[var(--danger)]"
+                                title="Supprimer"
+                              >
+                                🗑️
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                     <div className="mt-2 flex flex-wrap items-center gap-2">
                       <Input
                         placeholder="Code (ex. bimensuelle)"
-                        className="max-w-[10rem]"
+                        className="h-8 max-w-[10rem] px-2 py-1"
                         value={newPeriodiciteCode}
                         onChange={(e) => setNewPeriodiciteCode(e.target.value)}
                       />
                       <Input
                         placeholder="Explication (ex. Tous les 15 jours)"
-                        className="max-w-xs"
+                        className="h-8 max-w-xs px-2 py-1"
                         value={newPeriodiciteTexte}
                         onChange={(e) => setNewPeriodiciteTexte(e.target.value)}
                         onKeyDown={(e) => {
@@ -417,6 +446,10 @@ export function PrelevementScreen() {
                     {rulesSaved && !savingRules && (
                       <span className="ml-2 text-sm text-[var(--muted)]">Enregistré ✓</span>
                     )}
+                    <p className="mt-1 text-xs text-[var(--muted)]">
+                      S'enregistre uniquement au clic ci-dessus -- pas automatique, mais persiste après ce
+                      clic (rechargement de page compris).
+                    </p>
                   </div>
                 </>
               )}
@@ -450,6 +483,8 @@ export function PrelevementScreen() {
               )}
             </div>
           )}
+
+          <PrelevementRuleRequests orgId={orgId} />
 
           <Card>
             <CardContent className="flex flex-col gap-3">

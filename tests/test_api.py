@@ -2105,6 +2105,131 @@ def test_prelevement_mandats_list_forbidden_for_non_admin(client_factory):
     assert res.status_code == 403
 
 
+def test_prelevement_rule_requests_create_and_list(client_factory):
+    """Demandes de modification des règles codées en dur (Raphaël,
+    2026-09-22) : une file d'attente écrite depuis l'écran, jamais
+    appliquée automatiquement -- juste enregistrée avec un statut de
+    départ 'en_attente'."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    res = tc.post(
+        "/orgs/org-1/prelevement/rule-requests",
+        json={"titre": "Critère RCUR", "demande": "Ajouter un 3e statut agent IA déclencheur"},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["titre"] == "Critère RCUR"
+    assert body["statut"] == "en_attente"
+    assert body["org_id"] == "org-1"
+
+    res = tc.get("/orgs/org-1/prelevement/rule-requests", headers=headers)
+    assert res.status_code == 200
+    titres = [r["titre"] for r in res.json()]
+    assert "Critère RCUR" in titres
+
+
+def test_prelevement_rule_requests_rejects_empty_fields(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/prelevement/rule-requests",
+        json={"titre": "  ", "demande": "quelque chose"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+    res = tc.post(
+        "/orgs/org-1/prelevement/rule-requests",
+        json={"titre": "Un titre", "demande": "   "},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_prelevement_rule_requests_patch_statut_and_text(client_factory):
+    """Une session Claude Code fait avancer le statut (en_attente ->
+    en_cours -> valide) sans toucher au texte de la demande -- et
+    inversement, Raphaël peut corriger le texte sans repartir de
+    en_attente."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    created = tc.post(
+        "/orgs/org-1/prelevement/rule-requests",
+        json={"titre": "Frais VETO", "demande": "Passer à 25€"},
+        headers=headers,
+    ).json()
+
+    res = tc.patch(
+        f"/orgs/org-1/prelevement/rule-requests/{created['id']}",
+        json={"statut": "en_cours"},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["statut"] == "en_cours"
+    assert body["demande"] == "Passer à 25€"  # texte inchangé
+
+    res = tc.patch(
+        f"/orgs/org-1/prelevement/rule-requests/{created['id']}",
+        json={"statut": "valide"},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    assert res.json()["statut"] == "valide"
+
+
+def test_prelevement_rule_requests_patch_rejects_invalid_statut(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    created = tc.post(
+        "/orgs/org-1/prelevement/rule-requests",
+        json={"titre": "X", "demande": "Y"},
+        headers=headers,
+    ).json()
+    res = tc.patch(
+        f"/orgs/org-1/prelevement/rule-requests/{created['id']}",
+        json={"statut": "termine"},
+        headers=headers,
+    )
+    assert res.status_code == 400
+
+
+def test_prelevement_rule_requests_patch_not_found(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.patch(
+        "/orgs/org-1/prelevement/rule-requests/does-not-exist",
+        json={"statut": "en_cours"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 404
+
+
+def test_prelevement_rule_requests_delete(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    created = tc.post(
+        "/orgs/org-1/prelevement/rule-requests",
+        json={"titre": "À supprimer", "demande": "Z"},
+        headers=headers,
+    ).json()
+    res = tc.delete(f"/orgs/org-1/prelevement/rule-requests/{created['id']}", headers=headers)
+    assert res.status_code == 200
+    res = tc.get("/orgs/org-1/prelevement/rule-requests", headers=headers)
+    assert all(r["id"] != created["id"] for r in res.json())
+
+
+def test_prelevement_rule_requests_forbidden_for_non_admin(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.get("/orgs/org-1/prelevement/rule-requests", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 403
+
+
 def test_create_and_list_sections(client_factory):
     fake = _make_client(profiles=[ADMIN_PROFILE])
     tc = client_factory(fake)

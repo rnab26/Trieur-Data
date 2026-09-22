@@ -414,7 +414,7 @@ export function PrelevementRuleRequests({
             >
               <div className="mb-1 flex flex-wrap items-center gap-2">
                 <Input
-                  className="min-w-[10rem] flex-1 font-medium"
+                  className="min-w-[10rem] flex-1 font-bold"
                   value={r.titre}
                   disabled={savingId === r.id}
                   onChange={(e) =>
@@ -503,6 +503,7 @@ export function PrelevementRuleRequests({
           ➕ Nouvelle règle (celle-ci n'existe pas encore dans la liste ci-dessus)
         </p>
         <Input
+          className="font-bold"
           placeholder="Nom de la règle (ex. Critère de RCUR)"
           value={newTitre}
           onChange={(e) => setNewTitre(e.target.value)}

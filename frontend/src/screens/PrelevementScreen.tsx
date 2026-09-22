@@ -276,6 +276,10 @@ export function PrelevementScreen() {
   // 2026-09-22 : "attribuer en connectant les règles disponibles sur
   // les colonnes... créer une nouvelle règle au-dessus d'une colonne").
   const [attributingCle, setAttributingCle] = useState<string | null>(null)
+  // Titre éditable (Raphaël, 2026-09-22 : "il faut pouvoir donner un
+  // titre en gras à cette règle") -- pré-rempli avec le nom de la
+  // colonne, mais modifiable.
+  const [newRuleForColumnTitre, setNewRuleForColumnTitre] = useState('')
   const [newRuleForColumnText, setNewRuleForColumnText] = useState('')
   const [creatingRuleForColumn, setCreatingRuleForColumn] = useState(false)
   const [ruleAttributionError, setRuleAttributionError] = useState<string | null>(null)
@@ -295,10 +299,19 @@ export function PrelevementScreen() {
   // dessous (PrelevementRuleRequests) après un ajout depuis ici, sans
   // dupliquer sa logique de récupération.
   const [openRuleIdx, setOpenRuleIdx] = useState<number | null>(null)
+  // Titre éditable (Raphaël, 2026-09-22 : "il faut pouvoir donner un
+  // titre en gras à cette règle") -- pré-rempli avec le nom de la règle
+  // modifiée, mais modifiable : utile dès qu'on demande une 2e/3e
+  // précision sur la même règle et qu'on veut la distinguer dans la
+  // liste ("Exclusions, 2e partie" par exemple).
+  const [ruleFormTitre, setRuleFormTitre] = useState('')
   const [ruleFormText, setRuleFormText] = useState('')
   const [ruleFormSubmitting, setRuleFormSubmitting] = useState(false)
   const [ruleFormError, setRuleFormError] = useState<string | null>(null)
-  const [ruleFormSentTitre, setRuleFormSentTitre] = useState<string | null>(null)
+  // Index de la règle dont la dernière demande envoyée affiche le
+  // message de succès -- un index (jamais le titre) : le titre envoyé
+  // peut maintenant différer de r.titre puisqu'il est modifiable.
+  const [ruleFormSentIdx, setRuleFormSentIdx] = useState<number | null>(null)
   const [ruleRequestsRefreshKey, setRuleRequestsRefreshKey] = useState(0)
   // Réglages repliés par défaut (Raphaël, 2026-09-22 : "ça pollue
   // visuellement") -- même bascule que "Règles appliquées par le
@@ -508,6 +521,7 @@ export function PrelevementScreen() {
   // visible dans "Règles appliquées par le moteur > + nouvelles règles".
   function toggleAttribute(cle: string) {
     setAttributingCle((prev) => (prev === cle ? null : cle))
+    setNewRuleForColumnTitre(`Colonne "${cle}"`)
     setNewRuleForColumnText('')
     setRuleAttributionError(null)
   }
@@ -518,12 +532,13 @@ export function PrelevementScreen() {
   }
 
   async function submitNewRuleForColumn(cle: string) {
+    const titre = newRuleForColumnTitre.trim()
     const demande = newRuleForColumnText.trim()
-    if (!orgId || !demande) return
+    if (!orgId || !titre || !demande) return
     setCreatingRuleForColumn(true)
     setRuleAttributionError(null)
     try {
-      const created = await createPrelevementRuleRequest(orgId, `Colonne "${cle}"`, demande)
+      const created = await createPrelevementRuleRequest(orgId, titre, demande)
       setColonnesMandat((prev) => prev.map((c) => (c.cle === cle ? { ...c, rule_request_id: created.id } : c)))
       setRuleRequestsRefreshKey((k) => k + 1)
       setAttributingCle(null)
@@ -665,24 +680,26 @@ export function PrelevementScreen() {
     if (over && active.id !== over.id) reorderColonneMandat(String(active.id), String(over.id))
   }
 
-  function openRuleForm(index: number) {
+  function openRuleForm(index: number, titreParDefaut: string) {
     setOpenRuleIdx((prev) => (prev === index ? null : index))
+    setRuleFormTitre(titreParDefaut)
     setRuleFormText('')
     setRuleFormError(null)
   }
 
-  async function submitRuleForm(titre: string) {
+  async function submitRuleForm(index: number) {
+    const titre = ruleFormTitre.trim()
     const demande = ruleFormText.trim()
-    if (!orgId || !demande) return
+    if (!orgId || !titre || !demande) return
     setRuleFormSubmitting(true)
     setRuleFormError(null)
     try {
       await createPrelevementRuleRequest(orgId, titre, demande)
       setOpenRuleIdx(null)
       setRuleFormText('')
-      setRuleFormSentTitre(titre)
+      setRuleFormSentIdx(index)
       setRuleRequestsRefreshKey((k) => k + 1)
-      setTimeout(() => setRuleFormSentTitre(null), 4000)
+      setTimeout(() => setRuleFormSentIdx(null), 4000)
     } catch (err) {
       setRuleFormError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
     } finally {
@@ -1202,6 +1219,12 @@ export function PrelevementScreen() {
                               <span className="text-xs text-[var(--muted)]">
                                 Aucune règle ne correspond ? Décris-la, elle sera codée à la prochaine session.
                               </span>
+                              <Input
+                                className="h-8 px-2 py-1 font-bold"
+                                placeholder="Titre de la règle"
+                                value={newRuleForColumnTitre}
+                                onChange={(e) => setNewRuleForColumnTitre(e.target.value)}
+                              />
                               <div className="flex items-center gap-2">
                                 <Input
                                   placeholder="Ex. TVA à 20% si société assujettie"
@@ -1214,7 +1237,11 @@ export function PrelevementScreen() {
                                 />
                                 <Button
                                   onClick={() => void submitNewRuleForColumn(attributingCle)}
-                                  disabled={creatingRuleForColumn || !newRuleForColumnText.trim()}
+                                  disabled={
+                                    creatingRuleForColumn ||
+                                    !newRuleForColumnTitre.trim() ||
+                                    !newRuleForColumnText.trim()
+                                  }
                                 >
                                   {creatingRuleForColumn ? 'Création…' : '➕ Créer la règle'}
                                 </Button>
@@ -1330,7 +1357,7 @@ export function PrelevementScreen() {
                     <div key={i}>
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <span className="flex items-center gap-2">
-                          <p className="text-sm font-medium text-[var(--foreground)]">{r.titre}</p>
+                          <p className="text-sm font-bold text-[var(--foreground)]">{r.titre}</p>
                           {pendingQuestions.length > 0 ? (
                             <span className="rounded-md bg-[var(--danger)] px-2 py-0.5 text-xs font-bold text-white">
                               🔴 Ta réponse est nécessaire
@@ -1345,7 +1372,7 @@ export function PrelevementScreen() {
                         </span>
                         <button
                           type="button"
-                          onClick={() => openRuleForm(i)}
+                          onClick={() => openRuleForm(i, r.titre)}
                           className="text-xs text-[var(--primary)] hover:underline"
                         >
                           {openRuleIdx === i ? 'Annuler' : '✏️ Demander une modification'}
@@ -1363,7 +1390,7 @@ export function PrelevementScreen() {
                         />
                       ))}
 
-                      {ruleFormSentTitre === r.titre && openRuleIdx !== i && (
+                      {ruleFormSentIdx === i && openRuleIdx !== i && (
                         <p className="mt-1 text-xs text-[var(--success)]">
                           ✅ Demande enregistrée, visible dans "Demandes de modification de règles"
                           ci-dessous.
@@ -1372,6 +1399,12 @@ export function PrelevementScreen() {
 
                       {openRuleIdx === i && (
                         <div className="mt-2 flex flex-col gap-2 rounded-md border border-[var(--border)] p-2">
+                          <Input
+                            className="font-bold"
+                            placeholder="Titre de la règle"
+                            value={ruleFormTitre}
+                            onChange={(e) => setRuleFormTitre(e.target.value)}
+                          />
                           <textarea
                             autoFocus
                             className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] p-2 text-sm"
@@ -1385,8 +1418,8 @@ export function PrelevementScreen() {
                           )}
                           <div>
                             <Button
-                              onClick={() => void submitRuleForm(r.titre)}
-                              disabled={ruleFormSubmitting || !ruleFormText.trim()}
+                              onClick={() => void submitRuleForm(i)}
+                              disabled={ruleFormSubmitting || !ruleFormTitre.trim() || !ruleFormText.trim()}
                             >
                               {ruleFormSubmitting ? 'Enregistrement…' : 'Envoyer la demande'}
                             </Button>

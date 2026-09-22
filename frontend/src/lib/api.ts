@@ -971,12 +971,19 @@ export function savePrelevementRules(
 
 export type PrelevementMandatRow = Record<string, string | number | null>
 
+export type PrelevementMissingPhone = { referenceClient: string; nom: string; motif: string }
+
 export type PrelevementGenerateResult = {
   ooffCount: number
   rcurCount: number
   exclusCount: number
   steps: string[]
   mandats: PrelevementMandatRow[]
+  // Mandats envoyés quand même sans numéro de téléphone (ni Téléphone ni
+  // Mobile trouvés sur la ligne CRM) -- décision de Raphaël (2026-09-22) :
+  // jamais bloquant, mais signalé immédiatement, sans devoir ouvrir le
+  // fichier téléchargé pour le découvrir.
+  telephonesManquants: PrelevementMissingPhone[]
   filename: string
   fileBase64: string
 }
@@ -1004,9 +1011,10 @@ export async function generatePrelevementMandats(
     return throwForErrorResponse(res)
   }
   const data = (await res.json()) as {
-    counts: { ooff: number; rcur: number; exclus: number }
+    counts: { ooff: number; rcur: number; exclus: number; sans_telephone: number }
     steps: string[]
     mandats: PrelevementMandatRow[]
+    telephones_manquants: { reference_client: string; nom: string; motif: string }[]
     filename: string
     file_base64: string
   }
@@ -1016,6 +1024,11 @@ export async function generatePrelevementMandats(
     exclusCount: data.counts.exclus,
     steps: data.steps,
     mandats: data.mandats,
+    telephonesManquants: data.telephones_manquants.map((t) => ({
+      referenceClient: t.reference_client,
+      nom: t.nom,
+      motif: t.motif,
+    })),
     filename: data.filename,
     fileBase64: data.file_base64,
   }

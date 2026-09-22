@@ -388,6 +388,24 @@ export function PrelevementScreen() {
                     ligne exclue.
                   </p>
 
+                  {result.telephonesManquants.length > 0 && (
+                    <div className="rounded-md border border-[var(--danger)] bg-[var(--danger)]/10 p-3">
+                      <p className="text-sm font-medium text-[var(--danger)]">
+                        ⚠️ {result.telephonesManquants.length} mandat
+                        {result.telephonesManquants.length > 1 ? 's' : ''} SANS numéro de téléphone
+                        (ni Téléphone ni Mobile trouvés) -- envoyé{result.telephonesManquants.length > 1 ? 's' : ''}{' '}
+                        quand même, à vérifier avant l'envoi en banque :
+                      </p>
+                      <ul className="mt-1 list-disc pl-5 text-sm text-[var(--foreground)]">
+                        {result.telephonesManquants.map((t, i) => (
+                          <li key={i}>
+                            {t.referenceClient} — {t.nom} ({t.motif})
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
                   {result.mandats.length > 0 ? (
                     <div>
                       <p className="mb-1 text-sm font-medium text-[var(--foreground)]">

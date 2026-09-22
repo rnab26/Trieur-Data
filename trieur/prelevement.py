@@ -56,6 +56,13 @@ COL_VILLE = "Ville"
 COL_CODE_POSTAL = "Code postal"
 COL_EMAIL = "Email"
 COL_TELEPHONE = "Téléphone"
+# "Mobile" -- repli si "Téléphone" (fixe) est vide. Vérifié sur le
+# fichier CRM de référence (2026-09-22, signalé par Raphaël) : "Mobile"
+# est rempli pour 100% des 291 clients, "Téléphone" seulement pour 68%
+# -- ne lire que "Téléphone" laissait donc ~32% des mandats sans aucun
+# numéro alors que le vrai numéro du client était présent dans l'autre
+# colonne de la même ligne. Jamais inventé : juste la bonne colonne.
+COL_MOBILE = "Mobile"
 
 # Colonnes produit -- montants en euros. "Optivie" est fusionné dans
 # "Optilife" (Raphaël, 2026-09-21 : "les deux mêmes produits avec les
@@ -241,6 +248,42 @@ def to_amount(raw: object) -> float:
         return 0.0
 
 
+def to_telephone(raw: object) -> str:
+    """Corrige la REPRÉSENTATION d'un numéro déjà présent dans la
+    cellule -- ne comble jamais un numéro manquant, ne devine jamais un
+    chiffre.
+
+    Bug réel (2026-09-22, signalé par Raphaël sur un lot réel) : quand
+    une cellule numéro est enregistrée comme un NOMBRE dans le fichier
+    source (pas du texte, contrairement à la majorité des lignes),
+    pandas la lit en float64 -- `str(33630653771.0)` donne
+    "33630653771.0", un ".0" qui n'a jamais existé dans le vrai numéro
+    (même famille de bug que le NaN corrigé sur to_amount, 2026-09-21).
+
+    Repli de mise en forme : un numéro à 11 chiffres commençant par
+    "33" (le préfixe pays, sans le "+" -- perdu par le passage en
+    nombre) est reformaté en "+33..." pour rester cohérent avec les
+    cellules déjà en texte du même fichier (ex. "+33630653771"). Toute
+    autre forme est renvoyée telle quelle."""
+    if raw is None or raw == "":
+        return ""
+    if isinstance(raw, float) and raw != raw:  # NaN (jamais égal à lui-même)
+        return ""
+    if isinstance(raw, (int, float)):
+        # Un numéro n'a jamais de vraie décimale -- int() ne perd donc
+        # aucun chiffre, seulement le ".0" ajouté à tort par pandas.
+        digits = str(int(raw))
+    else:
+        digits = str(raw).strip()
+    if not digits:
+        return ""
+    if digits.startswith("+"):
+        return digits
+    if digits.startswith("33") and len(digits) == 11:
+        return "+" + digits
+    return digits
+
+
 def _parse_date(raw: object) -> date | None:
     if raw is None or raw == "":
         return None
@@ -412,7 +455,10 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
                 code_postal=str(_get(row, COL_CODE_POSTAL, keyed) or ""),
                 pays="FR",
                 email=str(_get(row, COL_EMAIL, keyed) or ""),
-                telephone=str(_get(row, COL_TELEPHONE, keyed) or ""),
+                telephone=(
+                    to_telephone(_get(row, COL_TELEPHONE, keyed))
+                    or to_telephone(_get(row, COL_MOBILE, keyed))
+                ),
                 type_sequence=type_sequence,
                 montant_eur=round(montant, 2),
                 devise="EUR",

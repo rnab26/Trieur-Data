@@ -623,7 +623,20 @@ export function PrelevementScreen() {
                 onClick={() => setRulesExplainOpen((v) => !v)}
                 className="flex w-full items-center justify-between px-3 py-2 text-sm font-medium"
               >
-                <span>📋 Règles appliquées par le moteur</span>
+                <span className="flex items-center gap-2">
+                  <span>📋 Règles appliquées par le moteur</span>
+                  {ruleRequestsAll.some((r) => r.questions.some((q) => !q.answered_at)) ? (
+                    <span className="rounded-full bg-[var(--danger)] px-2 py-0.5 text-xs font-bold text-white">
+                      🔴 Réponse attendue
+                    </span>
+                  ) : (
+                    ruleRequestsAll.some((r) => r.statut !== 'valide') && (
+                      <span className="rounded-full bg-[var(--primary)] px-2 py-0.5 text-xs font-medium text-[var(--primary-foreground)]">
+                        {ruleRequestsAll.filter((r) => r.statut !== 'valide').length} en cours
+                      </span>
+                    )
+                  )}
+                </span>
                 <span className="text-[var(--muted)]">{rulesExplainOpen ? '▲' : '▼'}</span>
               </button>
               {rulesExplainOpen && (
@@ -705,12 +718,12 @@ export function PrelevementScreen() {
                     </div>
                     )
                   })}
+
+                  {orgId && <PrelevementRuleRequests orgId={orgId} refreshKey={ruleRequestsRefreshKey} />}
                 </div>
               )}
             </div>
           )}
-
-          <PrelevementRuleRequests orgId={orgId} refreshKey={ruleRequestsRefreshKey} />
 
           <Card>
             <CardContent className="flex flex-col gap-3">

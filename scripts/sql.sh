@@ -58,6 +58,17 @@ if [ -z "${requete//[[:space:]]/}" ]; then
   exit 2
 fi
 
+# public.exec_sql (Jarvis-assistant, migration 0010) enveloppe la requête
+# dans `select ... from (%s) as t` pour renvoyer les lignes d'un SELECT.
+# Un `;` final rend cet enrobage syntaxiquement invalide -- la fonction
+# tombe alors dans son repli `EXECUTE` brut, qui exécute bien le SELECT
+# mais n'en récupère jamais le résultat (rows toujours null, silencieux,
+# sans erreur). Bug réel rencontré en usage (2026-09-22) : un simple
+# `select 1;` renvoyait "exécuté sans résultat" au lieu de la ligne.
+# Retirer le(s) `;` final(aux) avant l'envoi rend le chemin "lignes
+# renvoyées" à nouveau utilisable pour un SELECT unique en fin de requête.
+requete="$(printf '%s' "$requete" | sed -E 's/[[:space:];]+$//')"
+
 # jq construit le JSON, pour que guillemets, apostrophes et sauts de ligne de la requête
 # soient échappés correctement.
 corps="$(jq -n --arg q "$requete" '{query: $q}')"

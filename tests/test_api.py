@@ -1723,8 +1723,8 @@ def test_prelevement_generate_uses_frais_par_produit(client_factory):
     assert res.status_code == 200
     mandats = res.json()["mandats"]
     assert len(mandats) == 2  # FRST + RCUR, générés systématiquement
-    frst = next(m for m in mandats if m["Type séquence"] == "FRST")
-    assert frst["Montant EUR"] == 129.0  # 99 (Optilife) + 30 (override)
+    frst = next(m for m in mandats if m["Type_prelevement"] == "FRST")
+    assert frst["Montant_EUR"] == 129.0  # 99 (Optilife) + 30 (override)
 
 
 _PRELEVEMENT_CSV = (
@@ -1785,6 +1785,42 @@ def test_prelevement_generate_returns_mandat_rows_and_file_for_preview(client_fa
 
     wb = openpyxl.load_workbook(io.BytesIO(base64.b64decode(body["file_base64"])))
     assert wb.sheetnames == ["Mandat", "FRST", "RCUR", "Exclus"]
+
+
+def test_prelevement_generate_mandat_columns_match_requested_order(client_factory):
+    """Ordre et noms de colonnes demandés par le père de Raphaël
+    (2026-09-22, "ordre des colonnes du fichiers de mandats") --
+    Motif/Référence client/Date d'effet gardés en plus à la fin (hors
+    de sa liste, jamais supprimés sans confirmation explicite), Prenom
+    vide (pas de source dans le CRM), ICS_Crediteur toujours vide."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/prelevement/generate",
+        files=[("files", ("export.csv", _PRELEVEMENT_CSV, "text/csv"))],
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    mandats = res.json()["mandats"]
+    assert list(mandats[0].keys()) == [
+        "Nom", "Prenom", "Email", "Telephone", "Adresse", "Ville", "Code_postal", "Pays",
+        "IBAN", "BIC", "ICS_Crediteur", "RUM", "Type_prelevement", "Montant_EUR", "Devise",
+        "Date_signature_mandat", "Date_premiere_echeance", "Periodicite", "Explication_periodicite",
+        "Frequence_mois", "Jour_prelevement", "Prochaine_echeance", "Date_fin", "Statut",
+        "Reference_facture", "Libelle", "Référence client", "Motif", "Date d'effet",
+    ]
+    frst = next(m for m in mandats if m["Type_prelevement"] == "FRST")
+    assert frst["Prenom"] == ""
+    assert frst["ICS_Crediteur"] == ""
+    assert frst["Date_fin"] == "" and frst["Statut"] == "" and frst["Reference_facture"] == ""
+    assert frst["Frequence_mois"] == 1  # "Mensuelle"
+    # Jour_prelevement = jour du mois de Date_premiere_echeance (calculée
+    # à partir d'aujourd'hui + délai, jamais une date fixe -- ne pas
+    # figer "24" en dur ici).
+    jour_attendu = int(frst["Date_premiere_echeance"].split("/")[0])
+    assert frst["Jour_prelevement"] == jour_attendu
+    import datetime
+    assert frst["Libelle"] == f"intégré le {datetime.date.today().strftime('%d/%m/%Y')}"
 
 
 def test_prelevement_generate_reachable_cross_origin(client_factory):
@@ -1926,7 +1962,7 @@ def test_prelevement_mandats_saved_to_database(client_factory):
     assert len(stored) == 2
     assert stored[0]["org_id"] == "org-1"
     assert stored[0]["rum"] == "RUM1"
-    assert stored[0]["montant_eur"] == mandats[0]["Montant EUR"]
+    assert stored[0]["montant_eur"] == mandats[0]["Montant_EUR"]
     assert stored[0]["batch_id"] == body["batch_id"]
     assert stored[0]["created_by"] == "user-1"
 
@@ -1963,7 +1999,7 @@ def _save_one_mandat(tc) -> str:
         files=[("files", ("export.csv", _PRELEVEMENT_CSV, "text/csv"))],
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
-    mandats = [m for m in gen_res.json()["mandats"] if m["Type séquence"] == "FRST"]
+    mandats = [m for m in gen_res.json()["mandats"] if m["Type_prelevement"] == "FRST"]
     save_res = tc.post(
         "/orgs/org-1/prelevement/mandats",
         json={"mandats": mandats},

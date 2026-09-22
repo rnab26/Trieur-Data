@@ -673,7 +673,16 @@ export function PrelevementScreen() {
   // distance: 5 -- laisse le temps à un simple tap (cocher la case, par
   // exemple) de se distinguer d'un vrai glissement, au doigt comme à la
   // souris.
-  const dndSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
+  // Contrainte "delay" plutôt que "distance" (Raphaël, 2026-09-22 :
+  // "je ne peux pas enregistrer l'ordre que j'ai réorganisé") -- la
+  // grille défile horizontalement (overflow-x-auto) ; avec une
+  // contrainte de distance, les tout premiers pixels d'un geste tactile
+  // sont capturés par le défilement natif du conteneur avant que
+  // dnd-kit ait la main, donc le glissement ne démarre jamais sur
+  // téléphone (le clic "Enregistrer" n'a alors rien de nouveau à
+  // enregistrer). Un appui maintenu 150ms laisse le temps à dnd-kit de
+  // prendre la main avant tout défilement.
+  const dndSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { delay: 150, tolerance: 8 } }))
 
   function handleColonneMandatDragEnd(event: DragEndEvent) {
     const { active, over } = event

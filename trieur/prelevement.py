@@ -574,18 +574,18 @@ def explain_rules(rules: PrelevementRules) -> list[dict[str, str]]:
             ),
         },
         {
-            "titre": "First (1er prélèvement) vs RCUR (récurrent)",
+            "titre": "FRST (1er prélèvement) vs RCUR (récurrent)",
             "detail": (
                 "\"Statut agent IA\" commence par \"Notifié\" (notification "
                 "préalable obligatoire avant un prélèvement récurrent, règle "
                 "SEPA) -> RCUR. Sinon (vide, \"Validé par le client\", autre) -> "
-                "First."
+                "FRST."
             ),
         },
         {
             "titre": "Montant du mandat",
             "detail": (
-                "RCUR = valeur brute de la/les colonne(s) produit. First = "
+                "RCUR = valeur brute de la/les colonne(s) produit. FRST = "
                 "valeur brute + frais de dossier PAR PRODUIT du mandat (un "
                 "montant par produit, réglable dans \"Réglages\" ci-dessus, "
                 "jamais codé en dur) : "

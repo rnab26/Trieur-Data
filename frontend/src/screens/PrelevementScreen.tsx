@@ -428,7 +428,7 @@ export function PrelevementScreen() {
       {orgId && tab === 'generer' && (
         <>
           <p className="mb-4 text-sm text-[var(--muted)]">
-            Dépose l'export CRM brut, télécharge un classeur prêt (4 onglets : Mandat avec tout, First et
+            Dépose l'export CRM brut, télécharge un classeur prêt (4 onglets : Mandat avec tout, FRST et
             RCUR en détail, Exclus avec la raison). Un mandat par produit actif du client, jamais un
             montant groupé. Ne couvre pas encore l'historique/les doublons/les impayés/le relevé bancaire
             — voir le chantier séparé dans le Cockpit.
@@ -850,7 +850,7 @@ export function PrelevementScreen() {
                         </tr>
                       ))}
                       <tr>
-                        <td className="pr-4 py-0.5 text-[var(--muted)]">Mandats First (1er prélèvement)</td>
+                        <td className="pr-4 py-0.5 text-[var(--muted)]">Mandats FRST (1er prélèvement)</td>
                         <td className="py-0.5 text-right font-medium text-[var(--success)]">
                           {result.summary.nFirst}
                         </td>

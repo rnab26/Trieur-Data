@@ -4070,3 +4070,25 @@ Deux bugs réels, corrigés l'un après l'autre :
    utilisateur, penser au cache navigateur avant de chercher plus loin
    côté code -- et vérifier si un filet contre ce cas existe déjà
    ailleurs dans l'historique du repo avant d'en écrire un nouveau.
+
+3. **PR #73 -- la vraie cause, trouvée en relisant le code plutôt qu'en
+   déployant un 3e correctif au hasard** : `PrelevementRuleRequests`
+   (donc les questions elles-mêmes) est monté À L'INTÉRIEUR du panneau
+   "📋 Règles appliquées par le moteur", qui reste REPLIÉ PAR DÉFAUT --
+   le badge rouge existe bien sur l'en-tête du panneau, mais rien en
+   dessous ne s'affiche tant qu'on ne clique pas dessus. Corrigé en
+   appliquant le même principe que l'auto-dépliage déjà en place pour
+   "Historique des demandes" : le panneau se déroule tout seul dès
+   qu'une question est en attente. Par ailleurs, retour explicite de
+   Raphaël pendant l'incident : le menu déroulant de statut
+   (⏳/🔵/✅) devient un badge en lecture seule -- **le statut est décidé
+   par la session Claude Code, jamais par l'utilisateur final**, à
+   respecter pour toute future fonctionnalité de ce type sur ce repo.
+
+**Leçon plus générale retenue sur cet incident (3 PR pour un seul
+signalement utilisateur)** : avant de proposer un correctif frontend
+sur un bug "rien ne s'affiche", vérifier d'abord la CHAÎNE COMPLÈTE de
+montage des composants (quel composant est monté sous quelle
+condition, quel state contrôle l'affichage) plutôt que de partir
+directement sur des hypothèses réseau/cache/matching -- la cause
+racine ici était visible dès la première lecture attentive du JSX.

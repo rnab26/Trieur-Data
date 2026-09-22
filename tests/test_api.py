@@ -1552,9 +1552,13 @@ def test_prelevement_rules_defaults_when_never_saved(client_factory):
     tc = client_factory(fake)
     res = tc.get("/orgs/org-1/prelevement/rules", headers={"Authorization": f"Bearer {TOKEN}"})
     assert res.status_code == 200
-    assert res.json() == {
-        "org_id": "org-1", "ics": None, "nature": "CORE", "delay_days": 3, "frais_setup_eur": 20.0,
-    }
+    body = res.json()
+    assert body["org_id"] == "org-1"
+    assert body["ics"] is None
+    assert body["nature"] == "CORE"
+    assert body["delay_days"] == 3
+    assert body["frais_setup_eur"] == 20.0
+    assert len(body["explication"]) > 0
 
 
 def test_prelevement_rules_roundtrip(client_factory):
@@ -1574,6 +1578,24 @@ def test_prelevement_rules_roundtrip(client_factory):
 
     res = tc.get("/orgs/org-1/prelevement/rules", headers=headers)
     assert res.json()["ics"] == "FR12ZZZ123456"
+
+
+def test_prelevement_rules_explication_reflects_current_settings(client_factory):
+    """"Règles appliquées" demandé par Raphaël (2026-09-22) : doit
+    refléter les réglages réellement enregistrés (frais, délai), jamais
+    un texte figé indépendant."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    res = tc.post(
+        "/orgs/org-1/prelevement/rules",
+        json={"ics": None, "nature": "CORE", "delay_days": 7, "frais_setup_eur": 12.5},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    explication_text = " ".join(r["detail"] for r in res.json()["explication"])
+    assert "12.5" in explication_text or "12,5" in explication_text
+    assert "7 jour" in explication_text
 
 
 def test_prelevement_rules_rejects_invalid_nature(client_factory):

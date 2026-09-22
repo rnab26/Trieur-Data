@@ -47,6 +47,7 @@ export function PrelevementScreen() {
   const [fraisSetupEur, setFraisSetupEur] = useState(20)
   const [savingRules, setSavingRules] = useState(false)
   const [rulesSaved, setRulesSaved] = useState(false)
+  const [rulesExplainOpen, setRulesExplainOpen] = useState(false)
 
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [selectedFiles, setSelectedFiles] = useState<File[]>([])
@@ -277,6 +278,34 @@ export function PrelevementScreen() {
               )}
             </CardContent>
           </Card>
+
+          {rules !== null && rules.explication.length > 0 && (
+            <div className="mb-4 rounded-lg border border-[var(--border)]">
+              <button
+                type="button"
+                onClick={() => setRulesExplainOpen((v) => !v)}
+                className="flex w-full items-center justify-between px-3 py-2 text-sm font-medium"
+              >
+                <span>📋 Règles appliquées par le moteur</span>
+                <span className="text-[var(--muted)]">{rulesExplainOpen ? '▲' : '▼'}</span>
+              </button>
+              {rulesExplainOpen && (
+                <div className="flex flex-col gap-3 border-t border-[var(--border)] p-3">
+                  <p className="text-xs text-[var(--muted)]">
+                    Ce que le code applique réellement à chaque génération -- pour repérer une
+                    future erreur ou décider qu'une règle doit changer. Reflète tes réglages
+                    ci-dessus (frais, délai).
+                  </p>
+                  {rules.explication.map((r, i) => (
+                    <div key={i}>
+                      <p className="text-sm font-medium text-[var(--foreground)]">{r.titre}</p>
+                      <p className="text-sm text-[var(--muted)]">{r.detail}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           <Card>
             <CardContent className="flex flex-col gap-3">

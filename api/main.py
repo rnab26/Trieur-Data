@@ -96,7 +96,7 @@ from trieur.db import (
     update_record,
 )
 from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
-from trieur.prelevement import PrelevementRules, generate_mandats
+from trieur.prelevement import PrelevementRules, explain_rules, generate_mandats
 from trieur.io_excel import read_csv_file, read_excel_all_sheets_from_file, stream_excel_sheets
 from trieur.io_pdf import read_pdf_sepa
 from trieur.matching import apply_header_inference_excel, auto_assign_columns_fast, iban_is_valid
@@ -2114,7 +2114,21 @@ def delete_org_member(org_id: str, user_id: str, ctx: AuthCtx = Depends(require_
 
 @app.get("/orgs/{org_id}/prelevement/rules")
 def get_prelevement_rules_endpoint(org_id: str, ctx: AuthCtx = Depends(require_cockpit_access)):
-    return get_prelevement_rules(ctx.client, org_id)
+    rules_row = get_prelevement_rules(ctx.client, org_id)
+    # "Règles appliquées" demandé par Raphaël (2026-09-22) : consultable
+    # depuis l'écran sans lire le code, pour repérer une future erreur
+    # ou décider qu'une règle doit changer. Calculé depuis explain_rules()
+    # (trieur/prelevement.py), seule source de vérité -- jamais un texte
+    # dupliqué qui pourrait diverger du comportement réel du moteur.
+    rules = PrelevementRules(
+        ics=rules_row.get("ics"),
+        nature=rules_row.get("nature") or "CORE",
+        delay_days=rules_row.get("delay_days") if rules_row.get("delay_days") is not None else 3,
+        frais_setup_eur=(
+            rules_row.get("frais_setup_eur") if rules_row.get("frais_setup_eur") is not None else 20.0
+        ),
+    )
+    return {**rules_row, "explication": explain_rules(rules)}
 
 
 class PrelevementRulesUpdate(BaseModel):
@@ -2134,9 +2148,14 @@ def post_prelevement_rules(
         raise HTTPException(status_code=400, detail="Le délai ne peut pas être négatif.")
     if body.frais_setup_eur < 0:
         raise HTTPException(status_code=400, detail="Les frais de dossier ne peuvent pas être négatifs.")
-    return save_prelevement_rules(
+    saved = save_prelevement_rules(
         ctx.client, org_id, body.ics, body.nature, body.delay_days, body.frais_setup_eur, ctx.user.id,
     )
+    rules = PrelevementRules(
+        ics=saved.get("ics"), nature=saved.get("nature"),
+        delay_days=saved.get("delay_days"), frais_setup_eur=saved.get("frais_setup_eur"),
+    )
+    return {**saved, "explication": explain_rules(rules)}
 
 
 @app.post("/orgs/{org_id}/prelevement/generate")

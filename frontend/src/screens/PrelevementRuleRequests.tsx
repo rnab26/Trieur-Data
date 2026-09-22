@@ -24,11 +24,12 @@ const STATUT_COLOR: Record<RuleRequestStatut, string> = {
 }
 
 // Demandes de modification des règles codées en dur du moteur
-// (exclusions, FRST/RCUR, liste des produits...) -- demandé par
-// Raphaël (2026-09-22) : lui/son père écrivent ici le changement
-// souhaité, ça s'enregistre en base (statut de départ "En attente"),
-// et une session Claude Code la traite quand on le lui demande par
-// message -- jamais codé/appliqué depuis cet écran lui-même.
+// (exclusions, FRST/RCUR, liste des produits...) -- intégré DANS le
+// panneau "📋 Règles appliquées par le moteur" (Raphaël, 2026-09-22 :
+// "pas de pollution visuelle", plus une section à part). L'historique
+// (les demandes déjà créées) est replié par défaut, à dérouler --
+// seule la nouvelle demande "règle qui n'existe pas encore" reste
+// visible d'entrée, c'est l'action, pas l'historique.
 export function PrelevementRuleRequests({
   orgId,
   refreshKey,
@@ -36,15 +37,13 @@ export function PrelevementRuleRequests({
   orgId: string
   // Incrémenté par le parent après un ajout fait depuis le formulaire
   // inline sous une règle du panneau "Règles appliquées par le moteur"
-  // (Raphaël, 2026-09-22 : le point d'entrée pour MODIFIER une règle
-  // existante est directement dessous, pas ici -- cette liste ne sert
-  // de formulaire de saisie que pour une règle qui n'existe pas encore)
   // -- fait recharger sans dupliquer la logique de récupération.
   refreshKey?: number
 }) {
   const [requests, setRequests] = useState<PrelevementRuleRequest[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [historyOpen, setHistoryOpen] = useState(false)
 
   const [newTitre, setNewTitre] = useState('')
   const [newDemande, setNewDemande] = useState('')
@@ -117,24 +116,30 @@ export function PrelevementRuleRequests({
     }
   }
 
-  return (
-    <div className="mb-4 rounded-lg border border-[var(--border)] p-3">
-      <h2 className="text-sm font-semibold">📝 Demandes de modification de règles</h2>
-      <p className="mt-1 mb-3 text-xs text-[var(--muted)]">
-        Historique de toutes les demandes, quel que soit leur statut. Pour modifier une règle
-        existante, utilise "✏️ Demander une modification" juste en dessous d'elle, plus haut -- le
-        formulaire ci-dessous ne sert qu'à proposer une règle qui n'existe pas encore. Envoie ensuite
-        un message à la session Claude Code pour qu'elle traite les demandes en attente.
-      </p>
+  const nonValidees = requests.filter((r) => r.statut !== 'valide').length
 
-      {loading && <p className="text-sm text-[var(--muted)]">Chargement…</p>}
+  return (
+    <div className="mt-2 border-t border-[var(--border)] pt-3">
       {error && <p className="mb-2 text-sm text-[var(--danger)]">Erreur : {error}</p>}
 
-      {!loading && requests.length === 0 && (
-        <p className="mb-3 text-sm text-[var(--muted)]">Aucune demande pour l'instant.</p>
+      {!loading && requests.length > 0 && (
+        <button
+          type="button"
+          onClick={() => setHistoryOpen((v) => !v)}
+          className="mb-2 flex items-center gap-2 text-xs font-medium text-[var(--muted)] hover:text-[var(--foreground)]"
+        >
+          <span>
+            {historyOpen ? '▲' : '▼'} Historique des demandes ({requests.length})
+          </span>
+          {nonValidees > 0 && (
+            <span className="rounded-full bg-[var(--primary)] px-2 py-0.5 text-[0.65rem] font-bold text-[var(--primary-foreground)]">
+              {nonValidees} en cours
+            </span>
+          )}
+        </button>
       )}
 
-      {!loading && requests.length > 0 && (
+      {historyOpen && requests.length > 0 && (
         <ul className="mb-3 flex flex-col gap-3">
           {requests.map((r) => (
             <li key={r.id} className="rounded-md border border-[var(--border)] p-2">
@@ -207,7 +212,9 @@ export function PrelevementRuleRequests({
       )}
 
       <div className="flex flex-col gap-2 rounded-md border border-dashed border-[var(--border)] p-2">
-        <p className="text-xs font-medium text-[var(--muted)]">Nouvelle demande</p>
+        <p className="text-xs font-medium text-[var(--muted)]">
+          ➕ Nouvelle règle (celle-ci n'existe pas encore dans la liste ci-dessus)
+        </p>
         <Input
           placeholder="Nom de la règle (ex. Critère de RCUR)"
           value={newTitre}

@@ -4332,3 +4332,36 @@ dnd-kit prenne la main, le glissement ne démarre donc jamais.
 Remplacé par une contrainte "delay" (appui maintenu 150ms), pattern
 standard pour distinguer un défilement d'un glissement au doigt.
 Déployé.
+
+### PR #85 : nom/prénom, tri fichier, périodicité MGS + date/heure (2026-09-22)
+
+Le père de Raphaël a créé 4 nouvelles demandes pendant qu'il testait
+le site. 3 traitées :
+
+- **"NOM PRENOM"** : `split_nom_prenom()` -- prénom = dernier mot de
+  "Nom complet" (séparé par un blanc, depuis la droite), nom = le
+  reste. Aucun blanc -> tout garde en nom, prénom vide (repli
+  prudent, jamais une coupure devinée). `MandatRow` gagne un champ
+  `prenom` ; la colonne "Prenom" du fichier n'est plus vide.
+- **"tri fichier"** : le fichier de sortie (onglet combiné "Mandat"
+  ET les onglets FRST/RCUR séparés) est maintenant trié par nom du
+  client, puis par ordre des produits (Optilife, Carte MGS, cumul des
+  produits groupés -- même ordre canonique que `_MOTIF_SUFFIXES`),
+  puis FRST avant RCUR.
+- **"périodicité MGS"** : un mandat Carte MGS (suffixe `-M`) a
+  désormais TOUJOURS une périodicité annuelle imposée, quelle que
+  soit la périodicité du contrat dans le CRM -- isolé au bundle
+  concerné, jamais propagé aux autres produits actifs du même
+  client.
+
+La 4e ("Optilife mandat") change des dates de prélèvement bancaire et
+contredit une règle déjà codée (le décalage "date d'effet +1 mois"
+est actuellement sur le FRST, la demande semble vouloir le déplacer
+sur le RCUR) -- **question posée sur la demande** au lieu de deviner
+sur un domaine "zéro droit à l'erreur", statut `en_cours` en attente
+de réponse.
+
+Au passage : date et heure de création affichées partout où une
+demande de règle apparaît (liste des demandes, sélecteur
+d'attribution du panneau "Modèles tableau", panneau "Règles
+appliquées"). 6 nouveaux tests, 512 passent.

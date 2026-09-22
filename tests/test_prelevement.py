@@ -14,6 +14,7 @@ from trieur.prelevement import (
     normalize_iban,
     pad_bic,
     to_amount,
+    to_telephone,
 )
 
 VALID_IBAN = "FR7615589228070085438594040"  # IBAN réel du fichier de référence, IBAN VALIDATOR=true
@@ -70,6 +71,49 @@ def test_to_amount_nan_is_zero_not_contagious():
     nan = float("nan")
     assert to_amount(nan) == 0.0
     assert 49.9 + to_amount(nan) == 49.9  # ne doit jamais "contaminer" une somme
+
+
+def test_to_telephone_strips_pandas_dot_zero_artifact():
+    """Bug réel (2026-09-22, signalé par Raphaël sur un lot réel) :
+    quand une cellule numéro est enregistrée comme un NOMBRE dans le
+    fichier source, pandas la lit en float64 -- str(33630653771.0)
+    donne "33630653771.0", un ".0" qui n'a jamais existé dans le vrai
+    numéro. Reformaté en "+33..." pour rester cohérent avec les
+    cellules déjà en texte du même fichier."""
+    assert to_telephone(33630653771.0) == "+33630653771"
+    assert to_telephone(33630653771) == "+33630653771"
+
+
+def test_to_telephone_keeps_already_formatted_text_untouched():
+    assert to_telephone("+33630653771") == "+33630653771"
+    assert to_telephone("0630653771") == "0630653771"  # forme non reconnue -> jamais modifiée
+
+
+def test_to_telephone_missing_is_empty_not_invented():
+    assert to_telephone(None) == ""
+    assert to_telephone("") == ""
+    assert to_telephone(float("nan")) == ""
+
+
+def test_generate_mandats_falls_back_to_mobile_when_telephone_empty():
+    """Bug réel (2026-09-22) : la colonne "Téléphone" (fixe) est vide
+    pour ~32% des clients du fichier CRM de référence, alors que
+    "Mobile" est remplie à 100% sur les mêmes lignes -- ne lire que
+    "Téléphone" laissait ces mandats partir en banque sans aucun
+    numéro. Vérifié sur les deux colonnes réelles du fichier CRM."""
+    row = _base_row()
+    row["Téléphone"] = ""
+    row["Mobile"] = "+33612345678"
+    result = generate_mandats([row], PrelevementRules())
+    assert result.mandats[0].telephone == "+33612345678"
+
+
+def test_generate_mandats_prefers_telephone_over_mobile_when_both_filled():
+    row = _base_row()
+    row["Téléphone"] = "+33600000001"
+    row["Mobile"] = "+33600000002"
+    result = generate_mandats([row], PrelevementRules())
+    assert result.mandats[0].telephone == "+33600000001"
 
 
 def test_compute_first_prelevement_date_never_before_delay():

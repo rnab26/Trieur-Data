@@ -4399,3 +4399,73 @@ désormais `a_verifier` après un déploiement vérifié `live`, jamais
 La règle Optilife (PR #86) a été repassée à `a_verifier` -- en attente
 de la validation de Raphaël/son père sur le site. 514 tests passent.
 Déployé et vérifié `live`.
+
+### PR #89 : correctif badge trompeur "X en cours" (2026-09-22)
+
+Bug réel signalé par Raphaël ("j'ai l'impression que tu n'as rien
+fait") : les badges de compteur affichaient encore "X en cours" une
+fois passés au cycle `a_verifier`, donnant l'impression qu'aucun
+travail n'avait avancé. Distingue maintenant "🧪 X à vérifier" (orange)
+de "X en cours de codage" (bleu). Déployé et vérifié `live`.
+
+### PR #90 : décalage d'affichage de la barre d'onglets + préchargement (2026-09-22)
+
+Raphaël : "y'a que base de données et data qui s'affiche en premier et
+après y'a prélèvement et cockpit en décalage, quand on clique ça met
+un peu de blanc après ça charge". Deux causes racines dans `App.tsx` :
+(1) la barre d'onglets se rendait avant que `useIsAdmin` ait fini,
+donc "Prélèvement"/"Cockpit" apparaissaient d'un coup après coup --
+corrigé en attendant `isAdminLoaded` ; (2) chaque écran est un chunk
+JS séparé, téléchargé seulement au premier clic -- corrigé par un
+préchargement en tâche de fond (`requestIdleCallback`) de tous les
+chunks accessibles au compte. Déployé et vérifié `live`.
+
+### PR #91 : un seul référentiel de règles, "Actif" / "En cours d'optimisation" (2026-09-22)
+
+Raphaël (retour vocal détaillé) : "toutes les règles que l'on crée/
+rajoute est dans un bloc séparé des règles utilisées [...] deux bacs,
+un bac actif, un bac en cours d'optimisation". "Règles appliquées par
+le moteur" (liste statique, `trieur/prelevement.py`) et "Historique
+des demandes" (dynamique) étaient deux vues séparées du même sujet,
+reliées seulement par une correspondance de titre fragile.
+`PrelevementRuleRequests` devient l'unique source de vérité, organisée
+en deux bacs stricts selon le statut : "✅ Actif" (`valide`) et
+"🔧 En cours d'optimisation" (tout le reste). Une règle Active en
+panne se signale directement depuis sa carte ("✏️ Signaler un
+problème") -- repasse automatiquement en "En cours". Seedé 2 règles
+historiques sans fiche (Numéro de téléphone, Date du premier
+prélèvement) pour que "Actif" reflète vraiment tout ce que fait le
+moteur. Suppression du panneau statique dupliqué (~170 lignes de code
+mort). Déployé et vérifié `live`.
+
+### PR #92 : logo ✅ devant le titre d'une règle certifiée (2026-09-22)
+
+Raphaël : "dès que c'est validé je veux le logo certifié avant le
+début du titre de chaque règle". Déployé et vérifié `live`.
+
+### PR #93 : bouton "Tester avec des données d'exemple" (2026-09-22)
+
+Premier temps du chantier "activer/désactiver une règle" (demande
+"Interrupteur activer/désactiver une règle", `en_attente`, chiffrée à
+part -- pas générique, nécessite d'écrire règle par règle ce que
+"sans elle" veut dire). Nouveau endpoint `POST
+/prelevement/generate-example` : 6 lignes CRM entièrement fictives
+couvrant les cas représentatifs du moteur, même réponse que
+`/prelevement/generate` avec `exemple: true`. Garde-fou explicite :
+quand `result.exemple` est vrai, "Télécharger" et "Enregistrer dans la
+base de données" sont désactivés -- impossible d'envoyer un lot
+d'exemple en banque. Déployé et vérifié `live`.
+
+### PR #94 : thème "Jarvis" sur tout le site (2026-09-22)
+
+Raphaël : "j'aimerais bosser avec un thème plus agréable". Mockup
+proposé sur un artefact Design (3 variantes), variante "Mix" validée.
+Palette claire passée en gris neutre oklch (la palette sombre l'était
+déjà) ; rouge/orange/vert (danger/warning/success) **inchangés** --
+réservés aux statuts. Composants partagés (Card/Button/Input/Dialog) :
+bordures remplacées par un ring 8-10% d'opacité, coins plus arrondis,
+44px tactile. Écran Prélèvement : liseré de couleur + fond teinté par
+statut au lieu d'une bordure pleine. Vérifié avec le CSS réellement
+compilé (capture Playwright statique) -- l'écran authentifié réel n'a
+pas pu être ouvert dans cet environnement (pas d'identifiants Supabase
+disponibles ici).

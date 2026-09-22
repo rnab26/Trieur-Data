@@ -4249,3 +4249,44 @@ l'eau (`scripts/sql.sh "insert into
 trieur_data.prelevement_rule_request_events (request_id, message)
 values (...)"`), pas seulement mettre à jour le statut à la fin --
 c'est tout le sens de la fonctionnalité.
+
+### PR #79/#80 : glisser-déposer, ajout/renommage de colonne, jeux de colonnes (2026-09-22)
+
+Retours successifs de Raphaël sur les colonnes de mandat (PR #77) :
+glisser-déposer (`@dnd-kit`) au lieu des flèches ↑↓ ; "➕ ajouter une
+colonne" personnalisée (toujours vide au générateur, supprimable) ;
+renommage d'une colonne personnalisée après coup (✏️, jamais sur une
+colonne canonique) ; jeux de colonnes réutilisables (nouvelle table
+`prelevement_colonnes_mandat_presets`, scopée à l'organisation --
+enregistrer sous un nom déjà pris remplace le jeu existant). 16
+nouveaux tests au total, tous passent. Déployé et vérifié `live`.
+
+### PR #81 : 3 demandes de règles traitées (2026-09-22)
+
+`a58bb8ab` (Exclusions, 2e partie) : "pas de date de premier
+prélèvement renseignée" n'exclut plus le client (réponse du père de
+Raphaël à la question posée : "la date du jour + 3") --
+`compute_first_prelevement_date()` ne retourne plus jamais `None`,
+utilise directement le plancher aujourd'hui + délai. `41f43dfe`
+(Exclusions, 2e partie, autre demande) : vérifié que ses critères
+étaient déjà exactement ceux appliqués par le moteur -- rien à coder.
+`df407467` ("La règle du MOTIF devient -> Référence Facture") :
+vérifié que la formule du Motif était déjà exactement celle décrite ;
+`Reference_facture` (toujours vide avant) reprend maintenant cette
+même valeur. Les 3 marquées `valide`. **Plus aucune demande en
+attente dans la file.**
+
+### PR #82 : aperçu des colonnes façon tableur Excel (2026-09-22)
+
+Retour de Raphaël : "je pense qu'il faut attribuer le nom des
+colonnes... cette logique doit être visuelle pas que derrière le
+code... un tableau Excel vraiment dans l'aperçu, colonnes A, B, C...
+et quelques lignes vides très légères en dessous". Remplace la liste
+verticale par une grille horizontale (glisser-déposer horizontal),
+lettres A/B/C en repère au-dessus de chaque colonne, note courte sous
+chaque nom ("d'où vient sa valeur" -- nouveau `MANDAT_COLONNES_NOTES`
+côté API, une entrée par colonne canonique, renvoie vers la vraie
+règle du moteur dans `explain_rules()`, jamais une description
+dupliquée). Jeux de colonnes déplacés dans un petit panneau à côté de
+la grille (bouton ⚙️), toujours dans le même aperçu. Déployé et
+vérifié `live`.

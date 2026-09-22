@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from 'react'
+import { Component, lazy, Suspense, useState, type ReactNode } from 'react'
 import { AuthProvider, useAuth } from '@/lib/AuthContext'
 import { useIsAdmin } from '@/lib/useAccount'
 import { LoginScreen } from '@/screens/LoginScreen'
@@ -27,6 +27,54 @@ function EcranFallback() {
       <p className="text-sm text-[var(--muted)]">Chargement…</p>
     </div>
   )
+}
+
+// Filet pour le découpage par écran (chunk par écran, voir plus haut) :
+// si le navigateur a gardé en cache une page qui référence un chunk JS
+// disparu depuis (remplacé par un redéploiement -- nom de fichier
+// différent à chaque build), le "import()" dynamique échoue avec une
+// vraie exception. Sans ce filet, React démonte l'arbre en silence ->
+// écran blanc ou contenu manquant, aucune erreur visible (bug réel déjà
+// rencontré et corrigé le 2026-09-18 sur une autre branche, jamais porté
+// sur main -- reproduit le 2026-09-22 : le père de Raphaël ne voyait
+// aucune des nouvelles questions de règle après un déploiement, page
+// restée sur un chunk périmé). Un seul rechargement automatique suffit
+// puisqu'il récupère alors le nouvel index.html avec les bons noms de
+// chunks -- au-delà, on affiche un message au lieu de boucler.
+class EcranErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false }
+
+  static getDerivedStateFromError() {
+    return { failed: true }
+  }
+
+  componentDidCatch() {
+    const key = 'trieur_ecran_reload_once'
+    if (!sessionStorage.getItem(key)) {
+      sessionStorage.setItem(key, '1')
+      window.location.reload()
+    }
+  }
+
+  render() {
+    if (this.state.failed) {
+      return (
+        <div className="flex min-h-[50vh] flex-col items-center justify-center gap-3 px-4 text-center">
+          <p className="text-sm text-[var(--foreground)]">
+            Le chargement a échoué (nouvelle version disponible).
+          </p>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="rounded-md bg-[var(--primary)] px-4 py-2 text-sm font-medium text-[var(--primary-foreground)]"
+          >
+            Recharger la page
+          </button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
 }
 
 type Ecran = 'database' | 'pipeline' | 'cockpit' | 'prelevement'
@@ -89,14 +137,16 @@ function AppContent() {
           <ThemeToggle />
         </div>
       </nav>
-      <Suspense fallback={<EcranFallback />}>
-        {ecran === 'cockpit' && isAdmin && <CockpitScreen />}
-        {ecran === 'prelevement' && isAdmin && <PrelevementScreen />}
-        {ecran === 'pipeline' && <PipelineScreen />}
-        {(ecran === 'database' || ((ecran === 'cockpit' || ecran === 'prelevement') && !isAdmin)) && (
-          <DatabaseScreen />
-        )}
-      </Suspense>
+      <EcranErrorBoundary>
+        <Suspense fallback={<EcranFallback />}>
+          {ecran === 'cockpit' && isAdmin && <CockpitScreen />}
+          {ecran === 'prelevement' && isAdmin && <PrelevementScreen />}
+          {ecran === 'pipeline' && <PipelineScreen />}
+          {(ecran === 'database' || ((ecran === 'cockpit' || ecran === 'prelevement') && !isAdmin)) && (
+            <DatabaseScreen />
+          )}
+        </Suspense>
+      </EcranErrorBoundary>
     </div>
   )
 }

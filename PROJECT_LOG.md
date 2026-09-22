@@ -3659,3 +3659,25 @@ serveur exact (pandas) :
 en début de chantier doit être revalidée à l'échelle sur l'historique
 complet dès qu'un doute réel est signalé -- ne pas se contenter de la
 première explication plausible qui colle aux premiers cas testés.
+
+### PR #53 : panneau "Règles appliquées" consultable depuis l'écran (2026-09-22)
+
+Après les correctifs FRST/RCUR et téléphone, Raphaël a demandé de
+pouvoir consulter les règles métier appliquées sans lire le code, pour
+repérer une future erreur ou décider qu'une règle doit changer.
+Vérifié au passage : les raisons d'exclusion (dont refus/annulation de
+PR #52) apparaissaient déjà dans le résumé après génération -- rien à
+changer là-dessus, juste confirmé.
+
+- `explain_rules()` dans `trieur/prelevement.py` : décrit en français
+  le comportement RÉEL du code (exclusions, un mandat par produit,
+  First/RCUR, calcul du montant, téléphone, date de premier
+  prélèvement) -- seule source de vérité, reflète les réglages
+  courants (frais, délai) au lieu d'un texte figé qui pourrait diverger
+  du code. Exposé via le endpoint `GET`/`POST /prelevement/rules`
+  existant (champ `explication` ajouté, pas de nouvel endpoint).
+- Frontend : panneau repliable "📋 Règles appliquées par le moteur"
+  sous les Réglages, fermé par défaut.
+
+`pytest` : 449 passés (nouveau test vérifiant que l'explication reflète
+les réglages réellement enregistrés). CI verte du premier coup.

@@ -343,21 +343,22 @@ def test_generate_mandats_multi_product_rcur_matches_real_remise():
     assert by_motif["MGS-1419267-J"].montant_eur == 29.89
 
 
-def test_generate_mandats_immo_column_uses_au_suffix_not_im():
-    """La colonne IMMO correspond au suffixe "-AU" dans les vraies
-    remises bancaires, jamais "-IM" -- trouvé le 2026-09-21 en croisant
-    5 clients du CRM avec le vrai fichier de remise du Drive (le
-    mapping d'origine, reverse-engineered depuis une formule Excel,
-    avait les deux lettres inversées)."""
+def test_generate_mandats_immo_column_uses_im_suffix():
+    """La colonne IMMO correspond au suffixe "-IM" -- formule d'origine
+    du père de Raphaël, RÉTABLIE le 2026-09-22 (question posée sur le
+    conflit avec la correction du 21/09, réponse explicite : "revenir
+    à ma formule... la correction du 21/09 était une erreur"). Voir
+    l'historique de ce fichier pour la correction intermédiaire du
+    21/09, tranchée fausse par le père de Raphaël lui-même."""
     row = _base_row(**{"Optilife": 0, "IMMO": 5.90, "Total frais de dossier": 20.0})
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
     assert len(result.ooff) == 1
-    assert result.ooff[0].motif.endswith("-AU")
+    assert result.ooff[0].motif.endswith("-IM")
     assert result.ooff[0].montant_eur == 25.90  # 5.90 + 20
 
 
 def test_generate_mandats_myjuris_and_immo_bundle_into_one_mandat():
-    """MYJURIS + IMMO actifs ensemble = UN SEUL mandat "-J-AU" (montants
+    """MYJURIS + IMMO actifs ensemble = UN SEUL mandat "-J-IM" (montants
     additionnés, frais comptés 2 fois) -- cas particulier du groupe de
     cumul étendu le 2026-09-22 (voir test suivant pour le groupe
     complet), confirmé sur 2 clients réels croisés avec le vrai fichier
@@ -373,11 +374,11 @@ def test_generate_mandats_myjuris_and_immo_bundle_into_one_mandat():
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
     assert len(result.ooff) == 2  # Optilife seul + le duo MYJURIS/IMMO fusionné
     by_motif = {m.motif: m for m in result.ooff}
-    assert set(by_motif) == {"MGS-1425316-O", "MGS-1425316-J-AU"}
+    assert set(by_motif) == {"MGS-1425316-O", "MGS-1425316-J-IM"}
     assert by_motif["MGS-1425316-O"].montant_eur == 119.0  # 99 + 20
-    assert by_motif["MGS-1425316-J-AU"].montant_eur == 65.80  # (19.90+5.90) + 2x20
+    assert by_motif["MGS-1425316-J-IM"].montant_eur == 65.80  # (19.90+5.90) + 2x20
     # La ligne RCUR du mandat fusionné existe aussi, sans les frais.
-    rcur_fusion = next(m for m in result.rcur if m.motif == "MGS-1425316-J-AU")
+    rcur_fusion = next(m for m in result.rcur if m.motif == "MGS-1425316-J-IM")
     assert rcur_fusion.montant_eur == 25.80  # 19.90 + 5.90, sans frais
 
 
@@ -386,7 +387,7 @@ def test_generate_mandats_full_cumul_group_bundles_into_one_mandat():
     Raphaël, question posée et confirmée) : MYJURIS & MYHOSPI, Admin &
     Aide a dom, Auditif, IMMO et VETO actifs ensemble fusionnent TOUS en
     UN SEUL mandat, suffixe combiné dans l'ordre des produits connus
-    ("-J-AD-IM-AU-V"). Optilife reste hors du groupe, son propre
+    ("-J-AD-AU-IM-V"). Optilife reste hors du groupe, son propre
     mandat."""
     row = _base_row(**{
         "RUM": "9000001",
@@ -401,10 +402,10 @@ def test_generate_mandats_full_cumul_group_bundles_into_one_mandat():
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
     assert len(result.ooff) == 2  # Optilife seul + le groupe cumulé
     by_motif = {m.motif: m for m in result.ooff}
-    assert set(by_motif) == {"MGS-9000001-O", "MGS-9000001-J-AD-IM-AU-V"}
+    assert set(by_motif) == {"MGS-9000001-O", "MGS-9000001-J-AD-AU-IM-V"}
     # 1+2+3+4+5 = 15€ de produits, + 5x20€ de frais (un par produit du groupe)
-    assert by_motif["MGS-9000001-J-AD-IM-AU-V"].montant_eur == 115.0
-    rcur_groupe = next(m for m in result.rcur if m.motif == "MGS-9000001-J-AD-IM-AU-V")
+    assert by_motif["MGS-9000001-J-AD-AU-IM-V"].montant_eur == 115.0
+    rcur_groupe = next(m for m in result.rcur if m.motif == "MGS-9000001-J-AD-AU-IM-V")
     assert rcur_groupe.montant_eur == 15.0  # sans frais
 
 
@@ -551,6 +552,60 @@ def test_generate_mandats_date_effet_rule_does_not_apply_outside_optilife():
     })
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
     assert result.ooff[0].date_premiere_echeance == "24/09/2026"  # inchangé, pas de +1 mois
+
+
+def test_generate_mandats_decalage_remise_shifts_smaller_mandats_by_month():
+    """Décalage remise (demande du père de Raphaël, 2026-09-22, questions
+    posées et confirmées) : si un contrat a plusieurs mandats, celui au
+    montant FRST le plus élevé garde sa date normale, les autres
+    décalent d'un mois de plus chacun, dans l'ordre décroissant du
+    montant. Le décalage se répercute sur la ligne RCUR correspondante
+    (réponse confirmée : "décaler pareil les RCUR")."""
+    row = _base_row(**{
+        "Optilife": 0,  # évite la règle date d'effet, qui ajoute déjà +1 mois
+        "Carte MGS": 99.0,  # le plus gros montant FRST (99+20=119) -> garde sa date
+        "MYJURIS & MYHOSPI": 19.90,  # le plus petit (19.90+20=39.90) -> décale +1 mois
+        "Total frais de dossier": 40.0,
+    })
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    by_motif = {m.motif: m for m in result.ooff}
+    assert by_motif["MGS-RUM000001-M"].date_premiere_echeance == "24/09/2026"  # inchangé
+    assert by_motif["MGS-RUM000001-J"].date_premiere_echeance == "24/10/2026"  # +1 mois
+    # La ligne RCUR correspondante suit le même décalage.
+    by_motif_rcur = {m.motif: m for m in result.rcur}
+    assert by_motif_rcur["MGS-RUM000001-J"].date_premiere_echeance == "24/11/2026"  # 24/10 + 1 mois (périodicité)
+
+
+def test_generate_mandats_decalage_remise_ties_broken_by_canonical_product_order():
+    """Égalité de montant FRST entre deux mandats -> départagé par
+    l'ordre canonique des produits dans le moteur (Optilife, Carte MGS,
+    MYJURIS...) -- réponse confirmée du père de Raphaël. Optilife (rang
+    0) garde sa date, Carte MGS (rang 1) décale."""
+    row = _base_row(**{
+        "Optilife": 50.0,
+        "Carte MGS": 50.0,  # même montant brut qu'Optilife
+        "Total frais de dossier": 40.0,
+    })
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    by_motif = {m.motif: m for m in result.ooff}
+    # Optilife (rang 0, mandat ANCRE) applique aussi la règle "date
+    # d'effet" (+1 mois, pas de date d'effet renseignée) -- 24/09/2026 +
+    # 1 mois = 24/10/2026, gardée telle quelle (rang 0 = pas de décalage
+    # supplémentaire).
+    assert by_motif["MGS-RUM000001-O"].date_premiere_echeance == "24/10/2026"
+    # Carte MGS (rang 1, montant égal) décale d'un mois DEPUIS LA DATE DE
+    # L'ANCRE (24/10 + 1 mois), pas depuis sa propre date de base --
+    # sinon elle retomberait par coïncidence sur la même date qu'Optilife
+    # (24/09 + 1 = 24/10), ce qui annulerait l'objectif de la règle.
+    assert by_motif["MGS-RUM000001-M"].date_premiere_echeance == "24/11/2026"
+
+
+def test_generate_mandats_decalage_remise_no_shift_for_single_mandat():
+    """Un seul mandat actif sur le contrat -> aucun décalage, même règle
+    qu'avant cette fonctionnalité."""
+    row = _base_row(**{"Optilife": 0, "Carte MGS": 99.0, "Total frais de dossier": 20.0})
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    assert result.ooff[0].date_premiere_echeance == "24/09/2026"
 
 
 def test_generate_mandats_matches_real_reference_client():

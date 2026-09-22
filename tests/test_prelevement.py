@@ -189,9 +189,9 @@ def test_generate_mandats_ooff_when_frais_present():
     assert mandat.iban == VALID_IBAN
     assert mandat.bic == "CMBRFR2BXXX"
     assert mandat.motif == "MGS-RUM000001-O"
-    # Optilife : pas de date d'effet dans cette ligne -> date du 1er
-    # prélèvement + 1 mois (règle spécifique Optilife, voir plus bas).
-    assert mandat.date_premiere_echeance == "24/10/2026"
+    # Le FRST Optilife garde la date de 1er prélèvement normale (le
+    # décalage lié à la date d'effet s'applique au RCUR, voir plus bas).
+    assert mandat.date_premiere_echeance == "24/09/2026"
     # Date de signature = date de création du contrat, PAS la date de
     # génération du fichier ("today" ci-dessus) -- vérifié contre un
     # vrai client du fichier de référence (2026-09-21).
@@ -549,10 +549,10 @@ def test_generate_mandats_no_longer_excludes_missing_first_prelevement_date():
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
     assert result.exclus == []
     assert len(result.ooff) == 1
-    # +1 mois : règle Optilife existante (date d'effet absente/passée),
-    # sans rapport avec ce correctif -- part bien de 24/09 (aujourd'hui
-    # + 3 jours, plus de date renseignée) avant ce décalage.
-    assert result.ooff[0].date_premiere_echeance == "24/10/2026"
+    # Part bien de 24/09 (aujourd'hui + 3 jours, plus de date
+    # renseignée) -- le FRST Optilife n'a plus de décalage +1 mois
+    # (déplacé sur le RCUR).
+    assert result.ooff[0].date_premiere_echeance == "24/09/2026"
 
 
 def test_generate_mandats_no_longer_excludes_refused_or_cancel_status():
@@ -602,37 +602,48 @@ def test_generate_mandats_reads_date_effet_column():
     assert result.ooff[0].date_effet == "15/03/2026"
 
 
-def test_generate_mandats_optilife_date_premiere_uses_future_date_effet():
-    """Demande du père de Raphaël (2026-09-22, question posée et
-    confirmée) : pour le mandat Optilife uniquement, si la date d'effet
-    est renseignée ET future (> aujourd'hui), la date du 1er
-    prélèvement = date d'effet + 1 mois -- pas la date de premier
-    prélèvement du fichier."""
+def test_generate_mandats_optilife_frst_date_premiere_always_standard():
+    """Règle remplacée le 2026-09-22 (question posée et confirmée "oui
+    exactement, ça remplace l'ancienne règle") : le FRST Optilife n'a
+    plus AUCUN décalage lié à la date d'effet, même renseignée et
+    future -- il garde la date de 1er prélèvement normale comme tous
+    les autres produits. Le décalage se déplace sur le RCUR (voir
+    tests ci-dessous)."""
     row = _base_row(**{"Date d'effet du nouveau contrat (OPTILIFE)": "15/12/2026"})
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
-    assert result.ooff[0].date_premiere_echeance == "15/01/2027"  # 15/12/2026 + 1 mois
+    assert result.ooff[0].date_premiere_echeance == "24/09/2026"  # inchangé, pas de +1 mois
 
 
-def test_generate_mandats_optilife_date_premiere_falls_back_when_date_effet_past():
+def test_generate_mandats_optilife_rcur_uses_future_date_effet():
+    """Nouvelle règle (2026-09-22) : pour le mandat Optilife uniquement,
+    si la date d'effet est renseignée ET future (> aujourd'hui), la
+    date du RCUR = date d'effet + 1 mois -- pas la date du FRST +
+    périodicité."""
+    row = _base_row(**{"Date d'effet du nouveau contrat (OPTILIFE)": "15/12/2026"})
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    assert result.rcur[0].date_premiere_echeance == "15/01/2027"  # 15/12/2026 + 1 mois
+
+
+def test_generate_mandats_optilife_rcur_falls_back_when_date_effet_past():
     """Réponse du père de Raphaël (2026-09-22) au cas manquant de la
-    règle initiale : date d'effet renseignée mais déjà passée -> traité
-    comme si elle n'existait pas, date du 1er prélèvement = date de 1er
-    prélèvement (calculée normalement) + 1 mois."""
+    règle initiale, conservée après le déplacement FRST -> RCUR : date
+    d'effet renseignée mais déjà passée -> traité comme si elle
+    n'existait pas, date du RCUR = date du FRST + 1 mois."""
     row = _base_row(**{"Date d'effet du nouveau contrat (OPTILIFE)": "15/03/2026"})  # passée (today = 21/09/2026)
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
-    assert result.ooff[0].date_premiere_echeance == "24/10/2026"  # 24/09/2026 (date_premiere) + 1 mois
+    assert result.rcur[0].date_premiere_echeance == "24/10/2026"  # 24/09/2026 (FRST) + 1 mois
 
 
-def test_generate_mandats_optilife_date_premiere_falls_back_when_no_date_effet():
+def test_generate_mandats_optilife_rcur_falls_back_when_no_date_effet():
     row = _base_row()  # pas de colonne "Date d'effet..." dans _base_row par défaut
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
-    assert result.ooff[0].date_premiere_echeance == "24/10/2026"  # 24/09/2026 (date_premiere) + 1 mois
+    assert result.rcur[0].date_premiere_echeance == "24/10/2026"  # 24/09/2026 (FRST) + 1 mois
 
 
 def test_generate_mandats_date_effet_rule_does_not_apply_outside_optilife():
     """La règle ci-dessus est scopée au mandat Optilife UNIQUEMENT --
-    un autre produit actif garde la date de 1er prélèvement normale,
-    même avec une date d'effet future renseignée sur la ligne."""
+    un autre produit actif garde ses dates FRST/RCUR normales, même
+    avec une date d'effet future renseignée sur la ligne."""
     row = _base_row(**{
         "Optilife": 0,
         "MYJURIS & MYHOSPI": 19.90,
@@ -641,6 +652,7 @@ def test_generate_mandats_date_effet_rule_does_not_apply_outside_optilife():
     })
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
     assert result.ooff[0].date_premiere_echeance == "24/09/2026"  # inchangé, pas de +1 mois
+    assert result.rcur[0].date_premiere_echeance == "24/10/2026"  # périodicité normale (1 mois par défaut)
 
 
 def test_generate_mandats_decalage_remise_shifts_smaller_mandats_by_month():
@@ -677,16 +689,13 @@ def test_generate_mandats_decalage_remise_ties_broken_by_canonical_product_order
     })
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
     by_motif = {m.motif: m for m in result.ooff}
-    # Optilife (rang 0, mandat ANCRE) applique aussi la règle "date
-    # d'effet" (+1 mois, pas de date d'effet renseignée) -- 24/09/2026 +
-    # 1 mois = 24/10/2026, gardée telle quelle (rang 0 = pas de décalage
-    # supplémentaire).
-    assert by_motif["MGS-RUM000001-O"].date_premiere_echeance == "24/10/2026"
+    # Optilife (rang 0, mandat ANCRE) n'applique plus de décalage FRST
+    # lié à la date d'effet (règle déplacée sur le RCUR le 2026-09-22)
+    # -- garde la date de 1er prélèvement normale.
+    assert by_motif["MGS-RUM000001-O"].date_premiere_echeance == "24/09/2026"
     # Carte MGS (rang 1, montant égal) décale d'un mois DEPUIS LA DATE DE
-    # L'ANCRE (24/10 + 1 mois), pas depuis sa propre date de base --
-    # sinon elle retomberait par coïncidence sur la même date qu'Optilife
-    # (24/09 + 1 = 24/10), ce qui annulerait l'objectif de la règle.
-    assert by_motif["MGS-RUM000001-M"].date_premiere_echeance == "24/11/2026"
+    # L'ANCRE (24/09 + 1 mois).
+    assert by_motif["MGS-RUM000001-M"].date_premiere_echeance == "24/10/2026"
 
 
 def test_generate_mandats_decalage_remise_no_shift_for_single_mandat():
@@ -737,11 +746,10 @@ def test_generate_mandats_matches_real_reference_client():
     assert mandat.montant_eur == 119.0  # 99 (Optilife) + 20 (frais)
     assert mandat.motif == "MGS-1422647-O"
     assert mandat.bic == "CMBRFR2BXXX"
-    # 10/09/2026 (date de premier prélèvement d'origine, vérifiée contre
-    # le fichier réel avant l'ajout de la règle "date d'effet" du
-    # 2026-09-22) + 1 mois -- Optilife actif sans date d'effet
-    # renseignée applique désormais ce décalage (voir generate_mandats).
-    assert mandat.date_premiere_echeance == "10/10/2026"
+    # 10/09/2026 -- date de premier prélèvement d'origine, vérifiée
+    # contre le fichier réel. Le FRST Optilife n'a plus de décalage lié
+    # à la date d'effet (règle déplacée sur le RCUR le 2026-09-22).
+    assert mandat.date_premiere_echeance == "10/09/2026"
     assert mandat.date_signature_mandat == "21/08/2026"
     assert mandat.explication_periodicite == ""
 

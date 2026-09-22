@@ -506,21 +506,13 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
         for suffix, cols in mandats_bundles:
             montant_produits = sum(amounts[c] for c in cols)
             frais = sum(rules.frais_par_produit.get(c, rules.frais_setup_eur) for c in cols)
-            # Date d'effet -- UNIQUEMENT pour le mandat Optilife (jamais
-            # les autres produits) -- demande du père de Raphaël,
-            # 2026-09-22, deux questions posées et confirmées :
-            # - date d'effet renseignée ET future (> aujourd'hui) ->
-            #   date de 1er prélèvement = date d'effet + 1 mois.
-            # - sinon (pas de date d'effet, OU déjà passée) -> date de
-            #   1er prélèvement = date de 1er prélèvement (calculée
-            #   ci-dessus) + 1 mois.
-            if cols == [COL_OPTILIFE]:
-                if date_effet_raw is not None and date_effet_raw > today:
-                    date_base = _add_months(date_effet_raw, 1)
-                else:
-                    date_base = _add_months(date_premiere, 1)
-            else:
-                date_base = date_premiere
+            # Date d'effet Optilife -- règle remplacée le 2026-09-22
+            # (question posée et confirmée "oui exactement, ça remplace
+            # l'ancienne règle") : le FRST Optilife redevient STANDARD,
+            # comme tous les autres produits (plus de décalage +1 mois
+            # ici). Voir plus bas (date_rcur) pour la nouvelle règle,
+            # déplacée sur la ligne RCUR.
+            date_base = date_premiere
             bundle_infos.append({
                 "suffix": suffix,
                 "cols": cols,
@@ -578,7 +570,21 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
             # ne contient toujours que ce seul produit.
             periodicite_effective = "annuelle" if suffix == "-M" else _get(row, COL_PERIODICITE, keyed)
             explication = _explication_periodicite(periodicite_effective, rules.periodicites)
-            date_rcur = _add_months(date_premiere_ligne, _mois_periodicite(periodicite_effective))
+            # Date d'effet -- UNIQUEMENT pour le mandat Optilife, sur la
+            # ligne RCUR (déplacé du FRST vers le RCUR le 2026-09-22,
+            # demande du père de Raphaël, question posée et confirmée) :
+            # - date d'effet renseignée ET future (> aujourd'hui) ->
+            #   date du RCUR = date d'effet + 1 mois.
+            # - sinon (pas de date d'effet, ou déjà passée) -> date du
+            #   RCUR = date du FRST (déjà décalée par la règle "décalage
+            #   remise" ci-dessus si plusieurs mandats) + 1 mois.
+            if b["cols"] == [COL_OPTILIFE]:
+                if date_effet_raw is not None and date_effet_raw > today:
+                    date_rcur = _add_months(date_effet_raw, 1)
+                else:
+                    date_rcur = _add_months(date_premiere_ligne, 1)
+            else:
+                date_rcur = _add_months(date_premiere_ligne, _mois_periodicite(periodicite_effective))
 
             mandat_frst = MandatRow(
                 reference_client=ref_client,
@@ -787,10 +793,12 @@ def explain_rules(rules: PrelevementRules) -> list[dict[str, str]]:
         {
             "titre": "date d'effet",
             "detail": (
-                "Uniquement pour le mandat Optilife (les autres produits gardent "
-                "la date du 1er prélèvement normale) : date d'effet renseignée et "
-                "future (> aujourd'hui) -> date d'effet + 1 mois. Sinon (pas de "
-                "date d'effet, ou déjà passée) -> date du 1er prélèvement + 1 mois."
+                "Uniquement pour le mandat Optilife, sur sa ligne RCUR (les "
+                "autres produits, et le FRST Optilife lui-même, gardent la date "
+                "du 1er prélèvement normale) : date d'effet renseignée et future "
+                "(> aujourd'hui) -> date du RCUR = date d'effet + 1 mois. Sinon "
+                "(pas de date d'effet, ou déjà passée) -> date du RCUR = date du "
+                "FRST + 1 mois."
             ),
         },
         {

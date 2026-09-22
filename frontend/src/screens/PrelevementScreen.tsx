@@ -400,64 +400,63 @@ export function PrelevementScreen() {
                   <p className="text-sm font-medium text-[var(--foreground)]">
                     Résumé du traitement
                   </p>
-                  <table className="w-fit text-sm">
+                  <table className="w-full max-w-md text-sm">
                     <tbody>
                       <tr>
                         <td className="pr-4 py-0.5 text-[var(--muted)]">Fichier(s) lu(s)</td>
-                        <td className="py-0.5 font-medium text-[var(--foreground)]">
+                        <td className="py-0.5 text-right font-medium text-[var(--foreground)]">
                           {result.summary.nFichiers}
                         </td>
                       </tr>
                       <tr>
                         <td className="pr-4 py-0.5 text-[var(--muted)]">Lignes client au total</td>
-                        <td className="py-0.5 font-medium text-[var(--foreground)]">
+                        <td className="py-0.5 text-right font-medium text-[var(--foreground)]">
                           {result.summary.nLignes}
                         </td>
                       </tr>
                       <tr>
                         <td className="pr-4 py-0.5 text-[var(--muted)]">Lignes exclues</td>
-                        <td className="py-0.5 font-medium text-[var(--foreground)]">
+                        <td
+                          className={
+                            'py-0.5 text-right font-medium ' +
+                            (result.summary.nExclus > 0 ? 'text-[var(--danger)]' : 'text-[var(--foreground)]')
+                          }
+                        >
                           {result.summary.nExclus}
                         </td>
                       </tr>
+                      {result.summary.exclusions.map((e, i) => (
+                        <tr key={i}>
+                          <td className="py-0.5 pl-4 text-xs text-[var(--muted)]">↳ {e.raison}</td>
+                          <td className="py-0.5 text-right text-xs font-medium text-[var(--danger)]">{e.n}</td>
+                        </tr>
+                      ))}
                       <tr>
                         <td className="pr-4 py-0.5 text-[var(--muted)]">Mandats First (1er prélèvement)</td>
-                        <td className="py-0.5 font-medium text-[var(--foreground)]">{result.summary.nFirst}</td>
+                        <td className="py-0.5 text-right font-medium text-[var(--success)]">
+                          {result.summary.nFirst}
+                        </td>
                       </tr>
                       <tr>
                         <td className="pr-4 py-0.5 text-[var(--muted)]">Mandats RCUR (récurrent)</td>
-                        <td className="py-0.5 font-medium text-[var(--foreground)]">{result.summary.nRcur}</td>
+                        <td className="py-0.5 text-right font-medium text-[var(--success)]">
+                          {result.summary.nRcur}
+                        </td>
                       </tr>
                       {result.summary.nFusions > 0 && (
                         <tr>
                           <td className="pr-4 py-0.5 text-[var(--muted)]">Fusionnés MYJURIS+IMMO</td>
-                          <td className="py-0.5 font-medium text-[var(--foreground)]">
+                          <td className="py-0.5 text-right font-medium text-[var(--foreground)]">
                             {result.summary.nFusions}
                           </td>
                         </tr>
                       )}
                     </tbody>
                   </table>
-
                   {result.summary.exclusions.length > 0 && (
-                    <div>
-                      <p className="mb-1 text-sm font-medium text-[var(--foreground)]">
-                        Raisons d'exclusion
-                      </p>
-                      <table className="w-full text-sm">
-                        <tbody>
-                          {result.summary.exclusions.map((e, i) => (
-                            <tr key={i} className="border-t border-[var(--border)] first:border-t-0">
-                              <td className="py-1 pr-2 text-[var(--foreground)]">{e.raison}</td>
-                              <td className="py-1 text-right font-medium text-[var(--muted)]">{e.n}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                      <p className="mt-1 text-xs text-[var(--muted)]">
-                        Voir aussi l'onglet "Exclus" du fichier téléchargé, client par client.
-                      </p>
-                    </div>
+                    <p className="text-xs text-[var(--muted)]">
+                      Voir aussi l'onglet "Exclus" du fichier téléchargé, client par client.
+                    </p>
                   )}
 
                   {result.telephonesManquants.length > 0 && (

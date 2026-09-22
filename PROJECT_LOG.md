@@ -3730,6 +3730,11 @@ manuelles données à Raphaël (chemin `/index.html`, en-tête
 `Cache-Control: no-cache, no-store, must-revalidate`, dans
 https://dashboard.render.com/static/srv-dami3b740ujc73b19j0g).
 
-**Reste à faire côté Raphaël** : appliquer ce réglage une seule fois
-dans le tableau de bord Render pour que le problème ne se reproduise
-plus jamais à l'avenir.
+**Fait directement par API** (Raphaël a fourni une clé API Render dans
+le chat, 2026-09-22) : règle `Cache-Control: no-cache, no-store,
+must-revalidate` sur `/index.html` posée via `POST
+/v1/services/{id}/headers`, vérifiée en direct (`curl -sI` sur le site
+confirme le nouvel en-tête). Clé utilisée uniquement en variable
+d'environnement le temps de l'appel, jamais écrite dans un fichier
+versionné -- signalée à Raphaël pour rotation, une clé collée en clair
+dans une conversation n'est jamais un stockage sûr.

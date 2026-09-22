@@ -1750,6 +1750,63 @@ def test_prelevement_rules_rejects_incomplete_colonnes_mandat(client_factory):
     assert res.status_code == 400
 
 
+def test_prelevement_rules_accepts_custom_column_in_addition_to_canonical(client_factory):
+    """"➕ ajouter une colonne" (Raphaël, 2026-09-22) : une colonne
+    personnalisée peut s'ajouter EN PLUS des 28 canoniques -- toujours
+    acceptée tant que les canoniques restent toutes présentes."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    with_custom = [{"cle": c, "visible": True} for c in MANDAT_COLONNES_CANONIQUES] + [
+        {"cle": "Ma colonne perso", "visible": True}
+    ]
+    res = tc.post("/orgs/org-1/prelevement/rules", json={"colonnes_mandat": with_custom}, headers=headers)
+    assert res.status_code == 200
+    cles = [c["cle"] for c in res.json()["colonnes_mandat"]]
+    assert "Ma colonne perso" in cles
+
+
+def test_prelevement_rules_rejects_duplicate_or_empty_column_name(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    base = [{"cle": c, "visible": True} for c in MANDAT_COLONNES_CANONIQUES]
+    res = tc.post(
+        "/orgs/org-1/prelevement/rules",
+        json={"colonnes_mandat": base + [{"cle": "Nom", "visible": True}]},
+        headers=headers,
+    )
+    assert res.status_code == 400
+    res = tc.post(
+        "/orgs/org-1/prelevement/rules",
+        json={"colonnes_mandat": base + [{"cle": "  ", "visible": True}]},
+        headers=headers,
+    )
+    assert res.status_code == 400
+
+
+def test_prelevement_generate_shows_custom_column_empty(client_factory):
+    """Bout en bout : une colonne personnalisée apparaît dans l'aperçu de
+    génération, toujours vide (aucune source dans le CRM)."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    with_custom = [{"cle": c, "visible": True} for c in MANDAT_COLONNES_CANONIQUES] + [
+        {"cle": "Ma colonne perso", "visible": True}
+    ]
+    res = tc.post("/orgs/org-1/prelevement/rules", json={"colonnes_mandat": with_custom}, headers=headers)
+    assert res.status_code == 200
+
+    res = tc.post(
+        "/orgs/org-1/prelevement/generate",
+        files=[("files", ("export.csv", _PRELEVEMENT_CSV, "text/csv"))],
+        headers=headers,
+    )
+    assert res.status_code == 200
+    mandat = res.json()["mandats"][0]
+    assert mandat["Ma colonne perso"] in ("", None)
+
+
 def test_prelevement_generate_respects_colonnes_mandat_order_and_visibility(client_factory):
     """Bout en bout : l'ordre/visibilité personnalisés s'appliquent
     réellement à l'aperçu de génération, pas seulement à l'affichage des

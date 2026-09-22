@@ -969,6 +969,11 @@ export type PrelevementRules = {
   // complet (une entrée par colonne connue), remplacement en masse à
   // l'enregistrement (même convention que frais_par_produit).
   colonnes_mandat: ColonneMandat[]
+  // Les clés des 28 colonnes connues du moteur -- sert seulement à
+  // distinguer une colonne canonique (jamais supprimable) d'une colonne
+  // personnalisée ("➕ ajouter une colonne", 2026-09-22) côté écran ;
+  // source de vérité unique, jamais dupliquée côté front.
+  colonnes_mandat_canoniques: string[]
   // Liste fixe des produits gérés par le moteur -- informative, jamais
   // éditable depuis l'écran (voir PROJECT_LOG.md, 2026-09-22 : couplée
   // au groupe de produits cumulés en un seul mandat et au nom des

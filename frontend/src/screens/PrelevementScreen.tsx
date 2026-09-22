@@ -1,4 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
+import {
+  DndContext,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core'
+import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -49,6 +59,56 @@ const PREVIEW_ROW_LIMIT = 20
 // par Raphaël, 2026-09-21).
 const PRELEVEMENT_ORG_NAME = 'Prélèvement'
 
+// Une ligne réordonnable par glisser-déposer (Raphaël, 2026-09-22:
+// "plus pratique" que des flèches ↑↓) -- la poignée ⠿ est la seule zone
+// qui déclenche le drag, pour que cocher/décocher la case au doigt ne
+// déclenche jamais un glissement accidentel.
+function SortableColonneMandatRow({
+  colonne,
+  removable,
+  onToggleVisible,
+  onRemove,
+}: {
+  colonne: ColonneMandat
+  removable: boolean
+  onToggleVisible: () => void
+  onRemove: () => void
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: colonne.cle,
+  })
+  return (
+    <li
+      ref={setNodeRef}
+      style={{ transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1 }}
+      className="flex items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-1"
+    >
+      <span
+        {...attributes}
+        {...listeners}
+        className="touch-none cursor-grab select-none px-1 text-[var(--muted)]"
+        aria-label="Glisser pour réordonner"
+      >
+        ⠿
+      </span>
+      <input type="checkbox" checked={colonne.visible} onChange={onToggleVisible} />
+      <span className={'flex-1 text-sm ' + (colonne.visible ? '' : 'text-[var(--muted)] line-through')}>
+        {colonne.cle}
+      </span>
+      {removable && (
+        <button
+          type="button"
+          onClick={onRemove}
+          className="px-1 text-[var(--danger)] hover:opacity-70"
+          aria-label={`Supprimer la colonne ${colonne.cle}`}
+        >
+          🗑️
+        </button>
+      )}
+    </li>
+  )
+}
+
 export function PrelevementScreen() {
   const { session, signOut } = useAuth()
   const { orgs, orgsError } = useOrgs()
@@ -76,6 +136,9 @@ export function PrelevementScreen() {
   // que frais_par_produit/periodicites : liste toujours complète en
   // mémoire, remplacement en masse à l'enregistrement.
   const [colonnesMandat, setColonnesMandat] = useState<ColonneMandat[]>([])
+  // Sert seulement à savoir quelle colonne est supprimable (canonique =
+  // jamais) -- voir "colonnes_mandat_canoniques" dans PrelevementRules.
+  const [colonnesMandatCanoniques, setColonnesMandatCanoniques] = useState<string[]>([])
   const [newPeriodiciteCode, setNewPeriodiciteCode] = useState('')
   const [newPeriodiciteTexte, setNewPeriodiciteTexte] = useState('')
   const [savingRules, setSavingRules] = useState(false)
@@ -179,6 +242,7 @@ export function PrelevementScreen() {
         setFraisParProduit(data.frais_par_produit)
         setPeriodicites(data.periodicites)
         setColonnesMandat(data.colonnes_mandat)
+        setColonnesMandatCanoniques(data.colonnes_mandat_canoniques)
       })
       .catch((err: unknown) => {
         if (!cancelled) setRulesError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
@@ -207,6 +271,7 @@ export function PrelevementScreen() {
       setFraisParProduit(updated.frais_par_produit)
       setPeriodicites(updated.periodicites)
       setColonnesMandat(updated.colonnes_mandat)
+      setColonnesMandatCanoniques(updated.colonnes_mandat_canoniques)
       setRulesSaved(true)
     } catch (err) {
       setRulesError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
@@ -245,21 +310,53 @@ export function PrelevementScreen() {
     setNewPeriodiciteTexte('')
   }
 
-  // Réordonner/masquer une colonne du fichier de mandats -- flèches
-  // haut/bas plutôt qu'un glisser-déposer (plus fiable au doigt sur
-  // mobile, même choix que les autres listes de cette appli).
-  function moveColonneMandat(index: number, direction: -1 | 1) {
+  // Réordonner/masquer une colonne du fichier de mandats -- glisser-
+  // déposer (Raphaël, 2026-09-22 : "plus pratique" que des flèches).
+  function reorderColonneMandat(activeCle: string, overCle: string) {
+    if (activeCle === overCle) return
     setColonnesMandat((prev) => {
+      const from = prev.findIndex((c) => c.cle === activeCle)
+      const to = prev.findIndex((c) => c.cle === overCle)
+      if (from === -1 || to === -1) return prev
       const next = [...prev]
-      const target = index + direction
-      if (target < 0 || target >= next.length) return prev
-      ;[next[index], next[target]] = [next[target], next[index]]
+      const [moved] = next.splice(from, 1)
+      next.splice(to, 0, moved)
       return next
     })
   }
 
   function toggleColonneMandatVisible(cle: string) {
     setColonnesMandat((prev) => prev.map((c) => (c.cle === cle ? { ...c, visible: !c.visible } : c)))
+  }
+
+  // "➕ ajouter une colonne" (Raphaël, 2026-09-22) : une colonne libre,
+  // sans source dans le CRM -- toujours vide au générateur, à remplir à
+  // la main après export (décision explicite, pas une valeur inventée).
+  const [newColonneMandat, setNewColonneMandat] = useState('')
+
+  function addColonneMandat() {
+    const nom = newColonneMandat.trim()
+    if (!nom) return
+    if (colonnesMandat.some((c) => c.cle.toLowerCase() === nom.toLowerCase())) {
+      setRulesError('Une colonne porte déjà ce nom.')
+      return
+    }
+    setColonnesMandat((prev) => [...prev, { cle: nom, visible: true }])
+    setNewColonneMandat('')
+  }
+
+  function removeColonneMandatPersonnalisee(cle: string) {
+    setColonnesMandat((prev) => prev.filter((c) => c.cle !== cle))
+  }
+
+  // distance: 5 -- laisse le temps à un simple tap (cocher la case, par
+  // exemple) de se distinguer d'un vrai glissement, au doigt comme à la
+  // souris.
+  const dndSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
+
+  function handleColonneMandatDragEnd(event: DragEndEvent) {
+    const { active, over } = event
+    if (over && active.id !== over.id) reorderColonneMandat(String(active.id), String(over.id))
   }
 
   function openRuleForm(index: number) {
@@ -585,45 +682,49 @@ export function PrelevementScreen() {
 
                   <div>
                     <p className="mb-1 text-sm font-medium text-[var(--foreground)]">
-                      Colonnes du fichier de mandats -- ordre (↑↓) et visibilité (case à cocher).
+                      Colonnes du fichier de mandats -- glisse ⠿ pour réordonner, case à cocher pour
+                      masquer/afficher.
                     </p>
-                    <ul className="flex flex-col gap-1">
-                      {colonnesMandat.map((c, i) => (
-                        <li
-                          key={c.cle}
-                          className="flex items-center gap-2 rounded-md border border-[var(--border)] px-2 py-1"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={c.visible}
-                            onChange={() => toggleColonneMandatVisible(c.cle)}
-                          />
-                          <span
-                            className={
-                              'flex-1 text-sm ' + (c.visible ? '' : 'text-[var(--muted)] line-through')
-                            }
-                          >
-                            {c.cle}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => moveColonneMandat(i, -1)}
-                            disabled={i === 0}
-                            className="px-1 text-[var(--muted)] hover:text-[var(--foreground)] disabled:opacity-30"
-                          >
-                            ▲
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => moveColonneMandat(i, 1)}
-                            disabled={i === colonnesMandat.length - 1}
-                            className="px-1 text-[var(--muted)] hover:text-[var(--foreground)] disabled:opacity-30"
-                          >
-                            ▼
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
+                    <DndContext
+                      sensors={dndSensors}
+                      collisionDetection={closestCenter}
+                      onDragEnd={handleColonneMandatDragEnd}
+                    >
+                      <SortableContext
+                        items={colonnesMandat.map((c) => c.cle)}
+                        strategy={verticalListSortingStrategy}
+                      >
+                        <ul className="flex flex-col gap-1">
+                          {colonnesMandat.map((c) => (
+                            <SortableColonneMandatRow
+                              key={c.cle}
+                              colonne={c}
+                              removable={!colonnesMandatCanoniques.includes(c.cle)}
+                              onToggleVisible={() => toggleColonneMandatVisible(c.cle)}
+                              onRemove={() => removeColonneMandatPersonnalisee(c.cle)}
+                            />
+                          ))}
+                        </ul>
+                      </SortableContext>
+                    </DndContext>
+                    <div className="mt-2 flex items-center gap-2">
+                      <Input
+                        placeholder="Nom de la nouvelle colonne (ex. Code société)"
+                        className="h-8 max-w-xs px-2 py-1"
+                        value={newColonneMandat}
+                        onChange={(e) => setNewColonneMandat(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') addColonneMandat()
+                        }}
+                      />
+                      <Button variant="secondary" onClick={addColonneMandat} disabled={!newColonneMandat.trim()}>
+                        ➕ Ajouter une colonne
+                      </Button>
+                    </div>
+                    <p className="mt-1 text-xs text-[var(--muted)]">
+                      Une colonne ajoutée est toujours vide dans le fichier généré (aucune source dans le
+                      CRM) -- à remplir toi-même après export.
+                    </p>
                   </div>
 
                   <div>

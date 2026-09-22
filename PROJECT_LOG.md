@@ -3738,3 +3738,28 @@ confirme le nouvel en-tête). Clé utilisée uniquement en variable
 d'environnement le temps de l'appel, jamais écrite dans un fichier
 versionné -- signalée à Raphaël pour rotation, une clé collée en clair
 dans une conversation n'est jamais un stockage sûr.
+
+**Cause réelle du signalement** : ni le cache ni le header. Raphaël
+était sur un tout autre site Render, `trieur-data-app.onrender.com`
+(sans `-test`), service resté figé sur la branche
+`feature/react-migration` depuis le 2026-09-18 -- avant même
+l'existence de l'onglet Prélèvement. Le bon site est
+`trieur-data-app-test.onrender.com`. Confirmé par Raphaël (capture
+d'écran d'un vrai fichier de 66 lignes traité correctement, 74
+mandats/40 First/34 RCUR, cohérent avec les validations précédentes).
+Le réglage Cache-Control reste une vraie amélioration (évite une
+future classe de bug de cache) mais n'était pas la cause de ce
+signalement précis.
+
+### PR #57 : résumé fusionné, sous-lignes d'exclusion et code couleur (2026-09-22)
+
+Sur demande de Raphaël, le tableau de résumé du traitement Prélèvement
+est fusionné en un seul tableau (au lieu de deux tableaux séparés) :
+chaque raison d'exclusion apparaît en sous-ligne indentée (`↳`)
+directement sous "Lignes exclues", plus besoin d'aller chercher la
+table séparée. Code couleur léger ajouté : rouge (`--danger`) pour les
+lignes exclues et leurs raisons, vert (`--success`, nouveau token CSS
+calqué sur `--danger`, clair + sombre) pour les mandats First/RCUR
+générés. Pas de changement backend. Vérifié : `tsc --noEmit` propre,
+`npm run lint` propre (hors avertissement préexistant sans rapport),
+suite pytest complète (449 tests) en sanity check.

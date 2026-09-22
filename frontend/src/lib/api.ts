@@ -1081,6 +1081,92 @@ export function savePrelevementMandats(orgId: string, mandats: PrelevementMandat
   )
 }
 
+// ---------------------------------------------------------------
+// Vue de consultation des mandats déjà enregistrés (2026-09-22) -- même
+// principe que listRecords/updateRecord/bulkDeleteRecords/bulkUpdateRecords/
+// exportRecords ci-dessus, mais sur la table dédiée
+// trieur_data.prelevement_mandats (colonnes fixes, pas de "colonnes
+// maîtres" à gérer).
+export type PrelevementMandatsPage = {
+  page: number
+  page_size: number
+  total: number
+  columns: string[]
+  rows: RecordRow[]
+}
+
+export function listPrelevementMandats(
+  orgId: string,
+  opts: { page?: number; pageSize?: number; search?: string; colFilters?: ColFilters } = {},
+) {
+  const params = new URLSearchParams()
+  params.set('page', String(opts.page ?? 1))
+  params.set('page_size', String(opts.pageSize ?? 50))
+  if (opts.search) params.set('search', opts.search)
+  if (opts.colFilters && Object.keys(opts.colFilters).length > 0) {
+    params.set('col_filters', JSON.stringify(opts.colFilters))
+  }
+  return request<PrelevementMandatsPage>(`/orgs/${orgId}/prelevement/mandats?${params.toString()}`)
+}
+
+// Contrairement à updateRecord (qui remplace tout le jsonb), le PATCH
+// mandat n'attend QUE les champs modifiés -- voir
+// trieur/db.py:update_prelevement_mandat, qui fusionne plutôt que
+// remplacer (pas de jsonb ici, des colonnes SQL fixes).
+export function updatePrelevementMandat(orgId: string, mandatId: string, data: Record<string, unknown>) {
+  return request<{ id: string; data: Record<string, unknown>; updated: boolean }>(
+    `/orgs/${orgId}/prelevement/mandats/${mandatId}`,
+    { method: 'PATCH', body: JSON.stringify({ data }) },
+  )
+}
+
+export function bulkDeletePrelevementMandats(orgId: string, ids: string[]) {
+  return request<{ n_deleted: number }>(`/orgs/${orgId}/prelevement/mandats`, {
+    method: 'DELETE',
+    body: JSON.stringify({ ids }),
+  })
+}
+
+export function bulkUpdatePrelevementMandats(orgId: string, ids: string[], field: string, value: unknown) {
+  return request<{ n_updated: number; n_requested: number }>(
+    `/orgs/${orgId}/prelevement/mandats/bulk`,
+    { method: 'PATCH', body: JSON.stringify({ ids, field, value }) },
+  )
+}
+
+export async function exportPrelevementMandats(
+  orgId: string,
+  opts: { format: 'csv' | 'xlsx'; search?: string; colFilters?: ColFilters },
+): Promise<void> {
+  const headers = await authHeader()
+  const params = new URLSearchParams()
+  params.set('format', opts.format)
+  if (opts.search) params.set('search', opts.search)
+  if (opts.colFilters && Object.keys(opts.colFilters).length > 0) {
+    params.set('col_filters', JSON.stringify(toApiColFiltersExport(opts.colFilters)))
+  }
+  const res = await safeFetch(
+    `${API_URL}/orgs/${orgId}/prelevement/mandats/export?${params.toString()}`,
+    { headers },
+  )
+  if (!res.ok) {
+    return throwForErrorResponse(res)
+  }
+  const blob = await safeReadBlob(res)
+  const disposition = res.headers.get('content-disposition') ?? ''
+  const match = /filename="?([^"]+)"?/.exec(disposition)
+  const filename = match ? match[1] : `mandats_prelevement.${opts.format}`
+
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
 // Décode le classeur base64 renvoyé par generatePrelevementMandats et
 // déclenche son téléchargement -- séparé de la génération pour que
 // l'utilisateur puisse d'abord voir l'aperçu.

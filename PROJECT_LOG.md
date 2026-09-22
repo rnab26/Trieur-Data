@@ -3774,7 +3774,7 @@ Question posée, réponse : garder le verrouillage, ajouter seulement la
 confirmation manquante. `window.confirm` avant l'appel, même
 convention que `MasterColumnsPanel.removeAt`. Mergée.
 
-### PR #59 : vue de consultation des mandats enregistrés (en cours)
+### PR #59 : vue de consultation des mandats enregistrés (mergée)
 
 Chantier Cockpit "Vue Base de données dédiée aux mandats Prélèvement"
 débloqué -- Raphaël a demandé d'avancer côté Base de données en

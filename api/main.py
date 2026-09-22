@@ -19,6 +19,7 @@ import json
 import os
 import uuid
 from dataclasses import dataclass
+from datetime import date
 from typing import Any, Optional
 
 import pandas as pd
@@ -112,6 +113,9 @@ from trieur.export import export_csv_safe, export_excel_safe, sanitize_filename
 from trieur.prelevement import (
     PRODUITS_CONNUS,
     PrelevementRules,
+    _add_months,
+    _mois_periodicite,
+    _parse_date,
     _PERIODICITE_EXPLICATIONS,
     explain_rules,
     generate_mandats,
@@ -2252,29 +2256,65 @@ async def post_prelevement_generate(
     rows = df.where(pd.notnull(df), None).to_dict(orient="records")
     result = generate_mandats(rows, rules)
 
+    aujourdhui = date.today()
+
     def _mandat_dict(m):
+        # Ordre et noms de colonnes demandés par le père de Raphaël
+        # (2026-09-22, "ordre des colonnes du fichiers de mandats") --
+        # deux points laissés à ma charge faute de réponse exploitable
+        # (deux questions posées, réponses "Autre (préciser)" sans
+        # champ libre rempli) :
+        # - "Prenom" : le CRM n'a qu'un champ "Nom complet", jamais de
+        #   Nom/Prénom séparés -- jamais deviné où couper (risque réel
+        #   sur un document envoyé à la banque), laissé vide.
+        # - "Motif"/"Référence client" (absents de sa liste) : gardés en
+        #   colonnes supplémentaires à la fin plutôt que supprimés --
+        #   "Motif" est la référence unique envoyée à la banque, une
+        #   vraie régression fonctionnelle si perdue sans confirmation
+        #   explicite.
+        # Colonnes déduites des règles déjà codées (réponse confirmée :
+        # "certaines se déduisent des règles déjà codées") :
+        # Type_prelevement = FRST/RCUR (type_sequence) ; Frequence_mois
+        # = périodicité en mois ; Jour_prelevement = jour du mois de la
+        # date de 1er prélèvement ; Prochaine_echeance = cette date +
+        # la périodicité. "Statut", "Reference_facture", "Date_fin"
+        # n'ont AUCUNE source dans le moteur (confirmé par la réponse) :
+        # laissées vides, jamais inventées.
+        date_premiere_dt = _parse_date(m.date_premiere_echeance)
+        mois_periodicite = _mois_periodicite(m.periodicite)
+        prochaine_echeance = _add_months(date_premiere_dt, mois_periodicite) if date_premiere_dt else None
         return {
-            "Référence client": m.reference_client,
             "Nom": m.nom,
-            "RUM": m.rum,
-            "Type séquence": m.type_sequence,
-            "Motif": m.motif,
-            "Montant EUR": m.montant_eur,
-            "Devise": m.devise,
-            "IBAN": m.iban,
-            "BIC": m.bic,
+            "Prenom": "",
+            "Email": m.email,
+            "Telephone": m.telephone,
             "Adresse": m.adresse,
             "Ville": m.ville,
-            "Code postal": m.code_postal,
+            "Code_postal": m.code_postal,
             "Pays": m.pays,
-            "Email": m.email,
-            "Téléphone": m.telephone,
-            "Date signature mandat": m.date_signature_mandat,
-            "Date première échéance": m.date_premiere_echeance,
+            "IBAN": m.iban,
+            "BIC": m.bic,
+            "ICS_Crediteur": "",  # toujours vide -- demande explicite du père de Raphaël
+            "RUM": m.rum,
+            "Type_prelevement": m.type_sequence,
+            "Montant_EUR": m.montant_eur,
+            "Devise": m.devise,
+            "Date_signature_mandat": m.date_signature_mandat,
+            "Date_premiere_echeance": m.date_premiere_echeance,
+            "Periodicite": m.periodicite,
+            "Explication_periodicite": m.explication_periodicite,
+            "Frequence_mois": mois_periodicite,
+            "Jour_prelevement": date_premiere_dt.day if date_premiere_dt else None,
+            "Prochaine_echeance": prochaine_echeance.strftime("%d/%m/%Y") if prochaine_echeance else "",
+            "Date_fin": "",
+            "Statut": "",
+            "Reference_facture": "",
+            "Libelle": f"intégré le {aujourdhui.strftime('%d/%m/%Y')}",
+            # Colonnes hors de la liste demandée, gardées par sécurité
+            # (voir note ci-dessus) -- jamais retirées sans confirmation.
+            "Référence client": m.reference_client,
+            "Motif": m.motif,
             "Date d'effet": m.date_effet,
-            "Périodicité": m.periodicite,
-            "Explication périodicité": m.explication_periodicite,
-            "ICS": rules.ics or "",
         }
 
     df_mandat = pd.DataFrame([_mandat_dict(m) for m in result.mandats])

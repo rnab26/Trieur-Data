@@ -1174,31 +1174,41 @@ def save_prelevement_rules(
 
 
 # Clés du dict renvoyé par api/main.py:_mandat_dict -> colonnes de
-# trieur_data.prelevement_mandats (migration 0023). Une seule source de
-# vérité pour ce mapping -- utilisée par save_prelevement_mandats
-# ci-dessous, jamais reconstruite ailleurs.
+# trieur_data.prelevement_mandats (migration 0023, complétée par la
+# migration 0027 pour le nouvel ordre/contenu de colonnes demandé par
+# le père de Raphaël le 2026-09-22). Une seule source de vérité pour ce
+# mapping -- utilisée par save_prelevement_mandats ci-dessous, jamais
+# reconstruite ailleurs.
 _MANDAT_DICT_TO_COLUMN = {
-    "Référence client": "reference_client",
     "Nom": "nom",
-    "RUM": "rum",
-    "Type séquence": "type_sequence",
-    "Motif": "motif",
-    "Montant EUR": "montant_eur",
-    "Devise": "devise",
-    "IBAN": "iban",
-    "BIC": "bic",
+    "Prenom": "prenom",
+    "Email": "email",
+    "Telephone": "telephone",
     "Adresse": "adresse",
     "Ville": "ville",
-    "Code postal": "code_postal",
+    "Code_postal": "code_postal",
     "Pays": "pays",
-    "Email": "email",
-    "Téléphone": "telephone",
-    "Date signature mandat": "date_signature_mandat",
-    "Date première échéance": "date_premiere_echeance",
+    "IBAN": "iban",
+    "BIC": "bic",
+    "ICS_Crediteur": "ics",
+    "RUM": "rum",
+    "Type_prelevement": "type_sequence",
+    "Montant_EUR": "montant_eur",
+    "Devise": "devise",
+    "Date_signature_mandat": "date_signature_mandat",
+    "Date_premiere_echeance": "date_premiere_echeance",
+    "Periodicite": "periodicite",
+    "Explication_periodicite": "explication_periodicite",
+    "Frequence_mois": "frequence_mois",
+    "Jour_prelevement": "jour_prelevement",
+    "Prochaine_echeance": "prochaine_echeance",
+    "Date_fin": "date_fin",
+    "Statut": "statut",
+    "Reference_facture": "reference_facture",
+    "Libelle": "libelle",
+    "Référence client": "reference_client",
+    "Motif": "motif",
     "Date d'effet": "date_effet",
-    "Périodicité": "periodicite",
-    "Explication périodicité": "explication_periodicite",
-    "ICS": "ics",
 }
 
 

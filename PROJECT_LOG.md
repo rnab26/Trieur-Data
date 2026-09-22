@@ -3611,3 +3611,51 @@ l'écran (référence client, nom, motif) + ligne dans le résumé des
 étapes, dès la génération.
 
 `pytest` : 445 passés. CI verte du premier coup.
+
+### PR #52 : vraie règle FRST/RCUR + exclusion refus/annulation (2026-09-22)
+
+Bug réel MAJEUR, signalé par Raphaël : "aucun prélèvement n'est
+récurrent" alors que le fichier contient de vrais abonnements mensuels
+-- sur les deux fichiers CRM réels disponibles, l'ancien moteur sortait
+**100% des mandats en FRST**, jamais un seul RCUR.
+
+**Root-cause** : l'ancienne règle ("Total frais de dossier" > 0 ->
+FRST) ne concordait qu'à **63%** (557/878) avec le vrai historique des
+remises bancaires du Drive -- jamais réellement validée à cette
+échelle, juste "confirmée" sur un petit échantillon au tout début du
+chantier qui ne généralisait pas.
+
+**Reverérifié les 3 fichiers maîtres du père de Raphaël**, à sa
+demande explicite : aucun ne contient de formule calculant FRST/RCUR
+(les onglets "Mandats OOFF"/"Mandats RCUR" du fichier 3 sont des
+gabarits vides, jamais remplis). Le vrai signal a été trouvé dans une
+colonne jusque-là inexploitée, **"Statut agent IA"** :
+
+- `"Notifié le {jour}"` = notification préalable obligatoire (règle
+  SEPA) avant un prélèvement RÉCURRENT -- vérifié : le jour de
+  notification correspond au jour de prélèvement récurrent du client
+  dans **95,3%** des cas (204/214) sur le fichier de référence.
+- Vide / "Validé par le client" / autre -> FRST (comportement par
+  défaut inchangé pour les fichiers sans cette colonne).
+
+**Découverte annexe pendant l'investigation** (confirmée avec Raphaël
+avant de coder) : "Refusé par le client" (9 clients sur le fichier
+réel) et "Nrp J-1 - Annuler contrat" (2 clients) étaient jusqu'ici
+**générés et envoyés en banque comme n'importe quel autre mandat**.
+Exclus maintenant, même règle qu'un IBAN invalide.
+
+**Vérifié sur les deux fichiers CRM réels disponibles**, chemin
+serveur exact (pandas) :
+- Fichier de référence (291 lignes) : 409 mandats (82 First, **327
+  RCUR**, 9 exclus dont 5 refus/annulation).
+- Fichier réel de Raphaël (66 lignes) : 74 mandats (40 First, **34
+  RCUR**, 11 exclus dont 11 refus/annulation) -- **74/74 motifs +
+  montants + FRST/RCUR concordent exactement** avec l'historique réel
+  du Drive (comparaison automatisée).
+
+`pytest` : 448 passés. CI verte du premier coup.
+
+**Leçon retenue** : une règle métier "confirmée" sur quelques exemples
+en début de chantier doit être revalidée à l'échelle sur l'historique
+complet dès qu'un doute réel est signalé -- ne pas se contenter de la
+première explication plausible qui colle aux premiers cas testés.

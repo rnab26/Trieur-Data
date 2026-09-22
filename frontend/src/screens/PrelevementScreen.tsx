@@ -15,6 +15,7 @@ import {
   listPrelevementRuleRequests,
   savePrelevementMandats,
   savePrelevementRules,
+  type ColonneMandat,
   type PrelevementGenerateResult,
   type PrelevementRuleRequest,
   type PrelevementRules,
@@ -69,6 +70,12 @@ export function PrelevementScreen() {
   // l'intégralité, pas un correctif partiel.
   const [fraisParProduit, setFraisParProduit] = useState<Record<string, number>>({})
   const [periodicites, setPeriodicites] = useState<Record<string, string>>({})
+  // Ordre/visibilité des colonnes du fichier de mandats (père de
+  // Raphaël, 2026-09-22, "ORDRE DES COLONNES + MODIFICATIONS") --
+  // réglable ici, sans repasser par une session Claude. Même convention
+  // que frais_par_produit/periodicites : liste toujours complète en
+  // mémoire, remplacement en masse à l'enregistrement.
+  const [colonnesMandat, setColonnesMandat] = useState<ColonneMandat[]>([])
   const [newPeriodiciteCode, setNewPeriodiciteCode] = useState('')
   const [newPeriodiciteTexte, setNewPeriodiciteTexte] = useState('')
   const [savingRules, setSavingRules] = useState(false)
@@ -171,6 +178,7 @@ export function PrelevementScreen() {
         setFraisSetupEur(data.frais_setup_eur)
         setFraisParProduit(data.frais_par_produit)
         setPeriodicites(data.periodicites)
+        setColonnesMandat(data.colonnes_mandat)
       })
       .catch((err: unknown) => {
         if (!cancelled) setRulesError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
@@ -193,10 +201,12 @@ export function PrelevementScreen() {
         fraisSetupEur,
         fraisParProduit,
         periodicites,
+        colonnesMandat,
       })
       setRules(updated)
       setFraisParProduit(updated.frais_par_produit)
       setPeriodicites(updated.periodicites)
+      setColonnesMandat(updated.colonnes_mandat)
       setRulesSaved(true)
     } catch (err) {
       setRulesError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
@@ -233,6 +243,23 @@ export function PrelevementScreen() {
     setPeriodicites((prev) => ({ ...prev, [code]: texte }))
     setNewPeriodiciteCode('')
     setNewPeriodiciteTexte('')
+  }
+
+  // Réordonner/masquer une colonne du fichier de mandats -- flèches
+  // haut/bas plutôt qu'un glisser-déposer (plus fiable au doigt sur
+  // mobile, même choix que les autres listes de cette appli).
+  function moveColonneMandat(index: number, direction: -1 | 1) {
+    setColonnesMandat((prev) => {
+      const next = [...prev]
+      const target = index + direction
+      if (target < 0 || target >= next.length) return prev
+      ;[next[index], next[target]] = [next[target], next[index]]
+      return next
+    })
+  }
+
+  function toggleColonneMandatVisible(cle: string) {
+    setColonnesMandat((prev) => prev.map((c) => (c.cle === cle ? { ...c, visible: !c.visible } : c)))
   }
 
   function openRuleForm(index: number) {
@@ -555,6 +582,49 @@ export function PrelevementScreen() {
                         ➕ Ajouter
                       </Button>
                     </div>
+
+                  <div>
+                    <p className="mb-1 text-sm font-medium text-[var(--foreground)]">
+                      Colonnes du fichier de mandats -- ordre (↑↓) et visibilité (case à cocher).
+                    </p>
+                    <ul className="flex flex-col gap-1">
+                      {colonnesMandat.map((c, i) => (
+                        <li
+                          key={c.cle}
+                          className="flex items-center gap-2 rounded-md border border-[var(--border)] px-2 py-1"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={c.visible}
+                            onChange={() => toggleColonneMandatVisible(c.cle)}
+                          />
+                          <span
+                            className={
+                              'flex-1 text-sm ' + (c.visible ? '' : 'text-[var(--muted)] line-through')
+                            }
+                          >
+                            {c.cle}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => moveColonneMandat(i, -1)}
+                            disabled={i === 0}
+                            className="px-1 text-[var(--muted)] hover:text-[var(--foreground)] disabled:opacity-30"
+                          >
+                            ▲
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => moveColonneMandat(i, 1)}
+                            disabled={i === colonnesMandat.length - 1}
+                            className="px-1 text-[var(--muted)] hover:text-[var(--foreground)] disabled:opacity-30"
+                          >
+                            ▼
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
 
                   <div>
                     <Button onClick={() => void handleSaveRules()} disabled={savingRules}>

@@ -1737,10 +1737,11 @@ def test_prelevement_generate_merges_multiple_files(client_factory):
     assert body["counts"]["exclus"] == 2
 
 
-def test_prelevement_generate_steps_describe_processing(client_factory):
-    """Résumé des étapes demandé par Raphaël (2026-09-21) : voir ce qui
-    a été fait sur le fichier (lignes lues, exclusions, mandats), pas
-    seulement les compteurs finaux."""
+def test_prelevement_generate_summary_describes_processing(client_factory):
+    """Résumé demandé par Raphaël (2026-09-21) : voir ce qui a été fait
+    sur le fichier (lignes lues, exclusions, mandats), pas seulement
+    les compteurs finaux. Structuré (2026-09-22) pour un affichage en
+    tableau lisible plutôt qu'un bloc de phrases denses."""
     fake = _make_client(profiles=[ADMIN_PROFILE])
     tc = client_factory(fake)
     res = tc.post(
@@ -1749,12 +1750,14 @@ def test_prelevement_generate_steps_describe_processing(client_factory):
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 200
-    steps = res.json()["steps"]
-    assert isinstance(steps, list) and len(steps) >= 3
-    joined = " ".join(steps)
-    assert "1 fichier lu" in joined
-    assert "exclue" in joined
-    assert "mandat" in joined.lower()
+    summary = res.json()["summary"]
+    assert summary["n_fichiers"] == 1
+    assert summary["n_lignes"] == 2
+    assert summary["n_exclus"] == 1
+    assert len(summary["exclusions"]) == 1
+    assert summary["exclusions"][0]["n"] == 1
+    assert summary["n_mandats"] == 1
+    assert summary["n_first"] == 1
 
 
 _PRELEVEMENT_CSV_NO_PHONE = (
@@ -1787,7 +1790,7 @@ def test_prelevement_generate_reports_missing_phone_without_blocking(client_fact
     assert body["counts"]["sans_telephone"] == 1
     assert len(body["telephones_manquants"]) == 1
     assert body["telephones_manquants"][0]["reference_client"] == "MGS-1"
-    assert any("SANS numéro" in s for s in body["steps"])
+    assert body["summary"]["n_sans_telephone"] == 1
 
 
 def test_prelevement_mandats_saved_to_database(client_factory):

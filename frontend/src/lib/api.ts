@@ -976,11 +976,26 @@ export type PrelevementMandatRow = Record<string, string | number | null>
 
 export type PrelevementMissingPhone = { referenceClient: string; nom: string; motif: string }
 
+// Structuré (pas des phrases à virgules empilées) pour que l'écran
+// l'affiche en petit tableau/grille lisible -- demande du 2026-09-22
+// ("moins mal aux yeux").
+export type PrelevementSummary = {
+  nFichiers: number
+  nLignes: number
+  nExclus: number
+  exclusions: { raison: string; n: number }[]
+  nMandats: number
+  nFirst: number
+  nRcur: number
+  nFusions: number
+  nSansTelephone: number
+}
+
 export type PrelevementGenerateResult = {
   ooffCount: number
   rcurCount: number
   exclusCount: number
-  steps: string[]
+  summary: PrelevementSummary
   mandats: PrelevementMandatRow[]
   // Mandats envoyés quand même sans numéro de téléphone (ni Téléphone ni
   // Mobile trouvés sur la ligne CRM) -- décision de Raphaël (2026-09-22) :
@@ -1015,7 +1030,17 @@ export async function generatePrelevementMandats(
   }
   const data = (await res.json()) as {
     counts: { ooff: number; rcur: number; exclus: number; sans_telephone: number }
-    steps: string[]
+    summary: {
+      n_fichiers: number
+      n_lignes: number
+      n_exclus: number
+      exclusions: { raison: string; n: number }[]
+      n_mandats: number
+      n_first: number
+      n_rcur: number
+      n_fusions: number
+      n_sans_telephone: number
+    }
     mandats: PrelevementMandatRow[]
     telephones_manquants: { reference_client: string; nom: string; motif: string }[]
     filename: string
@@ -1025,7 +1050,17 @@ export async function generatePrelevementMandats(
     ooffCount: data.counts.ooff,
     rcurCount: data.counts.rcur,
     exclusCount: data.counts.exclus,
-    steps: data.steps,
+    summary: {
+      nFichiers: data.summary.n_fichiers,
+      nLignes: data.summary.n_lignes,
+      nExclus: data.summary.n_exclus,
+      exclusions: data.summary.exclusions,
+      nMandats: data.summary.n_mandats,
+      nFirst: data.summary.n_first,
+      nRcur: data.summary.n_rcur,
+      nFusions: data.summary.n_fusions,
+      nSansTelephone: data.summary.n_sans_telephone,
+    },
     mandats: data.mandats,
     telephonesManquants: data.telephones_manquants.map((t) => ({
       referenceClient: t.reference_client,

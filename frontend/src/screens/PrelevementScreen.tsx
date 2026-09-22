@@ -8,15 +8,80 @@ import { PrelevementMandatsPanel } from './PrelevementMandatsPanel'
 import { PrelevementRuleRequests } from './PrelevementRuleRequests'
 import {
   ApiError,
+  answerPrelevementRuleRequestQuestion,
   createPrelevementRuleRequest,
   downloadPrelevementFile,
   generatePrelevementMandats,
   getPrelevementRules,
+  listPrelevementRuleRequests,
   savePrelevementMandats,
   savePrelevementRules,
   type PrelevementGenerateResult,
+  type PrelevementRuleRequest,
   type PrelevementRules,
+  type RuleRequestQuestion,
 } from '@/lib/api'
+
+// Réponse à une question à choix cliquables posée par une session
+// Claude Code sur une demande de règle ambiguë (Raphaël, 2026-09-22) --
+// même principe que ChantierCard/QuestionBlock côté Cockpit. Une
+// réponse libre (le champ commentaire) reste toujours possible en plus
+// des options, pour préciser sans devoir attendre une nouvelle option.
+function RuleQuestionBlock({
+  orgId,
+  requestId,
+  question,
+  onAnswered,
+}: {
+  orgId: string
+  requestId: string
+  question: RuleRequestQuestion
+  onAnswered: () => void
+}) {
+  const [comment, setComment] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function handleChoose(option: string) {
+    setSubmitting(true)
+    setError(null)
+    try {
+      await answerPrelevementRuleRequestQuestion(orgId, requestId, question.id, option, comment.trim() || null)
+      onAnswered()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="mt-2 rounded-md border-2 border-[var(--danger)] bg-[var(--muted-bg)] p-3 text-sm">
+      <p className="font-bold text-[var(--danger)]">🔴 Claude attend une réponse</p>
+      <p className="mt-1 font-medium">{question.question}</p>
+      <div className="mt-2 flex flex-wrap gap-2">
+        {question.options.map((option) => (
+          <Button key={option} type="button" variant="secondary" disabled={submitting} onClick={() => void handleChoose(option)}>
+            {option}
+          </Button>
+        ))}
+      </div>
+      <Input
+        className="mt-2"
+        placeholder="Préciser ta réponse (optionnel)…"
+        value={comment}
+        onChange={(e) => setComment(e.target.value)}
+      />
+      {error && <p className="mt-1 text-xs text-[var(--danger)]">Erreur : {error}</p>}
+    </div>
+  )
+}
+
+const STATUT_BADGE: Record<PrelevementRuleRequest['statut'], string> = {
+  en_attente: '⏳ En attente',
+  en_cours: '🔵 En cours',
+  valide: '✅ Validé',
+}
 
 // Nombre de lignes affichées dans l'aperçu -- au-delà, seul le fichier
 // téléchargé (via downloadPrelevementFile) montre tout, pour ne pas
@@ -78,6 +143,48 @@ export function PrelevementScreen() {
   const [ruleFormError, setRuleFormError] = useState<string | null>(null)
   const [ruleFormSentTitre, setRuleFormSentTitre] = useState<string | null>(null)
   const [ruleRequestsRefreshKey, setRuleRequestsRefreshKey] = useState(0)
+  // Réglages repliés par défaut (Raphaël, 2026-09-22 : "ça pollue
+  // visuellement") -- même bascule que "Règles appliquées par le
+  // moteur" juste en dessous.
+  const [reglagesOpen, setReglagesOpen] = useState(false)
+  // Toutes les demandes de règles de l'environnement, chargées ici (en
+  // plus de PrelevementRuleRequests qui les affiche en historique) pour
+  // calculer le badge de statut et la question en attente à côté de
+  // chaque règle du panneau "Règles appliquées". Réinterrogé toutes les
+  // 20s tant que l'écran est ouvert -- pas un vrai flux temps réel
+  // (Supabase Realtime n'est pas câblé dans cette appli), mais assez
+  // pour voir un ✅ Validé apparaître sans recharger la page.
+  const [ruleRequestsAll, setRuleRequestsAll] = useState<PrelevementRuleRequest[]>([])
+
+  useEffect(() => {
+    if (!orgId) return
+    const org = orgId
+    let cancelled = false
+    function load() {
+      listPrelevementRuleRequests(org)
+        .then((data) => {
+          if (!cancelled) setRuleRequestsAll(data)
+        })
+        .catch(() => {
+          // Silencieux : ce n'est qu'un indicateur secondaire (badge de
+          // statut) -- une erreur réseau ponctuelle ne doit pas bloquer
+          // le reste de l'écran ni afficher une alerte de plus.
+        })
+    }
+    load()
+    const interval = setInterval(load, 20000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [orgId, ruleRequestsRefreshKey])
+
+  function latestRuleRequestFor(titre: string): PrelevementRuleRequest | undefined {
+    const key = titre.trim().toLowerCase()
+    const matches = ruleRequestsAll.filter((r) => r.titre.trim().toLowerCase() === key)
+    if (matches.length === 0) return undefined
+    return matches.reduce((a, b) => (a.created_at > b.created_at ? a : b))
+  }
 
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [selectedFiles, setSelectedFiles] = useState<File[]>([])
@@ -329,7 +436,16 @@ export function PrelevementScreen() {
 
           <Card className="mb-4">
             <CardContent className="flex flex-col gap-3">
-              <h2 className="text-sm font-semibold">Réglages</h2>
+              <button
+                type="button"
+                onClick={() => setReglagesOpen((v) => !v)}
+                className="flex w-full items-center justify-between text-sm font-semibold"
+              >
+                <span>Réglages</span>
+                <span className="text-xs font-normal text-[var(--muted)]">{reglagesOpen ? '▲' : '▼'}</span>
+              </button>
+              {reglagesOpen && (
+                <>
               {rules === null && !rulesError && (
                 <p className="text-sm text-[var(--muted)]">Chargement…</p>
               )}
@@ -495,6 +611,8 @@ export function PrelevementScreen() {
                   </div>
                 </>
               )}
+                </>
+              )}
             </CardContent>
           </Card>
 
@@ -515,10 +633,26 @@ export function PrelevementScreen() {
                     future erreur ou décider qu'une règle doit changer. Reflète tes réglages
                     ci-dessus (frais, délai).
                   </p>
-                  {rules.explication.map((r, i) => (
+                  {rules.explication.map((r, i) => {
+                    const latestReq = latestRuleRequestFor(r.titre)
+                    const pendingQuestion = latestReq?.questions.find((q) => !q.answered_at)
+                    return (
                     <div key={i}>
                       <div className="flex flex-wrap items-center justify-between gap-2">
-                        <p className="text-sm font-medium text-[var(--foreground)]">{r.titre}</p>
+                        <span className="flex items-center gap-2">
+                          <p className="text-sm font-medium text-[var(--foreground)]">{r.titre}</p>
+                          {pendingQuestion ? (
+                            <span className="text-xs font-bold text-[var(--danger)]">
+                              🔴 Claude attend une réponse
+                            </span>
+                          ) : (
+                            latestReq && (
+                              <span className="text-xs font-medium text-[var(--muted)]">
+                                {STATUT_BADGE[latestReq.statut]}
+                              </span>
+                            )
+                          )}
+                        </span>
                         <button
                           type="button"
                           onClick={() => openRuleForm(i)}
@@ -528,6 +662,15 @@ export function PrelevementScreen() {
                         </button>
                       </div>
                       <p className="text-sm text-[var(--muted)]">{r.detail}</p>
+
+                      {pendingQuestion && orgId && latestReq && (
+                        <RuleQuestionBlock
+                          orgId={orgId}
+                          requestId={latestReq.id}
+                          question={pendingQuestion}
+                          onAnswered={() => setRuleRequestsRefreshKey((k) => k + 1)}
+                        />
+                      )}
 
                       {ruleFormSentTitre === r.titre && openRuleIdx !== i && (
                         <p className="mt-1 text-xs text-[var(--success)]">
@@ -560,7 +703,8 @@ export function PrelevementScreen() {
                         </div>
                       )}
                     </div>
-                  ))}
+                    )
+                  })}
                 </div>
               )}
             </div>

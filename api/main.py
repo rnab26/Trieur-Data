@@ -81,6 +81,8 @@ from trieur.db import (
     list_sections,
     list_user_column_sets,
     count_prelevement_mandats,
+    add_prelevement_rule_request_question,
+    answer_prelevement_rule_request_question,
     create_prelevement_rule_request,
     delete_prelevement_mandat,
     delete_prelevement_rule_request,
@@ -2562,6 +2564,46 @@ def delete_prelevement_rule_request_endpoint(
 ):
     delete_prelevement_rule_request(ctx.client, request_id, org_id)
     return {"id": request_id, "removed": True}
+
+
+class PrelevementRuleRequestQuestionCreate(BaseModel):
+    question: str
+    options: list[str] = []
+
+
+@app.post("/orgs/{org_id}/prelevement/rule-requests/{request_id}/questions")
+def post_prelevement_rule_request_question(
+    org_id: str, request_id: str, body: PrelevementRuleRequestQuestionCreate,
+    ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    """Une session Claude Code pose une question à choix cliquables sur
+    une demande ambiguë -- voir migration 0026. `org_id` sert seulement
+    de garde d'accès ici (l'appartenance réelle passe par la RLS via
+    request_id -> prelevement_rule_requests.org_id)."""
+    question = body.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Question vide.")
+    return add_prelevement_rule_request_question(ctx.client, request_id, question, body.options)
+
+
+class PrelevementRuleRequestQuestionAnswer(BaseModel):
+    answer: str
+    comment: Optional[str] = None
+
+
+@app.patch("/orgs/{org_id}/prelevement/rule-requests/{request_id}/questions/{question_id}")
+def patch_prelevement_rule_request_question(
+    org_id: str, request_id: str, question_id: str, body: PrelevementRuleRequestQuestionAnswer,
+    ctx: AuthCtx = Depends(require_cockpit_access),
+):
+    answer = body.answer.strip()
+    if not answer:
+        raise HTTPException(status_code=400, detail="Réponse vide.")
+    comment = body.comment.strip() if body.comment else None
+    updated = answer_prelevement_rule_request_question(ctx.client, question_id, answer, comment)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Question introuvable.")
+    return updated
 
 
 # ---------------------------------------------------------------

@@ -30,6 +30,7 @@ class _FakeTable:
     _DEFAULTS = {
         "pipeline_sessions": {"status": "importing", "row_count": 0},
         "chantier_questions": {"answer": None, "comment": None, "answered_at": None},
+        "prelevement_rule_request_questions": {"answer": None, "comment": None, "answered_at": None},
     }
 
     def __init__(self, store, name=None):
@@ -2227,6 +2228,92 @@ def test_prelevement_rule_requests_forbidden_for_non_admin(client_factory):
     fake = _make_client()
     tc = client_factory(fake)
     res = tc.get("/orgs/org-1/prelevement/rule-requests", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 403
+
+
+def test_prelevement_rule_request_question_create_and_answer(client_factory):
+    """Question à choix cliquables posée par une session Claude Code sur
+    une demande ambiguë (Raphaël, 2026-09-22) -- même principe que
+    chantier_questions côté Cockpit."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    created = tc.post(
+        "/orgs/org-1/prelevement/rule-requests",
+        json={"titre": "Critère RCUR", "demande": "Ajouter un 3e statut déclencheur"},
+        headers=headers,
+    ).json()
+
+    res = tc.post(
+        f"/orgs/org-1/prelevement/rule-requests/{created['id']}/questions",
+        json={"question": "Quel statut exact ?", "options": ["Notifié J-1", "Validé banque", "Autre"]},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    question = res.json()
+    assert question["request_id"] == created["id"]
+    assert question["options"] == ["Notifié J-1", "Validé banque", "Autre"]
+    assert question["answered_at"] is None
+
+    res = tc.patch(
+        f"/orgs/org-1/prelevement/rule-requests/{created['id']}/questions/{question['id']}",
+        json={"answer": "Notifié J-1", "comment": "Celui qu'on voit le plus"},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    answered = res.json()
+    assert answered["answer"] == "Notifié J-1"
+    assert answered["comment"] == "Celui qu'on voit le plus"
+    assert answered["answered_at"] is not None
+
+
+def test_prelevement_rule_request_question_rejects_empty(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    created = tc.post(
+        "/orgs/org-1/prelevement/rule-requests",
+        json={"titre": "X", "demande": "Y"},
+        headers=headers,
+    ).json()
+    res = tc.post(
+        f"/orgs/org-1/prelevement/rule-requests/{created['id']}/questions",
+        json={"question": "   "},
+        headers=headers,
+    )
+    assert res.status_code == 400
+
+
+def test_prelevement_rule_request_question_answer_rejects_empty(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    created = tc.post(
+        "/orgs/org-1/prelevement/rule-requests",
+        json={"titre": "X", "demande": "Y"},
+        headers=headers,
+    ).json()
+    question = tc.post(
+        f"/orgs/org-1/prelevement/rule-requests/{created['id']}/questions",
+        json={"question": "Q ?"},
+        headers=headers,
+    ).json()
+    res = tc.patch(
+        f"/orgs/org-1/prelevement/rule-requests/{created['id']}/questions/{question['id']}",
+        json={"answer": "  "},
+        headers=headers,
+    )
+    assert res.status_code == 400
+
+
+def test_prelevement_rule_request_question_forbidden_for_non_admin(client_factory):
+    fake = _make_client()
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/prelevement/rule-requests/does-not-exist/questions",
+        json={"question": "Q ?"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
     assert res.status_code == 403
 
 

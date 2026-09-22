@@ -99,6 +99,23 @@ la vraie base (succès et cas d'erreur) avant d'être committé.
 Accès total à la base (DDL et suppressions comprises) : toujours demander à
 Raphaël avant un `DROP`, un `DELETE` massif ou un `TRUNCATE`.
 
+## Demandes de règles Prélèvement : statut `a_verifier`, jamais `valide` directement
+
+Depuis le 2026-09-22 (retour du père de Raphaël : "il faut un vrai système
+question/réponse, bouton validé par l'admin fonctionnel sinon bouton à
+corriger, sinon ça fait des doublons") : une session Claude Code qui vient
+de coder, tester et **déployer** (vérifié `live` sur les deux services
+Render) une demande de `prelevement_rule_requests` passe son statut à
+**`a_verifier`**, jamais directement à `valide`. `valide` n'est posé que par
+un humain (bouton "✅ Ça fonctionne, je valide" dans l'écran) — jamais par
+une session Claude Code elle-même.
+
+Si le père de Raphaël clique "✏️ Corriger" sur une règle `a_verifier` : la
+demande repasse à `en_cours` et sa `demande` est complétée avec le texte de
+correction (même ligne, même id) — **ne jamais créer une nouvelle
+`prelevement_rule_request` pour corriger une règle déjà existante**, sauf
+si c'est un sujet réellement distinct.
+
 ## Décisions en attente (fiches à remplir)
 
 - **Fonctionnalités Base de données** (2026-09-17) :

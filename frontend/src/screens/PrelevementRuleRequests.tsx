@@ -137,6 +137,105 @@ export function RuleQuestionBlock({
   )
 }
 
+// Validation fonctionnelle par un humain (Raphaël, 2026-09-22 : "il faut
+// vraiment établir un vrai système clair net et précis question réponse
+// [...] bouton règle validé par l'admin fonctionnel sinon bouton à
+// modifier/corriger [...] pas de doublon"). Avant : une session Claude
+// Code passait seule une demande codée à "valide", sans qu'un humain ne
+// confirme que ça marche vraiment -- et quand ça ne marchait pas, une
+// NOUVELLE demande était recréée au lieu de corriger celle-ci (doublons).
+// Ce bloc apparaît UNIQUEMENT au statut "a_verifier" (codé + déployé,
+// pas encore confirmé) : soit ça marche (✅ Valider, statut -> valide),
+// soit non (✏️ Corriger, la précision est ajoutée à LA MÊME demande et
+// le statut repasse à "en_cours" -- jamais une nouvelle ligne).
+function ValidationBlock({
+  orgId,
+  request,
+  onValidated,
+  onCorrected,
+}: {
+  orgId: string
+  request: PrelevementRuleRequest
+  onValidated: () => void
+  onCorrected: (demande: string) => void
+}) {
+  const [correcting, setCorrecting] = useState(false)
+  const [correctionText, setCorrectionText] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function handleValider() {
+    setSubmitting(true)
+    setError(null)
+    try {
+      await updatePrelevementRuleRequest(orgId, request.id, { statut: 'valide' })
+      onValidated()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+      setSubmitting(false)
+    }
+  }
+
+  async function handleCorriger() {
+    const precision = correctionText.trim()
+    if (!precision) return
+    setSubmitting(true)
+    setError(null)
+    try {
+      const demande =
+        `${request.demande}\n\n--- Correction du ${new Date().toLocaleDateString('fr-FR')} ` +
+        `(cette règle a été codée mais ne fonctionne pas comme attendu) ---\n${precision}`
+      await updatePrelevementRuleRequest(orgId, request.id, { demande, statut: 'en_cours' })
+      onCorrected(demande)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Erreur inconnue.')
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="mt-2 rounded-md border-2 border-[var(--warning)] bg-[var(--muted-bg)] p-3 text-sm">
+      <p className="font-bold text-[var(--warning)]">
+        🧪 Cette règle est codée et déployée -- fonctionne-t-elle comme attendu ?
+      </p>
+      {!correcting ? (
+        <div className="mt-2 flex flex-wrap gap-2">
+          <Button type="button" disabled={submitting} onClick={() => void handleValider()}>
+            {submitting ? 'Enregistrement…' : '✅ Ça fonctionne, je valide'}
+          </Button>
+          <Button type="button" variant="secondary" disabled={submitting} onClick={() => setCorrecting(true)}>
+            ✏️ Ça ne marche pas, corriger
+          </Button>
+        </div>
+      ) : (
+        <div className="mt-2 flex flex-col gap-2">
+          <textarea
+            className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] p-2 text-sm"
+            rows={3}
+            placeholder="Qu'est-ce qui ne va pas ? Sois précis (exemple concret si possible)..."
+            value={correctionText}
+            onChange={(e) => setCorrectionText(e.target.value)}
+            autoFocus
+          />
+          <div className="flex gap-2">
+            <Button
+              type="button"
+              disabled={submitting || !correctionText.trim()}
+              onClick={() => void handleCorriger()}
+            >
+              {submitting ? 'Enregistrement…' : '📩 Envoyer la correction'}
+            </Button>
+            <Button type="button" variant="secondary" disabled={submitting} onClick={() => setCorrecting(false)}>
+              Annuler
+            </Button>
+          </div>
+        </div>
+      )}
+      {error && <p className="mt-1 text-xs text-[var(--danger)]">Erreur : {error}</p>}
+    </div>
+  )
+}
+
 // Statut affiché seulement quand il n'y a AUCUNE question en attente sur
 // la demande -- une question en attente prime toujours sur le statut
 // (voir renderStatutBadge ci-dessous), pour ne jamais laisser croire
@@ -144,12 +243,14 @@ export function RuleQuestionBlock({
 const STATUT_LABEL: Record<RuleRequestStatut, string> = {
   en_attente: '⏳ Pas encore examinée',
   en_cours: '🔧 En cours de codage -- rien à faire de ton côté',
-  valide: '✅ Codée et validée',
+  a_verifier: '🧪 Codée et déployée -- à toi de vérifier',
+  valide: '✅ Validée par toi',
 }
 
 const STATUT_COLOR: Record<RuleRequestStatut, string> = {
   en_attente: 'text-[var(--muted)]',
   en_cours: 'text-[var(--primary)]',
+  a_verifier: 'text-[var(--warning)]',
   valide: 'text-[var(--success)]',
 }
 
@@ -211,6 +312,10 @@ export function PrelevementRuleRequests({
   // cacher derrière un clic (bug réel signalé par Raphaël : son père ne
   // trouvait pas où répondre).
   const hasPendingQuestion = requests.some((r) => r.questions.some((q) => !q.answered_at))
+  // Même logique que hasPendingQuestion : une règle codée en attente de
+  // validation fonctionnelle est aussi une ACTION à faire, pas de
+  // l'historique.
+  const hasPendingValidation = requests.some((r) => r.statut === 'a_verifier')
 
   const [newTitre, setNewTitre] = useState('')
   const [newDemande, setNewDemande] = useState('')
@@ -280,8 +385,8 @@ export function PrelevementRuleRequests({
   }, [orgId, refreshKey, reloadNonce])
 
   useEffect(() => {
-    if (hasPendingQuestion) setHistoryOpen(true)
-  }, [hasPendingQuestion])
+    if (hasPendingQuestion || hasPendingValidation) setHistoryOpen(true)
+  }, [hasPendingQuestion, hasPendingValidation])
 
   async function handleCreate() {
     const titre = newTitre.trim()
@@ -341,6 +446,7 @@ export function PrelevementRuleRequests({
 
   const nonValidees = requests.filter((r) => r.statut !== 'valide').length
   const nbPendingQuestions = requests.reduce((n, r) => n + r.questions.filter((q) => !q.answered_at).length, 0)
+  const nbAwaitingValidation = requests.filter((r) => r.statut === 'a_verifier').length
   // Vue générale ("soit sur chaque règle... soit générale", Raphaël,
   // 2026-09-22) : le dernier message toutes demandes en_cours confondues,
   // visible sans dérouler l'historique ni ouvrir une demande en
@@ -383,6 +489,13 @@ export function PrelevementRuleRequests({
         </p>
       )}
 
+      {nbAwaitingValidation > 0 && (
+        <p className="mb-2 rounded-md bg-[var(--warning)] p-2 text-sm font-bold text-[var(--warning-foreground)]">
+          🧪 {nbAwaitingValidation} règle{nbAwaitingValidation > 1 ? 's' : ''} codée
+          {nbAwaitingValidation > 1 ? 's' : ''} -- à valider ou corriger ci-dessous
+        </p>
+      )}
+
       {!loading && requests.length > 0 && (
         <button
           type="button"
@@ -404,12 +517,17 @@ export function PrelevementRuleRequests({
         <ul className="mb-3 flex flex-col gap-3">
           {requests.map((r) => {
             const pendingQuestions = r.questions.filter((q) => !q.answered_at)
+            const awaitingValidation = pendingQuestions.length === 0 && r.statut === 'a_verifier'
             return (
             <li
               key={r.id}
               className={
                 'rounded-md border p-2 ' +
-                (pendingQuestions.length > 0 ? 'border-2 border-[var(--danger)]' : 'border-[var(--border)]')
+                (pendingQuestions.length > 0
+                  ? 'border-2 border-[var(--danger)]'
+                  : awaitingValidation
+                    ? 'border-2 border-[var(--warning)]'
+                    : 'border-[var(--border)]')
               }
             >
               <div className="mb-1 flex flex-wrap items-center gap-2">
@@ -468,6 +586,22 @@ export function PrelevementRuleRequests({
                 />
               ))}
               <AnsweredQuestions questions={r.questions.filter((q) => q.answered_at)} />
+              {awaitingValidation && (
+                <ValidationBlock
+                  orgId={orgId}
+                  request={r}
+                  onValidated={() => {
+                    markScroll()
+                    setRequests((prev) => prev.map((x) => (x.id === r.id ? { ...x, statut: 'valide' } : x)))
+                  }}
+                  onCorrected={(demande) => {
+                    markScroll()
+                    setRequests((prev) =>
+                      prev.map((x) => (x.id === r.id ? { ...x, demande, statut: 'en_cours' } : x)),
+                    )
+                  }}
+                />
+              )}
               <ActivityFeed events={r.events} />
               <div className="mt-1 flex items-center justify-between">
                 <span className="text-xs text-[var(--muted)]">

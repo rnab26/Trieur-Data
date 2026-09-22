@@ -4143,3 +4143,44 @@ colonnes déjà identifiées comme sans source) :
 
 2 nouvelles questions posées sur cette demande. Statuts `c929b6ea`
 (motif) et `5170467f` (décalage remise) marqués `valide`.
+
+### PR #75 : nouvel ordre/contenu des colonnes du fichier de mandats (2026-09-22)
+
+Suite directe du point précédent. La réponse du père de Raphaël aux 2
+questions de suivi (Nom/Prénom, Motif/Référence client) : "Autre
+(préciser)" sans rien dans le champ libre, deux fois de suite -- même
+motif que "certaines se déduisent..." plus haut, jamais assez pour
+agir seul. Après 3 réponses non exploitables sur la même demande,
+tranché avec le choix le plus sûr plutôt que de redemander une 4e
+fois (voir le détail dans le message de commit de la PR #75) :
+Type_prelevement/Frequence_mois/Jour_prelevement/Prochaine_echeance
+déduits des règles déjà codées ; Statut/Reference_facture/Date_fin
+laissés vides (aucune source) ; Prenom laissé vide (le CRM n'a qu'un
+champ Nom complet) ; Motif/Référence client/Date d'effet gardés en
+colonnes supplémentaires (jamais supprimés sans confirmation -- Motif
+est la référence bancaire). Migration 0027 appliquée (nouvelles
+colonnes sur `prelevement_mandats`, le bouton "Enregistré dans la
+base" stocke les mêmes lignes que l'aperçu). 487 tests. Statut
+`8c8baecf` marqué `valide`.
+
+Au passage : `ed9c74b4` (FRST, PR #68 -- livré il y a plusieurs heures)
+n'avait jamais été marqué `valide` malgré le déploiement confirmé --
+oubli corrigé.
+
+**Toutes les 9 demandes initiales du père de Raphaël sont maintenant
+traitées** (validées ou en attente d'une réponse qui ne dépend plus de
+moi) -- voir le point le plus haut ("mon père a fait des demandes de
+modification") pour la liste complète. Reste `a58bb8ab`/`41f43dfe`
+(exclusions, 2e partie -- date de repli si "pas de date de 1er
+prélèvement" n'exclut plus) en attente d'une réponse.
+
+**Nouvelle demande créée par le père de Raphaël pendant ce traitement**
+(`780ba0d7`, "ORDRE DES COLONNES + MODIFICATIONS", 2026-09-22) : il
+veut pouvoir réordonner/activer-désactiver les colonnes du fichier
+directement dans l'aperçu, sur le site, sans repasser par une session
+Claude à chaque fois -- persisté jusqu'à la prochaine modification
+manuelle. C'est un vrai chantier UI (pas une clarification de règle) :
+nécessite un réglage par organisation (ordre + colonnes visibles),
+une interface de réorganisation dans l'aperçu, et une migration pour
+stocker la préférence. Pas encore commencé -- à cadrer avec Raphaël
+avant de coder (périmètre plus large que les demandes précédentes).

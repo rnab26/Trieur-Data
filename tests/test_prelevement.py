@@ -13,6 +13,7 @@ from trieur.prelevement import (
     iban_checksum_valid,
     normalize_iban,
     pad_bic,
+    split_nom_prenom,
     to_amount,
     to_telephone,
 )
@@ -229,12 +230,14 @@ def test_generate_mandats_always_pairs_frst_with_rcur():
 def test_generate_mandats_rcur_date_shifted_by_periodicite():
     """La date de la ligne RCUR = date du 1er prélèvement décalée de la
     périodicité du contrat (demande du père de Raphaël, 2026-09-22) --
-    pas la même date que FRST. Produit hors Optilife (Carte MGS) pour
+    pas la même date que FRST. Produit hors Optilife (jamais Carte
+    MGS, dont la périodicité est désormais imposée à annuelle -- voir
+    test_generate_mandats_carte_mgs_periodicite_always_annuelle) pour
     ne pas mélanger avec la règle "date d'effet", spécifique à
     Optilife (voir plus bas)."""
     row = _base_row(**{
         "Optilife": 0,
-        "Carte MGS": 99.0,
+        "MYJURIS & MYHOSPI": 99.0,
         "Périodicité (Mensuel/trimestre/annuel)             ": "Trimestrielle",
     })
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
@@ -249,11 +252,87 @@ def test_generate_mandats_rcur_date_defaults_to_one_month_for_unknown_periodicit
     une exception bloquante pour une seule ligne mal renseignée."""
     row = _base_row(**{
         "Optilife": 0,
-        "Carte MGS": 99.0,
+        "MYJURIS & MYHOSPI": 99.0,
         "Périodicité (Mensuel/trimestre/annuel)             ": "???",
     })
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
     assert result.rcur[0].date_premiere_echeance == "24/10/2026"  # +1 mois par défaut
+
+
+def test_generate_mandats_carte_mgs_periodicite_always_annuelle():
+    """"périodicité MGS" (père de Raphaël, 2026-09-22) : un mandat Carte
+    MGS (suffixe -M) a TOUJOURS une périodicité annuelle, quelle que
+    soit la périodicité du contrat dans le CRM."""
+    row = _base_row(**{
+        "Optilife": 0,
+        "Carte MGS": 99.0,
+        "Périodicité (Mensuel/trimestre/annuel)             ": "Mensuelle",
+    })
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    assert result.rcur[0].periodicite == "annuelle"
+    assert result.rcur[0].explication_periodicite == "Tous les 12 mois"
+    assert result.rcur[0].date_premiere_echeance == "24/09/2027"  # +12 mois, pas +1
+
+
+def test_generate_mandats_carte_mgs_periodicite_does_not_affect_other_products():
+    """La périodicité annuelle imposée sur Carte MGS ne doit JAMAIS
+    déteindre sur un autre produit actif du même client."""
+    row = _base_row(**{
+        "Optilife": 99.0,
+        "Carte MGS": 49.0,
+        "Périodicité (Mensuel/trimestre/annuel)             ": "Mensuelle",
+    })
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    optilife_rcur = next(m for m in result.rcur if m.motif.endswith("-O"))
+    mgs_rcur = next(m for m in result.rcur if m.motif.endswith("-M"))
+    assert optilife_rcur.periodicite == "Mensuelle"
+    assert mgs_rcur.periodicite == "annuelle"
+
+
+def test_split_nom_prenom_last_word_is_prenom():
+    """"NOM PRENOM" (père de Raphaël, 2026-09-22) : le prénom est le
+    dernier mot du nom complet, le nom est le reste."""
+    assert split_nom_prenom("DUPONT Jean") == ("DUPONT", "Jean")
+    assert split_nom_prenom("DE LA TOUR Marie") == ("DE LA TOUR", "Marie")
+
+
+def test_split_nom_prenom_single_word_kept_as_nom():
+    """Aucun blanc -- jamais deviner une coupure, tout garde en nom."""
+    assert split_nom_prenom("DUPONT") == ("DUPONT", "")
+    assert split_nom_prenom("") == ("", "")
+
+
+def test_generate_mandats_splits_nom_prenom():
+    row = _base_row(**{"Nom complet": "DUPONT Jean"})
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    assert result.mandats[0].nom == "DUPONT"
+    assert result.mandats[0].prenom == "Jean"
+
+
+def test_generate_mandats_sorted_by_nom_then_produit_then_frst_rcur():
+    """"tri fichier" (père de Raphaël, 2026-09-22) : trié par nom du
+    client, puis par ordre des produits (Optilife, MGS, cumul), puis
+    FRST avant RCUR."""
+    row_zoe = _base_row(**{
+        "Référence du client ": "MGS-000002", "Nom complet": "ZOE MARTIN",
+        "Optilife": 0, "Carte MGS": 49.0,
+    })
+    row_alice = _base_row(**{
+        "Référence du client ": "MGS-000003", "Nom complet": "ALICE BERNARD",
+        "Optilife": 99.0, "Carte MGS": 49.0,
+    })
+    result = generate_mandats([row_zoe, row_alice], PrelevementRules(), today=date(2026, 9, 21))
+    # ALICE avant ZOE (ordre alphabétique) ; pour ALICE, Optilife (-O)
+    # avant Carte MGS (-M) ; pour chaque produit, FRST avant RCUR.
+    resume = [(m.nom, m.motif[-2:] if m.motif.endswith(("-O", "-M")) else m.motif, m.type_sequence) for m in result.mandats]
+    assert resume == [
+        ("ALICE", "-O", "FRST"),
+        ("ALICE", "-O", "RCUR"),
+        ("ALICE", "-M", "FRST"),
+        ("ALICE", "-M", "RCUR"),
+        ("ZOE", "-M", "FRST"),
+        ("ZOE", "-M", "RCUR"),
+    ]
 
 
 def test_generate_mandats_frais_setup_eur_is_adjustable():

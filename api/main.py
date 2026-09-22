@@ -168,8 +168,8 @@ MANDAT_COLONNES_CANONIQUES: list[str] = [
 # colonne ajoutée/retirée dans MANDAT_COLONNES_CANONIQUES doit mettre à
 # jour cette liste dans le même commit.
 MANDAT_COLONNES_NOTES: dict[str, str] = {
-    "Nom": "Copié tel quel du CRM (\"Nom complet\").",
-    "Prenom": "Toujours vide -- le CRM n'a qu'un champ \"Nom complet\", jamais coupé au hasard.",
+    "Nom": "\"Nom complet\" du CRM moins le dernier mot (le prénom).",
+    "Prenom": "Dernier mot (séparé par un blanc) de \"Nom complet\" -- règle \"NOM PRENOM\".",
     "Email": "Copié tel quel du CRM.",
     "Telephone": "Règle \"Numéro de téléphone\" : Téléphone en priorité, repli sur Mobile.",
     "Adresse": "Copié tel quel du CRM.",
@@ -2487,7 +2487,7 @@ async def post_prelevement_generate(
         prochaine_echeance = _add_months(date_premiere_dt, mois_periodicite) if date_premiere_dt else None
         return {
             "Nom": m.nom,
-            "Prenom": "",
+            "Prenom": m.prenom,
             "Email": m.email,
             "Telephone": m.telephone,
             "Adresse": m.adresse,

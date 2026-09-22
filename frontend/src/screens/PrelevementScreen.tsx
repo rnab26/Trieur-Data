@@ -76,6 +76,13 @@ const PRELEVEMENT_ORG_NAME = 'Prélèvement'
 // A, B, C... Z, AA, AB... -- juste des repères visuels façon tableur,
 // comme demandé (Raphaël, 2026-09-22 : "les colonnes A, B, C etc"),
 // jamais une clé utilisée pour quoi que ce soit côté données.
+// Date + heure de création d'une demande de règle (Raphaël, 2026-09-22 :
+// "rajoute la date et l'heure de leur création à chaque fois") --
+// affichée partout où une demande de règle apparaît sur cet écran.
+function formatRuleRequestTime(iso: string) {
+  return new Date(iso).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
 function lettreExcel(index: number): string {
   let n = index
   let s = ''
@@ -1213,9 +1220,14 @@ export function PrelevementScreen() {
                                       key={r.id}
                                       type="button"
                                       onClick={() => pickExistingRuleForColumn(attributingCle, r.id)}
-                                      className="rounded-full border border-[var(--border)] bg-[var(--card)] px-2.5 py-1 text-xs hover:border-[var(--primary)]"
+                                      className="flex flex-col rounded-md border border-[var(--border)] bg-[var(--card)] px-2.5 py-1 text-left text-xs hover:border-[var(--primary)]"
                                     >
-                                      {RULE_STATUT_ICON[r.statut]} {r.titre}
+                                      <span>
+                                        {RULE_STATUT_ICON[r.statut]} {r.titre}
+                                      </span>
+                                      <span className="text-[0.65rem] text-[var(--muted)]">
+                                        {formatRuleRequestTime(r.created_at)}
+                                      </span>
                                     </button>
                                   ))}
                                 {ruleRequestsAll.filter((r) => r.statut !== 'valide').length === 0 && (
@@ -1374,7 +1386,7 @@ export function PrelevementScreen() {
                           ) : (
                             latestReq && (
                               <span className="text-xs font-medium text-[var(--muted)]">
-                                {STATUT_BADGE[latestReq.statut]}
+                                {STATUT_BADGE[latestReq.statut]} -- {formatRuleRequestTime(latestReq.created_at)}
                               </span>
                             )
                           )}

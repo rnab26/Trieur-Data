@@ -181,6 +181,7 @@ class PrelevementRules:
 class MandatRow:
     reference_client: str
     nom: str
+    prenom: str
     rum: str
     iban: str
     bic: str
@@ -372,6 +373,20 @@ def build_motif(rum: str, suffix: str) -> str:
     return f"MGS-{rum}{suffix}"
 
 
+def split_nom_prenom(nom_complet: str) -> tuple[str, str]:
+    """Sépare "Nom complet" en (nom, prénom) -- demande du père de
+    Raphaël (2026-09-22, "NOM PRENOM") : le prénom est le DERNIER mot
+    du champ (séparé par un blanc, en partant de la droite) ; le nom
+    est ce qui reste une fois ce dernier mot (et le blanc qui le
+    précède) retiré. Un seul mot (pas de blanc) -> gardé tel quel comme
+    nom, prénom vide (repli prudent : jamais deviner une coupure sur
+    une valeur qu'on ne sait pas découper)."""
+    parts = nom_complet.strip().rsplit(" ", 1)
+    if len(parts) < 2 or not parts[0].strip():
+        return nom_complet.strip(), ""
+    return parts[0].strip(), parts[1].strip()
+
+
 def _get(row: dict, col: str, keyed: dict[str, str]) -> object:
     key = keyed.get(_norm_key(col))
     return row.get(key) if key is not None else None
@@ -395,6 +410,7 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
     for row in rows:
         ref_client = str(_get(row, COL_REFERENCE, keyed) or "")
         nom = str(_get(row, COL_NOM, keyed) or "")
+        nom_seul, prenom = split_nom_prenom(nom)
 
         def exclure(raison: str) -> None:
             result.exclus.append(ExclusionRow(reference_client=ref_client, nom=nom, raison=raison))
@@ -546,18 +562,28 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
         else:
             bundle_infos[0]["date_premiere_ligne"] = bundle_infos[0]["date_base"]
 
-        explication = _explication_periodicite(_get(row, COL_PERIODICITE, keyed), rules.periodicites)
-
         for b in bundle_infos:
             suffix = b["suffix"]
             montant_produits = b["montant_produits"]
             frais = b["frais"]
             date_premiere_ligne = b["date_premiere_ligne"]
-            date_rcur = _add_months(date_premiere_ligne, _mois_periodicite(_get(row, COL_PERIODICITE, keyed)))
+            # Périodicité annuelle IMPOSÉE pour les mandats Carte MGS
+            # (suffixe "-M") -- demande du père de Raphaël, 2026-09-22 :
+            # "tous les mandats MGS avec extension -M doivent avoir une
+            # périodicité annuelle imposée", quelle que soit la
+            # périodicité du contrat dans le CRM. N'affecte QUE ce
+            # bundle (jamais les autres produits actifs du même
+            # client) : Carte MGS n'est jamais cumulée avec un autre
+            # produit (hors du groupe de cumul), donc un bundle "-M"
+            # ne contient toujours que ce seul produit.
+            periodicite_effective = "annuelle" if suffix == "-M" else _get(row, COL_PERIODICITE, keyed)
+            explication = _explication_periodicite(periodicite_effective, rules.periodicites)
+            date_rcur = _add_months(date_premiere_ligne, _mois_periodicite(periodicite_effective))
 
             mandat_frst = MandatRow(
                 reference_client=ref_client,
-                nom=nom,
+                nom=nom_seul,
+                prenom=prenom,
                 rum=rum,
                 iban=iban,
                 bic=pad_bic(_get(row, COL_BIC, keyed)),
@@ -576,7 +602,7 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
                 date_signature_mandat=date_signature.strftime("%d/%m/%Y"),
                 date_premiere_echeance=date_premiere_ligne.strftime("%d/%m/%Y"),
                 date_effet=date_effet,
-                periodicite=str(_get(row, COL_PERIODICITE, keyed) or ""),
+                periodicite=str(periodicite_effective or ""),
                 explication_periodicite="",
                 motif=build_motif(rum, suffix),
             )
@@ -585,7 +611,8 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
 
             mandat_rcur = MandatRow(
                 reference_client=ref_client,
-                nom=nom,
+                nom=nom_seul,
+                prenom=prenom,
                 rum=rum,
                 iban=iban,
                 bic=pad_bic(_get(row, COL_BIC, keyed)),
@@ -604,12 +631,32 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
                 date_signature_mandat=date_signature.strftime("%d/%m/%Y"),
                 date_premiere_echeance=date_rcur.strftime("%d/%m/%Y"),
                 date_effet=date_effet,
-                periodicite=str(_get(row, COL_PERIODICITE, keyed) or ""),
+                periodicite=str(periodicite_effective or ""),
                 explication_periodicite=explication,
                 motif=build_motif(rum, suffix),
             )
             result.mandats.append(mandat_rcur)
             result.rcur.append(mandat_rcur)
+
+    # Tri du fichier de sortie (Raphaël, 2026-09-22, "tri fichier") :
+    # par nom du client, puis par ordre des produits (Optilife, puis
+    # MGS, puis le cumul des ordres cartes -- même ordre canonique que
+    # _MOTIF_SUFFIXES/_RANG_PRODUIT, déduit du motif plutôt que
+    # recalculé séparément), puis FRST avant RCUR. Un seul tri
+    # appliqué aux 3 listes (mandats/ooff/rcur) -- même clé, jamais un
+    # ordre différent entre l'onglet combiné et les onglets par type.
+    def _rang_motif(motif: str) -> int:
+        for i, (_, suffix) in enumerate(_MOTIF_SUFFIXES):
+            if suffix in motif:
+                return i
+        return len(_MOTIF_SUFFIXES)
+
+    def _cle_tri(m: MandatRow) -> tuple[str, int, int]:
+        return (m.nom.strip().lower(), _rang_motif(m.motif), 0 if m.type_sequence == "FRST" else 1)
+
+    result.mandats.sort(key=_cle_tri)
+    result.ooff.sort(key=_cle_tri)
+    result.rcur.sort(key=_cle_tri)
 
     return result
 
@@ -755,6 +802,34 @@ def explain_rules(rules: PrelevementRules) -> list[dict[str, str]]:
                 "Égalité de montant -> départagé par l'ordre canonique des produits "
                 "du moteur (Optilife, Carte MGS, MYJURIS...). La ligne RCUR "
                 "correspondante suit le même décalage."
+            ),
+        },
+        {
+            "titre": "NOM PRENOM",
+            "detail": (
+                "Le prénom est le DERNIER mot de \"Nom complet\" (séparé par un "
+                "blanc, en partant de la droite) ; le nom est ce qui reste une "
+                "fois ce mot retiré. Un seul mot (pas de blanc) -> gardé tel "
+                "quel comme nom, prénom vide."
+            ),
+        },
+        {
+            "titre": "périodicité MGS",
+            "detail": (
+                "Un mandat Carte MGS (suffixe \"-M\") a TOUJOURS une "
+                "périodicité annuelle, quelle que soit la périodicité du "
+                "contrat dans le CRM -- n'affecte que ce mandat, jamais les "
+                "autres produits actifs du même client."
+            ),
+        },
+        {
+            "titre": "tri fichier",
+            "detail": (
+                "Trié par nom du client, puis par ordre des produits "
+                "(Optilife, puis Carte MGS, puis le cumul des produits "
+                "groupés -- même ordre que \"Un mandat par produit actif\"), "
+                "puis FRST avant RCUR. Même tri sur l'onglet combiné \"Mandat\" "
+                "et sur les onglets FRST/RCUR séparés."
             ),
         },
     ]

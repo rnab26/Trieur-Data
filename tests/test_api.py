@@ -2090,8 +2090,9 @@ def test_prelevement_generate_mandat_columns_match_requested_order(client_factor
     """Ordre et noms de colonnes demandés par le père de Raphaël
     (2026-09-22, "ordre des colonnes du fichiers de mandats") --
     Motif/Référence client/Date d'effet gardés en plus à la fin (hors
-    de sa liste, jamais supprimés sans confirmation explicite), Prenom
-    vide (pas de source dans le CRM), ICS_Crediteur toujours vide."""
+    de sa liste, jamais supprimés sans confirmation explicite), Nom et
+    Prenom déduits de "Nom complet" (règle "NOM PRENOM"), ICS_Crediteur
+    toujours vide."""
     fake = _make_client(profiles=[ADMIN_PROFILE])
     tc = client_factory(fake)
     res = tc.post(
@@ -2109,7 +2110,8 @@ def test_prelevement_generate_mandat_columns_match_requested_order(client_factor
         "Reference_facture", "Libelle", "Référence client", "Motif", "Date d'effet",
     ]
     frst = next(m for m in mandats if m["Type_prelevement"] == "FRST")
-    assert frst["Prenom"] == ""
+    assert frst["Nom"] == "CLIENT"
+    assert frst["Prenom"] == "UN"
     assert frst["ICS_Crediteur"] == ""
     assert frst["Date_fin"] == "" and frst["Statut"] == ""
     # "La règle du MOTIF devient -> Référence Facture" (2026-09-22) --

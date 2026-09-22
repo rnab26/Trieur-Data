@@ -128,12 +128,11 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    # Sans ça, le navigateur reçoit bien les en-têtes personnalisés mais les
-    # cache au JS -- res.headers.get('x-ooff-count') renvoie null côté
-    # frontend même si le fichier généré contient de vraies données
-    # (confirmé : Raphaël a eu "0/0/0" affiché avec un classeur de 66
-    # mandats OOFF réels dedans -- CORS, pas un bug du moteur).
-    expose_headers=["X-Ooff-Count", "X-Rcur-Count", "X-Exclus-Count", "X-Steps-B64"],
+    # Content-Disposition n'est pas exposé par défaut au JS cross-origin --
+    # sans ça, records/export et pipeline/export ne peuvent pas lire le nom
+    # de fichier suggéré par le serveur (res.headers.get('content-
+    # disposition') renvoie null côté frontend).
+    expose_headers=["Content-Disposition"],
 )
 
 
@@ -2145,12 +2144,16 @@ async def post_prelevement_generate(
 ):
     """Prend un ou plusieurs exports CRM bruts (mêmes colonnes que le
     fichier Excel de référence), les fusionne en une seule liste de
-    lignes, et renvoie un classeur avec 4 onglets : Mandat (tout,
-    FRST+RCUR mélangés), First, RCUR (mêmes mandats en détail par type),
-    Exclus (avec la raison de chaque exclusion) -- rien n'est écrit en
-    base, ce endpoint ne fait que transformer des fichiers en un autre,
-    comme l'import multi-fichiers du Trieur de Data. Plusieurs fichiers
-    = simplement plusieurs lots de clients à traiter en un seul export
+    lignes, et renvoie en JSON : les lignes du futur onglet "Mandat"
+    (pour l'aperçu avant téléchargement, demandé par Raphaël 2026-09-22
+    -- avant, le classeur se téléchargeait automatiquement, sans que
+    l'utilisateur puisse voir le résultat avant de l'enregistrer sur son
+    téléphone), le résumé des étapes, et le classeur complet encodé en
+    base64 (4 onglets : Mandat, First, RCUR, Exclus) que le frontend
+    décode pour le téléchargement -- rien n'est écrit en base, ce
+    endpoint ne fait que transformer des fichiers en un autre, comme
+    l'import multi-fichiers du Trieur de Data. Plusieurs fichiers =
+    simplement plusieurs lots de clients à traiter en un seul export
     (ex. un export par mois) -- pas de dédoublonnage entre eux ici."""
     dfs = []
     for file in files:
@@ -2262,20 +2265,14 @@ async def post_prelevement_generate(
         steps.append(
             f"{n_fusions} mandat(s) MYJURIS+IMMO fusionné(s) en un seul (règle -J-AU)"
         )
-    steps_b64 = base64.b64encode(json.dumps(steps, ensure_ascii=False).encode("utf-8")).decode("ascii")
-
     file_base = sanitize_filename(filename, default="mandats_prelevement")
-    return StreamingResponse(
-        buffer,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={
-            "Content-Disposition": f'attachment; filename="mandats_{file_base}.xlsx"',
-            "X-Ooff-Count": str(len(result.ooff)),
-            "X-Rcur-Count": str(len(result.rcur)),
-            "X-Exclus-Count": str(len(result.exclus)),
-            "X-Steps-B64": steps_b64,
-        },
-    )
+    return {
+        "counts": {"ooff": len(result.ooff), "rcur": len(result.rcur), "exclus": len(result.exclus)},
+        "steps": steps,
+        "mandats": df_mandat.to_dict(orient="records") if not df_mandat.empty else [],
+        "filename": f"mandats_{file_base}.xlsx",
+        "file_base64": base64.b64encode(buffer.getvalue()).decode("ascii"),
+    }
 
 
 # ---------------------------------------------------------------

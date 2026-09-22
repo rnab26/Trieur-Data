@@ -1629,17 +1629,19 @@ def test_prelevement_generate_returns_ooff_rcur_and_exclus(client_factory):
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 200
-    assert res.headers["x-ooff-count"] == "1"
-    assert res.headers["x-rcur-count"] == "0"
-    assert res.headers["x-exclus-count"] == "1"
-    assert res.headers["content-type"].startswith("application/vnd.openxmlformats")
+    body = res.json()
+    assert body["counts"] == {"ooff": 1, "rcur": 0, "exclus": 1}
 
 
-def test_prelevement_generate_sheets_are_mandat_first_rcur_exclus(client_factory):
-    """Structure demandée par Raphaël (2026-09-21) après son premier
-    test réel : un onglet "Mandat" avec tout, PLUS "First"/"RCUR" en
-    détail -- jamais "OOFF" (renommé), jamais de colonne "Nature"
-    (réglage global, pas une donnée par ligne)."""
+def test_prelevement_generate_returns_mandat_rows_and_file_for_preview(client_factory):
+    """Aperçu avant téléchargement demandé par Raphaël (2026-09-22) : le
+    endpoint renvoie du JSON (lignes de l'onglet "Mandat" + classeur
+    encodé en base64), plus de téléchargement automatique côté serveur.
+    Structure du classeur inchangée : Mandat, First, RCUR, Exclus --
+    jamais "OOFF" (renommé), jamais de colonne "Nature" (réglage global,
+    pas une donnée par ligne)."""
+    import base64
+
     import openpyxl
 
     fake = _make_client(profiles=[ADMIN_PROFILE])
@@ -1650,20 +1652,23 @@ def test_prelevement_generate_sheets_are_mandat_first_rcur_exclus(client_factory
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 200
-    wb = openpyxl.load_workbook(io.BytesIO(res.content))
+    body = res.json()
+    assert len(body["mandats"]) == 1
+    assert body["mandats"][0]["RUM"] == "RUM1"
+    assert "Nature" not in body["mandats"][0]
+    assert "Date d'effet" in body["mandats"][0]
+
+    wb = openpyxl.load_workbook(io.BytesIO(base64.b64decode(body["file_base64"])))
     assert wb.sheetnames == ["Mandat", "First", "RCUR", "Exclus"]
-    mandat_header = [c.value for c in wb["Mandat"][1]]
-    assert "Nature" not in mandat_header
-    assert "Date d'effet" in mandat_header
 
 
-def test_prelevement_generate_exposes_count_headers_cross_origin(client_factory):
-    """Sans Access-Control-Expose-Headers, le navigateur reçoit bien
-    X-Ooff-Count etc. mais les cache au JS -- res.headers.get(...) renvoie
-    null côté frontend même avec un vrai fichier généré (bug réel vécu par
-    Raphaël : "0/0/0" affiché alors que le classeur téléchargé contenait 66
-    mandats). TestClient n'applique le middleware CORS que si un en-tête
-    Origin est présent -- il faut donc le simuler explicitement ici."""
+def test_prelevement_generate_reachable_cross_origin(client_factory):
+    """Le résultat (compteurs, aperçu, fichier) est maintenant dans le
+    corps JSON, pas dans des en-têtes personnalisés -- plus besoin
+    d'Access-Control-Expose-Headers pour que le frontend y accède (bug
+    réel évité par PR #45 avec X-Ooff-Count, devenu sans objet ici).
+    TestClient n'applique le middleware CORS que si un en-tête Origin est
+    présent -- il faut donc le simuler explicitement ici."""
     fake = _make_client(profiles=[ADMIN_PROFILE])
     tc = client_factory(fake)
     res = tc.post(
@@ -1672,10 +1677,7 @@ def test_prelevement_generate_exposes_count_headers_cross_origin(client_factory)
         headers={"Authorization": f"Bearer {TOKEN}", "Origin": "https://trieur-data-app-test.onrender.com"},
     )
     assert res.status_code == 200
-    exposed = res.headers["access-control-expose-headers"]
-    assert "X-Ooff-Count" in exposed
-    assert "X-Rcur-Count" in exposed
-    assert "X-Exclus-Count" in exposed
+    assert res.headers["access-control-allow-origin"] == "https://trieur-data-app-test.onrender.com"
 
 
 def test_prelevement_generate_forbidden_for_non_admin(client_factory):
@@ -1706,18 +1708,15 @@ def test_prelevement_generate_merges_multiple_files(client_factory):
     assert res.status_code == 200
     # Chaque fichier a 1 ligne valide (MGS-1) + 1 exclue (MGS-2) -- les
     # deux fichiers réunis donnent donc le double de chaque.
-    assert res.headers["x-ooff-count"] == "2"
-    assert res.headers["x-exclus-count"] == "2"
+    body = res.json()
+    assert body["counts"]["ooff"] == 2
+    assert body["counts"]["exclus"] == 2
 
 
-def test_prelevement_generate_steps_header_describes_processing(client_factory):
+def test_prelevement_generate_steps_describe_processing(client_factory):
     """Résumé des étapes demandé par Raphaël (2026-09-21) : voir ce qui
     a été fait sur le fichier (lignes lues, exclusions, mandats), pas
-    seulement les compteurs finaux -- encodé en base64 (en-têtes HTTP en
-    ASCII uniquement)."""
-    import base64
-    import json
-
+    seulement les compteurs finaux."""
     fake = _make_client(profiles=[ADMIN_PROFILE])
     tc = client_factory(fake)
     res = tc.post(
@@ -1726,7 +1725,7 @@ def test_prelevement_generate_steps_header_describes_processing(client_factory):
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 200
-    steps = json.loads(base64.b64decode(res.headers["x-steps-b64"]).decode("utf-8"))
+    steps = res.json()["steps"]
     assert isinstance(steps, list) and len(steps) >= 3
     joined = " ".join(steps)
     assert "1 fichier lu" in joined

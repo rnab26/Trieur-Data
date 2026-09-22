@@ -3852,3 +3852,34 @@ nom exact des colonnes de l'export CRM -- trop risqué en direct),
 les exclusions, le classement FRST/RCUR. 10 nouveaux tests (moteur +
 API + un test bout-en-bout confirmant l'application réelle). CI verte,
 mergé.
+
+### PR #61 : écran compacté + file de demandes de règles (2026-09-22)
+
+Retour de Raphaël sur PR #60 : écran trop aéré sur téléphone, pas de
+moyen de "supprimer" un frais par produit, question sur la
+persistance, et surtout demande d'une zone pour proposer des
+changements aux règles encore codées en dur (exclusions, FRST/RCUR,
+liste des produits) -- sans que ça code quoi que ce soit tout seul.
+
+Compacté : tableaux resserrés pour "Frais par produit" et "Libellés de
+périodicité". Bouton ↺ par produit (pas un vrai "supprimer" -- la
+ligne reste car le produit est fixe, seule la valeur revient au
+réglage par défaut). Texte ajouté précisant que l'enregistrement
+n'est pas automatique (clic "Enregistrer les réglages" requis) mais
+persiste bien après.
+
+Nouvelle section "📝 Demandes de modification de règles" (sous
+"Règles appliquées par le moteur") : Raphaël/son père décrivent le
+changement souhaité (titre + texte libre), enregistré avec le statut
+"⏳ En attente". Jamais appliqué automatiquement -- le principe
+explicite : une session Claude Code traite la file sur message
+explicite ("va regarder les demandes de règles Prélèvement"), code/
+teste/déploie comme d'habitude, puis fait avancer le statut (En
+attente -> 🔵 En cours -> ✅ Validé) directement dans la même liste.
+Migration 0025 (table `prelevement_rule_requests`), CRUD complet côté
+API (réservé admin), 7 nouveaux tests. CI verte, mergé.
+
+**Pour la prochaine session/moi-même** : penser à consulter l'onglet
+Prélèvement > Réglages > "Demandes de modification de règles" au
+début d'une conversation sur ce chantier -- des demandes peuvent y
+attendre sans passer par le chat.

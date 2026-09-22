@@ -4184,3 +4184,68 @@ nécessite un réglage par organisation (ordre + colonnes visibles),
 une interface de réorganisation dans l'aperçu, et une migration pour
 stocker la préférence. Pas encore commencé -- à cadrer avec Raphaël
 avant de coder (périmètre plus large que les demandes précédentes).
+
+### PR #76 : 3 bugs réels du système de questions (2026-09-22)
+
+Retours de Raphaël sur son père : (1) "des fois les réponses ne sont
+pas prises en compte" -- cause racine trouvée en retraçant plusieurs
+réponses "Autre (préciser)" restées vides ce jour-là : le bouton
+soumettait instantanément au clic, avant d'avoir eu le temps de taper
+la précision. Corrigé : une option "préciser" donne le focus au champ
+et affiche un bouton "Valider cette réponse" séparé au lieu de
+soumettre au clic. (2) "la page saute et je dois revenir dessus" --
+répondre/créer/modifier recharge la liste, la carte change de hauteur,
+tout ce qui est en dessous se décale. Position de scroll notée juste
+avant l'action, restaurée juste après via `useLayoutEffect` (avant
+peinture, sans clignotement). (3) "certaines réponses... je ne les
+retrouve pas" -- une question répondue disparaissait complètement,
+remplacée par le statut. Ajout d'un historique repliable "X réponse(s)
+donnée(s)" sous chaque demande. Au passage : avertissement (non
+bloquant) dès qu'un titre de nouvelle demande ressemble à une
+existante, pour éviter les doublons. Déployé et vérifié `live` sur les
+deux services Render (backend + frontend).
+
+### PR #77 : colonnes du fichier de mandats réordonnables/masquables (2026-09-22)
+
+Implémente `780ba0d7` ("ORDRE DES COLONNES + MODIFICATIONS", demande
+du père de Raphaël, cadrage ci-dessus). Réglage persistant
+`colonnes_mandat` (ordre + visibilité) par organisation -- migration
+0028, même convention que `frais_par_produit`/`periodicites` déjà en
+place sur `prelevement_rules` : liste complète obligatoire (28
+colonnes canoniques), remplacée en bloc à l'enregistrement, validée
+côté API (rejette une liste incomplète). Appliqué automatiquement à
+l'export Excel et à la prévisualisation JSON avant génération -- un
+seul point de vérité (`colonnes_mandat` filtre/réordonne juste avant
+`_mandat_dict`), aucun autre endroit à retoucher. UI : liste à cases à
+cocher (visible/masqué) + flèches ▲▼ pour réordonner (préféré au
+glisser-déposer, moins fiable au doigt sur téléphone). 4 nouveaux
+tests, 491 passent. Déployé et vérifié `live` sur les deux services
+Render. Statut `780ba0d7` marqué `valide`.
+
+### Fil d'activité en direct sur les demandes de règles (2026-09-22)
+
+Retour de Raphaël : "il faut s'en rapprocher le plus possible [d'une
+session avec toi]" -- jusqu'ici son père ne voyait une demande avancer
+qu'au changement de statut (⏳ -> 🔧 -> ✅), sans savoir ce qui se passe
+entre les deux. Nouvelle table `prelevement_rule_request_events`
+(migration 0029, même principe RLS que les questions) : une session
+Claude Code y note un court message à chaque étape clé pendant
+qu'elle travaille sur une demande ("je regarde le code existant", "PR
+créée, CI en cours", "déployé"...). Affiché sous chaque demande (fil
+type chat) + bandeau "🔧 Là, maintenant" en haut de l'écran pour la vue
+générale (dernière activité toutes demandes `en_cours` confondues).
+Rafraîchi toutes les 15s (polling léger, pas de vrai temps réel --
+Supabase Realtime non câblé ici), échec silencieux en arrière-plan
+(l'écran garde le dernier état connu plutôt que de basculer en erreur
+à chaque cycle raté). Bug réel trouvé en cours de route : les réponses
+des endpoints create/patch sur une demande ne renvoient pas
+questions/events (pas d'embed) -- remplacer l'objet entier par cette
+réponse partielle les effaçait silencieusement de l'écran après un
+simple renommage ; corrigé en fusionnant au lieu de remplacer.
+
+**À partir de maintenant** : chaque session Claude Code qui travaille
+sur une demande de règle Prélèvement doit écrire dans ce fil au fil de
+l'eau (`scripts/sql.sh "insert into
+trieur_data.prelevement_rule_request_events (request_id, message)
+values (...)"`), pas seulement mettre à jour le statut à la fin --
+c'est tout le sens de la fonctionnalité.

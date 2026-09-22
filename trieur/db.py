@@ -1136,6 +1136,7 @@ def get_prelevement_rules(client: Client, org_id: str) -> dict:
         "frais_setup_eur": 20.0,
         "frais_par_produit": {},
         "periodicites": {},
+        "colonnes_mandat": None,
     }
 
 
@@ -1149,6 +1150,7 @@ def save_prelevement_rules(
     frais_par_produit: dict,
     periodicites: dict,
     user_id: str,
+    colonnes_mandat: list[dict] | None = None,
 ) -> dict:
     from datetime import datetime, timezone
 
@@ -1163,6 +1165,7 @@ def save_prelevement_rules(
                 "frais_setup_eur": frais_setup_eur,
                 "frais_par_produit": frais_par_produit,
                 "periodicites": periodicites,
+                "colonnes_mandat": colonnes_mandat,
                 "updated_by": user_id,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             },

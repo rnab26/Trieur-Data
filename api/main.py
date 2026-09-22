@@ -139,6 +139,20 @@ from api.pipeline_mapping import detect_iban_master_columns, merge_mapped_row
 
 app = FastAPI(title="Trieur de Data API", description="API REST sur trieur/db.py")
 
+# Clés (et ordre canonique par défaut) du dict renvoyé par
+# post_prelevement_generate:_mandat_dict -- SEULE source de vérité pour
+# le réglage "colonnes_mandat" (ordre/visibilité personnalisables sur le
+# site, voir /prelevement/rules). Reflète EXACTEMENT les clés de
+# _mandat_dict -- toute colonne ajoutée/retirée là-bas doit être mise à
+# jour ici dans le même commit.
+MANDAT_COLONNES_CANONIQUES: list[str] = [
+    "Nom", "Prenom", "Email", "Telephone", "Adresse", "Ville", "Code_postal", "Pays",
+    "IBAN", "BIC", "ICS_Crediteur", "RUM", "Type_prelevement", "Montant_EUR", "Devise",
+    "Date_signature_mandat", "Date_premiere_echeance", "Periodicite", "Explication_periodicite",
+    "Frequence_mois", "Jour_prelevement", "Prochaine_echeance", "Date_fin", "Statut",
+    "Reference_facture", "Libelle", "Référence client", "Motif", "Date d'effet",
+]
+
 # CORS : dev local (Vite) + domaine de production (à ajuster une fois le
 # vrai nom de domaine Render connu -- placeholder demandé explicitement).
 app.add_middleware(
@@ -2161,6 +2175,13 @@ def get_prelevement_rules_endpoint(org_id: str, ctx: AuthCtx = Depends(require_c
     # ce qui s'applique réellement tant que rien n'a été modifié.
     rules.frais_par_produit = rules.frais_par_produit or {p: rules.frais_setup_eur for p in PRODUITS_CONNUS}
     rules.periodicites = rules.periodicites or dict(_PERIODICITE_EXPLICATIONS)
+    # Colonnes du fichier de mandats (ordre/visibilité) -- réglable sur
+    # le site (Raphaël, 2026-09-22, "ORDRE DES COLONNES + MODIFICATIONS").
+    # Rien de personnalisé encore -> ordre canonique complet, tout visible
+    # (jamais un écran vide qui masquerait ce qui s'applique réellement).
+    colonnes_mandat = rules_row.get("colonnes_mandat") or [
+        {"cle": c, "visible": True} for c in MANDAT_COLONNES_CANONIQUES
+    ]
     # "Règles appliquées" demandé par Raphaël (2026-09-22) : consultable
     # depuis l'écran sans lire le code, pour repérer une future erreur
     # ou décider qu'une règle doit changer. Calculé depuis explain_rules()
@@ -2170,9 +2191,15 @@ def get_prelevement_rules_endpoint(org_id: str, ctx: AuthCtx = Depends(require_c
         **rules_row,
         "frais_par_produit": rules.frais_par_produit,
         "periodicites": rules.periodicites,
+        "colonnes_mandat": colonnes_mandat,
         "produits_connus": PRODUITS_CONNUS,
         "explication": explain_rules(rules),
     }
+
+
+class ColonneMandat(BaseModel):
+    cle: str
+    visible: bool = True
 
 
 class PrelevementRulesUpdate(BaseModel):
@@ -2182,6 +2209,7 @@ class PrelevementRulesUpdate(BaseModel):
     frais_setup_eur: float = 20.0
     frais_par_produit: dict[str, float] = {}
     periodicites: dict[str, str] = {}
+    colonnes_mandat: Optional[list[ColonneMandat]] = None
 
 
 @app.post("/orgs/{org_id}/prelevement/rules")
@@ -2204,12 +2232,30 @@ def post_prelevement_rules(
             raise HTTPException(status_code=400, detail="Code de périodicité vide.")
         if not explication.strip():
             raise HTTPException(status_code=400, detail=f"Explication vide pour \"{code}\".")
+    colonnes_mandat_dicts = None
+    if body.colonnes_mandat is not None:
+        # Doit couvrir EXACTEMENT chaque colonne canonique une fois --
+        # jamais un sous-ensemble partiel qui perdrait silencieusement
+        # une colonne que l'utilisateur n'a pas explicitement décochée.
+        cles = [c.cle for c in body.colonnes_mandat]
+        if sorted(cles) != sorted(MANDAT_COLONNES_CANONIQUES):
+            raise HTTPException(
+                status_code=400,
+                detail="La liste des colonnes doit contenir exactement toutes les colonnes connues.",
+            )
+        colonnes_mandat_dicts = [{"cle": c.cle, "visible": c.visible} for c in body.colonnes_mandat]
     saved = save_prelevement_rules(
         ctx.client, org_id, body.ics, body.nature, body.delay_days, body.frais_setup_eur,
-        body.frais_par_produit, body.periodicites, ctx.user.id,
+        body.frais_par_produit, body.periodicites, ctx.user.id, colonnes_mandat_dicts,
     )
     rules = _rules_from_row(saved)
-    return {**saved, "produits_connus": PRODUITS_CONNUS, "explication": explain_rules(rules)}
+    return {
+        **saved,
+        "colonnes_mandat": saved.get("colonnes_mandat")
+        or [{"cle": c, "visible": True} for c in MANDAT_COLONNES_CANONIQUES],
+        "produits_connus": PRODUITS_CONNUS,
+        "explication": explain_rules(rules),
+    }
 
 
 @app.post("/orgs/{org_id}/prelevement/generate")
@@ -2316,6 +2362,23 @@ async def post_prelevement_generate(
             "Motif": m.motif,
             "Date d'effet": m.date_effet,
         }
+
+    # Ordre/visibilité personnalisés (demande du père de Raphaël,
+    # 2026-09-22, "ORDRE DES COLONNES + MODIFICATIONS") : réglables
+    # directement sur le site (voir /prelevement/rules), sans repasser
+    # par une session Claude. Rien de personnalisé -> ordre canonique
+    # ci-dessus inchangé, toutes les colonnes visibles.
+    colonnes_mandat = rules_row.get("colonnes_mandat")
+    if colonnes_mandat:
+        base_dict = _mandat_dict
+
+        def _mandat_dict(m):  # noqa: F811 -- enrobe volontairement la version ci-dessus
+            d = base_dict(m)
+            return {
+                entry["cle"]: d[entry["cle"]]
+                for entry in colonnes_mandat
+                if entry.get("visible", True) and entry.get("cle") in d
+            }
 
     df_mandat = pd.DataFrame([_mandat_dict(m) for m in result.mandats])
     df_first = pd.DataFrame([_mandat_dict(m) for m in result.ooff])

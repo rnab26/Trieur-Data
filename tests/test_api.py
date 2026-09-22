@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from api.main import app, get_supabase_client
+from api.main import MANDAT_COLONNES_CANONIQUES, app, get_supabase_client
 
 
 # ---------------------------------------------------------------
@@ -1700,6 +1700,80 @@ def test_prelevement_rules_rejects_empty_periodicite_explication(client_factory)
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert res.status_code == 400
+
+
+def test_prelevement_rules_defaults_colonnes_mandat_to_full_canonical_order(client_factory):
+    """"ORDRE DES COLONNES + MODIFICATIONS" (père de Raphaël, 2026-09-22) :
+    tant que rien n'a été personnalisé, toutes les colonnes canoniques,
+    dans l'ordre, toutes visibles -- jamais un écran vide."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.get("/orgs/org-1/prelevement/rules", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 200
+    colonnes = res.json()["colonnes_mandat"]
+    assert [c["cle"] for c in colonnes] == MANDAT_COLONNES_CANONIQUES
+    assert all(c["visible"] for c in colonnes)
+
+
+def test_prelevement_rules_roundtrip_colonnes_mandat(client_factory):
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    # Réordonné (RUM en premier) + Prenom masqué.
+    reordered = [{"cle": "RUM", "visible": True}] + [
+        {"cle": c, "visible": c != "Prenom"} for c in MANDAT_COLONNES_CANONIQUES if c != "RUM"
+    ]
+    res = tc.post(
+        "/orgs/org-1/prelevement/rules",
+        json={"colonnes_mandat": reordered},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    assert res.json()["colonnes_mandat"][0] == {"cle": "RUM", "visible": True}
+    prenom_entry = next(c for c in res.json()["colonnes_mandat"] if c["cle"] == "Prenom")
+    assert prenom_entry["visible"] is False
+
+    res = tc.get("/orgs/org-1/prelevement/rules", headers=headers)
+    assert res.json()["colonnes_mandat"][0] == {"cle": "RUM", "visible": True}
+
+
+def test_prelevement_rules_rejects_incomplete_colonnes_mandat(client_factory):
+    """Jamais un sous-ensemble partiel -- ça perdrait silencieusement une
+    colonne que l'utilisateur n'a pas explicitement décochée."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    res = tc.post(
+        "/orgs/org-1/prelevement/rules",
+        json={"colonnes_mandat": [{"cle": "Nom", "visible": True}]},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 400
+
+
+def test_prelevement_generate_respects_colonnes_mandat_order_and_visibility(client_factory):
+    """Bout en bout : l'ordre/visibilité personnalisés s'appliquent
+    réellement à l'aperçu de génération, pas seulement à l'affichage des
+    réglages."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    reordered = [{"cle": "RUM", "visible": True}, {"cle": "Nom", "visible": True}] + [
+        {"cle": c, "visible": c != "IBAN"}
+        for c in MANDAT_COLONNES_CANONIQUES
+        if c not in ("RUM", "Nom")
+    ]
+    res = tc.post("/orgs/org-1/prelevement/rules", json={"colonnes_mandat": reordered}, headers=headers)
+    assert res.status_code == 200
+
+    res = tc.post(
+        "/orgs/org-1/prelevement/generate",
+        files=[("files", ("export.csv", _PRELEVEMENT_CSV, "text/csv"))],
+        headers=headers,
+    )
+    assert res.status_code == 200
+    mandat = res.json()["mandats"][0]
+    assert list(mandat.keys())[:2] == ["RUM", "Nom"]
+    assert "IBAN" not in mandat
 
 
 def test_prelevement_generate_uses_frais_par_produit(client_factory):

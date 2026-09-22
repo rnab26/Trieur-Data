@@ -944,6 +944,13 @@ export function applyPipelineDedupe(orgId: string, sessionId: string, body: Pipe
 
 export type PrelevementRuleExplanation = { titre: string; detail: string }
 
+// Une colonne du fichier de mandats (ordre = position dans le tableau) --
+// réglable directement sur le site (Raphaël, 2026-09-22, "ORDRE DES
+// COLONNES + MODIFICATIONS" : "que ca reste figé... sans passer par
+// claude"), jamais éditée en dur par une session Claude après ce
+// chantier.
+export type ColonneMandat = { cle: string; visible: boolean }
+
 export type PrelevementRules = {
   org_id: string
   ics: string | null
@@ -958,6 +965,10 @@ export type PrelevementRules = {
   // {code de périodicité normalisé -> explication affichée dans le
   // mandat}, même convention (toujours complet, remplacement en masse).
   periodicites: Record<string, string>
+  // Ordre + visibilité des colonnes du fichier de mandats -- toujours
+  // complet (une entrée par colonne connue), remplacement en masse à
+  // l'enregistrement (même convention que frais_par_produit).
+  colonnes_mandat: ColonneMandat[]
   // Liste fixe des produits gérés par le moteur -- informative, jamais
   // éditable depuis l'écran (voir PROJECT_LOG.md, 2026-09-22 : couplée
   // au groupe de produits cumulés en un seul mandat et au nom des
@@ -979,6 +990,7 @@ export function savePrelevementRules(
     fraisSetupEur: number
     fraisParProduit: Record<string, number>
     periodicites: Record<string, string>
+    colonnesMandat: ColonneMandat[]
   },
 ) {
   return request<PrelevementRules>(`/orgs/${orgId}/prelevement/rules`, {
@@ -990,6 +1002,7 @@ export function savePrelevementRules(
       frais_setup_eur: body.fraisSetupEur,
       frais_par_produit: body.fraisParProduit,
       periodicites: body.periodicites,
+      colonnes_mandat: body.colonnesMandat,
     }),
   })
 }

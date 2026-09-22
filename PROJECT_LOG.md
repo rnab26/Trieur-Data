@@ -3893,3 +3893,66 @@ maintenant un lien "✏️ Demander une modification" qui pré-remplit le
 titre dans "Demandes de modification de règles" et amène le curseur
 directement dans le champ de texte. Purement frontend. CI verte,
 mergé.
+
+### PR #64 : correctif d'un build cassé -- vraie leçon sur `tsc --noEmit` (2026-09-22)
+
+Le déploiement de la PR #63 a échoué sur Render (`TS2304 : formRef`/
+`demandeRef` supprimés mais deux usages oubliés dans le JSX) -- le
+site est resté sur l'ancienne version un moment, Raphaël l'a vu et
+signalé (père en attente sur le site). **Cause du raté** : `npx tsc
+--noEmit` seul ne vérifiait en réalité AUCUN fichier sur ce repo (le
+`tsconfig.json` racine n'a que `files: []` + des références vers
+`tsconfig.app.json`/`tsconfig.node.json`, résolues seulement en mode
+`-b`/build) -- faux positif silencieux, jamais détecté avant ce jour.
+**Règle adoptée depuis, pour toute session sur ce repo** : toujours
+valider le frontend avec `npm run build` (`tsc -b && vite build`, la
+vraie commande utilisée par Render), jamais `tsc --noEmit` seul. Au
+passage : les deux blocs de réglages ("Frais par produit" /
+"Libellés de périodicité") mis côte à côte sur écran large (demande de
+Raphaël), empilés sur téléphone étroit.
+
+### PR #65 : réglages repliés par défaut + questions à choix sur les règles (2026-09-22)
+
+Retour de Raphaël : écran "Réglages" repliable, replié par défaut
+("ça pollue visuellement"). Et surtout : système de questions à choix
+cliquables sur une demande de règle ambiguë, réutilisant le principe
+déjà éprouvé de `chantier_questions` (Cockpit, migration 0018) --
+migration 0026 (`prelevement_rule_request_questions`). Une session
+Claude Code peut poser une question directement sous la règle
+concernée (options + réponse libre toujours possible), au lieu de
+redemander dans le chat. Badge de statut automatique par règle
+(⏳/🔵/✅), rafraîchi toutes les 20s tant que l'écran est ouvert --
+honnêteté affichée : pas un vrai temps réel (Supabase Realtime non
+câblé dans cette appli), un polling léger. Embed PostgREST
+(`questions:prelevement_rule_request_questions(*)`) vérifié en réel
+contre Supabase (la suite de tests utilise un faux client qui ne
+simule pas les jointures). 11 nouveaux tests. CI verte, mergé.
+
+### PR #66/#67 : fusion visuelle des demandes + badge rouge vif (2026-09-22)
+
+Deux retours successifs de Raphaël (captures d'écran) : (1) badge
+"Réponse attendue" en rouge vif ("🔴 Claude attend une réponse") quand
+une question est en attente -- corrigé directement dans la PR #65 en
+cours de revue. (2) "Demandes de modification de règles" fusionnée
+DANS le panneau "Règles appliquées par le moteur" (plus de section à
+part), historique replié par défaut (compteur + bouton pour dérouler),
+badge visible même repliée sur l'en-tête du panneau lui-même.
+
+**Incident technique en cours de route** : la PR #66 a été ouverte
+depuis une branche locale non synchronisée avec `origin/main` après
+les merges des PR #64/#65 (un `git fetch` avait été sauté, faute d'y
+être revenu après une interruption par un nouveau message de
+Raphaël) -- GitHub a signalé un faux conflit (`mergeable_state:
+dirty`, 7 fichiers au lieu de 2). Diagnostiqué (`git fetch origin
+main` a montré que la copie locale de `main` datait de plusieurs PR
+en arrière), corrigé en extrayant le vrai diff (`git diff origin/main
+-- <fichiers>`) et en le réappliquant sur une branche fraîche depuis
+le vrai `main` à jour. PR #66 fermée, PR #67 ouverte propre
+(`mergeable_state: clean`, 2 fichiers, 1 commit), mergée. **Leçon** :
+toujours `git fetch origin main` avant de créer une nouvelle branche
+si un merge a eu lieu depuis, même en plein fil de discussion --
+jamais présumer que la copie locale est à jour sans le vérifier.
+
+Déploiement Render vérifié "live" en direct après chaque merge (pas
+seulement la CI, qui ne teste que le backend Python) -- pratique
+adoptée depuis le raté de la PR #63/#64.

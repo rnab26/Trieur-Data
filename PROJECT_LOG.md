@@ -4103,3 +4103,43 @@ a supprimé la demande elle-même (bouton 🗑️, suppression en cascade des
 questions) plutôt que de préciser. Traité comme un retrait volontaire
 -- rien à coder, rien à demander de plus. Reste 5 questions ouvertes :
 décalage remise (x2), motif (conflit -AU/-IM), ordre des colonnes.
+
+### PR #74 : suffixe motif Auditif/IMMO rétabli + décalage remise (2026-09-22)
+
+Réponses reçues à 3 questions de plus (le père de Raphaël répond vite
+maintenant que le panneau se déroule tout seul, PR #73) :
+
+1. **motif** -- conflit signalé sur le suffixe Auditif/IMMO (voir plus
+   haut, PR #74 vs correction du 21/09). Réponse explicite : "revenir
+   à ma formule... la correction du 21/09 était une erreur". Auditif="-AU",
+   IMMO="-IM" rétablis. La correction du 21/09 (basée sur 5 clients
+   réels croisés avec le fichier de remise bancaire) est donc
+   officiellement écartée par le père de Raphaël lui-même -- ne pas la
+   réintroduire sans nouvelle demande explicite de sa part.
+2. **décalage remise** -- ses 2 questions répondues d'un coup (ordre
+   canonique des produits pour départager une égalité de montant ;
+   décalage répercuté sur les lignes RCUR). Implémenté en 2 phases dans
+   `generate_mandats` : calcul des dates de base par mandat, puis
+   classement + décalage relatif au mandat ANCRE (piège réel trouvé en
+   testant : décaler chaque mandat depuis SA PROPRE date de base, au
+   lieu de la date de l'ancre, pouvait faire retomber deux mandats sur
+   le même jour par coïncidence -- corrigé avant de merger, un test
+   dédié le couvre maintenant).
+
+**"ordre des colonnes"** : sa réponse ("certaines se déduisent... à
+préciser") ne l'était pas assez pour agir -- champ commentaire vide.
+En creusant le sujet, 2 vrais blocages trouvés (pas seulement les 7
+colonnes déjà identifiées comme sans source) :
+- Le CRM n'a qu'un champ "Nom complet", jamais de Nom/Prénom séparés
+  -- deviner où couper le nom est un risque réel sur un document
+  officiel envoyé à la banque, jamais fait sans donnée source.
+- Sa liste de colonnes ne mentionne ni "Motif" (la référence unique
+  envoyée à la banque) ni "Référence client" -- les retirer purement et
+  simplement serait une régression fonctionnelle réelle (la banque a
+  besoin de cette référence), donc confirmation nécessaire avant de
+  toucher au fichier de sortie et au schéma de la table
+  `prelevement_mandats` (colonnes techniques + migration si le nom des
+  champs change).
+
+2 nouvelles questions posées sur cette demande. Statuts `c929b6ea`
+(motif) et `5170467f` (décalage remise) marqués `valide`.

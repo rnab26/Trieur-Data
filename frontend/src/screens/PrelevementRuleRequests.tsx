@@ -31,7 +31,7 @@ function ActivityFeed({ events }: { events: RuleRequestEvent[] }) {
   if (events.length === 0) return null
   const sorted = [...events].sort((a, b) => a.created_at.localeCompare(b.created_at))
   return (
-    <div className="mt-2 rounded-md border border-[var(--border)] bg-[var(--muted-bg)] p-2">
+    <div className="mt-2 rounded-lg bg-[var(--muted-bg)] p-3 shadow-[var(--ring-card)]">
       <p className="mb-1 text-xs font-medium text-[var(--muted)]">💬 Ce que je fais sur cette demande</p>
       <ul className="flex flex-col gap-1">
         {sorted.map((e) => (
@@ -102,9 +102,12 @@ export function RuleQuestionBlock({
   }
 
   return (
-    <div className="mt-2 rounded-md border-2 border-[var(--danger)] bg-[var(--muted-bg)] p-3 text-sm">
-      <p className="font-bold text-[var(--danger)]">🔴 Ta réponse est nécessaire</p>
-      <p className="mt-1 font-medium">{question.question}</p>
+    <div className="mt-2 overflow-hidden rounded-xl shadow-[inset_0_0_0_1.5px_var(--danger)] text-sm">
+      <p className="bg-[var(--danger)] px-4 py-1.5 text-xs font-bold tracking-wide text-white">
+        🔴 RÉPONSE ATTENDUE
+      </p>
+      <div className="p-4">
+      <p className="font-medium">{question.question}</p>
       <div className="mt-2 flex flex-wrap gap-2">
         {question.options.map((option) => (
           <Button
@@ -133,6 +136,7 @@ export function RuleQuestionBlock({
         </div>
       )}
       {error && <p className="mt-1 text-xs text-[var(--danger)]">Erreur : {error}</p>}
+      </div>
     </div>
   )
 }
@@ -214,13 +218,13 @@ function ValidationBlock({
             ✏️ Signaler un problème / demander une correction
           </button>
         ) : (
-          <div className="rounded-md border-2 border-[var(--warning)] bg-[var(--muted-bg)] p-3">
-            <p className="font-bold text-[var(--warning)]">
-              🧪 Qu'est-ce qui ne va pas ? Sois précis (exemple concret si possible)…
+          <div className="overflow-hidden rounded-xl shadow-[inset_0_0_0_1.5px_var(--warning)]">
+            <p className="bg-[var(--warning)] px-4 py-1.5 text-xs font-bold tracking-wide text-white">
+              🧪 QU'EST-CE QUI NE VA PAS ?
             </p>
-            <div className="mt-2 flex flex-col gap-2">
+            <div className="flex flex-col gap-2 p-4">
               <textarea
-                className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] p-2 text-sm"
+                className="w-full rounded-lg bg-[var(--card)] p-2 text-sm shadow-[var(--ring-card)]"
                 rows={3}
                 value={correctionText}
                 onChange={(e) => setCorrectionText(e.target.value)}
@@ -247,12 +251,13 @@ function ValidationBlock({
   }
 
   return (
-    <div className="mt-2 rounded-md border-2 border-[var(--warning)] bg-[var(--muted-bg)] p-3 text-sm">
-      <p className="font-bold text-[var(--warning)]">
-        🧪 Cette règle est codée et déployée -- fonctionne-t-elle comme attendu ?
+    <div className="mt-2 overflow-hidden rounded-xl text-sm shadow-[inset_0_0_0_1.5px_var(--warning)]">
+      <p className="bg-[var(--warning)] px-4 py-1.5 text-xs font-bold tracking-wide text-white">
+        🧪 CODÉE ET DÉPLOYÉE — FONCTIONNE-T-ELLE COMME ATTENDU ?
       </p>
+      <div className="p-4">
       {!correcting ? (
-        <div className="mt-2 flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-2">
           <Button type="button" disabled={submitting} onClick={() => void handleValider()}>
             {submitting ? 'Enregistrement…' : '✅ Ça fonctionne, je certifie'}
           </Button>
@@ -261,9 +266,9 @@ function ValidationBlock({
           </Button>
         </div>
       ) : (
-        <div className="mt-2 flex flex-col gap-2">
+        <div className="flex flex-col gap-2">
           <textarea
-            className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] p-2 text-sm"
+            className="w-full rounded-lg bg-[var(--card)] p-2 text-sm shadow-[var(--ring-card)]"
             rows={3}
             placeholder="Qu'est-ce qui ne va pas ? Sois précis (exemple concret si possible)..."
             value={correctionText}
@@ -285,6 +290,7 @@ function ValidationBlock({
         </div>
       )}
       {error && <p className="mt-1 text-xs text-[var(--danger)]">Erreur : {error}</p>}
+      </div>
     </div>
   )
 }
@@ -327,7 +333,7 @@ function AnsweredQuestions({ questions }: { questions: RuleRequestQuestion[] }) 
       {open && (
         <ul className="mt-1 flex flex-col gap-2">
           {questions.map((q) => (
-            <li key={q.id} className="rounded-md border border-[var(--border)] bg-[var(--card)] p-2 text-xs">
+            <li key={q.id} className="rounded-lg bg-[var(--card)] p-2 text-xs shadow-[var(--ring-card)]">
               <p className="text-[var(--muted)]">{q.question}</p>
               <p className="mt-1 font-medium">→ {q.answer}</p>
               {q.comment && <p className="mt-0.5 text-[var(--muted)]">Précision : {q.comment}</p>}
@@ -542,20 +548,25 @@ export function PrelevementRuleRequests({
     const pendingQuestions = r.questions.filter((q) => !q.answered_at)
     const awaitingValidation = pendingQuestions.length === 0 && r.statut === 'a_verifier'
     const canReportProblem = pendingQuestions.length === 0 && r.statut === 'valide'
+    // Thème "Mix" validé par Raphaël (2026-09-22) : compact, mais chaque
+    // statut garde une identité claire -- liseré de couleur sur le bord
+    // gauche + fond très légèrement teinté (4-5%), au lieu d'une bordure
+    // pleine tout autour ou d'un simple point. Les couleurs restent
+    // réservées aux statuts (rouge = bloquant, orange = à vérifier, vert
+    // = actif), jamais un accent décoratif.
+    // Classes ENTIÈREMENT statiques (jamais interpolées) -- Tailwind ne
+    // génère que les classes qu'il peut lire littéralement dans le
+    // code source, une chaîne construite par template string à
+    // l'exécution ne serait tout simplement pas compilée.
+    const accentClass = pendingQuestions.length > 0
+      ? 'shadow-[inset_3px_0_0_var(--danger),var(--ring-card)] bg-[var(--danger)]/5'
+      : awaitingValidation
+        ? 'shadow-[inset_3px_0_0_var(--warning),var(--ring-card)] bg-[var(--warning)]/5'
+        : r.statut === 'valide'
+          ? 'shadow-[inset_3px_0_0_var(--success),var(--ring-card)] bg-[var(--success)]/5'
+          : 'shadow-[var(--ring-card)]'
     return (
-      <li
-        key={r.id}
-        className={
-          'rounded-md border p-2 ' +
-          (pendingQuestions.length > 0
-            ? 'border-2 border-[var(--danger)]'
-            : awaitingValidation
-              ? 'border-2 border-[var(--warning)]'
-              : r.statut === 'valide'
-                ? 'border-[var(--success)]'
-                : 'border-[var(--border)]')
-        }
-      >
+      <li key={r.id} className={'rounded-xl p-4 ' + accentClass}>
         <div className="mb-1 flex flex-wrap items-center gap-2">
           {r.statut === 'valide' && (
             <span title="Certifiée -- ne sera plus retouchée" className="text-lg leading-none">
@@ -575,7 +586,7 @@ export function PrelevementRuleRequests({
             }}
           />
           {pendingQuestions.length > 0 ? (
-            <span className="rounded-md bg-[var(--danger)] px-2 py-1 text-xs font-bold text-white">
+            <span className="rounded-full bg-[var(--danger)] px-3 py-1 text-xs font-bold text-white">
               🔴 Ta réponse est nécessaire
             </span>
           ) : (
@@ -583,16 +594,17 @@ export function PrelevementRuleRequests({
             // Claude Code qui code la règle, jamais par Raphaël ou
             // son père (retour explicite : "les statuts sont à
             // statuer par toi, pas par moi"). Avant : un menu
-            // déroulant modifiable ici, source de confusion.
+            // déroulant modifiable ici, source de confusion. Pilule à
+            // contour (pas de fond plein) -- thème Mix.
             <span
-              className={'rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-1 text-xs font-medium ' + STATUT_COLOR[r.statut]}
+              className={'rounded-full bg-[var(--card)] px-3 py-1 text-xs font-semibold shadow-[inset_0_0_0_1px_currentColor] ' + STATUT_COLOR[r.statut]}
             >
               {STATUT_LABEL[r.statut]}
             </span>
           )}
         </div>
         <textarea
-          className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] p-2 text-sm"
+          className="w-full rounded-lg bg-[var(--card)] p-2 text-sm shadow-[var(--ring-card)]"
           rows={2}
           value={r.demande}
           disabled={savingId === r.id}
@@ -664,7 +676,7 @@ export function PrelevementRuleRequests({
       {error && <p className="mb-2 text-sm text-[var(--danger)]">Erreur : {error}</p>}
 
       {latestActivity && (
-        <p className="mb-2 rounded-md border border-[var(--primary)] bg-[var(--muted-bg)] p-2 text-xs">
+        <p className="mb-2 rounded-lg bg-[var(--muted-bg)] p-2 text-xs shadow-[inset_0_0_0_1px_var(--primary)]">
           <span className="font-bold">🔧 Là, maintenant :</span>{' '}
           <span className="font-medium">{latestActivity.requestTitre}</span> --{' '}
           {latestActivity.event.message}{' '}
@@ -714,7 +726,7 @@ export function PrelevementRuleRequests({
         <ul className="mb-3 flex flex-col gap-3">{enCours.map(renderCard)}</ul>
       )}
 
-      <div className="flex flex-col gap-2 rounded-md border border-dashed border-[var(--border)] p-2">
+      <div className="flex flex-col gap-2 rounded-xl border border-dashed border-[var(--border)] p-4">
         <p className="text-xs font-medium text-[var(--muted)]">
           ➕ Nouvelle règle (celle-ci n'existe pas encore dans la liste ci-dessus)
         </p>
@@ -725,7 +737,7 @@ export function PrelevementRuleRequests({
           onChange={(e) => setNewTitre(e.target.value)}
         />
         {similarExistingTitres.length > 0 && (
-          <div className="rounded-md border border-[var(--primary)] bg-[var(--muted-bg)] p-2 text-xs">
+          <div className="rounded-lg bg-[var(--muted-bg)] p-2 text-xs shadow-[inset_0_0_0_1px_var(--primary)]">
             <p className="font-medium">
               ⚠️ Une demande avec un nom proche existe déjà -- pour éviter un doublon, ajoute plutôt ta
               précision directement sur la carte existante ci-dessus ("✅ Actif" ou "🔧 En cours
@@ -748,7 +760,7 @@ export function PrelevementRuleRequests({
           </div>
         )}
         <textarea
-          className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] p-2 text-sm"
+          className="w-full rounded-lg bg-[var(--card)] p-2 text-sm shadow-[var(--ring-card)]"
           rows={2}
           placeholder="Changement souhaité, en détail..."
           value={newDemande}

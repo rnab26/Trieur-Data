@@ -3494,3 +3494,48 @@ pour l'utilisateur. Le panneau "Réglages" déjà existant (ICS, nature,
 délai, frais) reste la vue complète, visible et modifiable de ces
 réglages -- inchangé, mais désormais sans ambiguïté. Mergée, CI verte
 du premier coup.
+
+### PR #49 : aperçu avant téléchargement + enregistrement en base (2026-09-22)
+
+Après validation du lot réel, Raphaël a demandé plusieurs finitions en
+une fois (notées comme chantiers Cockpit distincts, traités un par un) :
+
+1. **Aperçu avant téléchargement** : le classeur se téléchargeait
+   automatiquement après génération, sans possibilité de voir le
+   résultat avant de l'enregistrer sur le téléphone. `POST
+   .../prelevement/generate` renvoie maintenant du JSON (`counts`,
+   `steps`, `mandats`, `filename`, `file_base64`) au lieu d'un flux
+   binaire direct -- le frontend affiche un tableau d'aperçu (20
+   premières lignes) puis un bouton "Télécharger" séparé qui décode le
+   base64. Nettoyage CORS en même temps : les en-têtes
+   `X-Ooff-Count`/`X-Rcur-Count`/`X-Exclus-Count`/`X-Steps-B64`
+   n'existent plus (tout est dans le corps JSON) ; `expose_headers`
+   réduit à `Content-Disposition`, seul en-tête personnalisé encore
+   utilisé ailleurs (`records/export`, `pipeline/export` -- vérifié
+   qu'aucun autre endpoint n'en dépendait avant de retirer le reste).
+
+2. **Enregistrer en base** : bouton "Enregistrer dans la base de
+   données" après l'aperçu, demandé en anticipation avant que la vue de
+   consultation dédiée existe (chantier séparé, reporté explicitement
+   par Raphaël jusqu'à validation de son père). Nouvelle table
+   `trieur_data.prelevement_mandats` (migration 0023, appliquée en
+   direct sur Supabase) : un `batch_id` par appel, jamais d'écrasement
+   d'un lot précédent. Persiste réellement les lignes (vérifié par test
+   qui inspecte le contenu de la table simulée), pas un accusé de
+   réception vide.
+
+Les deux regroupées dans une seule PR (#49) car la 2e dépend
+directement du contrat JSON introduit par la 1re (mêmes données
+`result.mandats`). `pytest` : 439 passés (tests réécrits pour le
+nouveau contrat + nouveaux tests de sauvegarde). CI verte du premier
+coup.
+
+En marge, 2 autres chantiers notés côté Cockpit pour la suite :
+- **Vue Base de données dédiée aux mandats Prélèvement** (reportée
+  explicitement, dépend de la table créée ci-dessus).
+- **Filtres façon Google Sheets + vues enregistrées modifiables**
+  (transverse, org Global) : demande d'évolution du système de
+  filtres/vues déjà existant (`ColumnFilters`, `SavedViews.tsx`) pour
+  que chaque environnement puisse moduler sa vue Base de données à sa
+  façon, et pouvoir MODIFIER une vue enregistrée existante (aujourd'hui
+  seulement créer/supprimer).

@@ -1356,10 +1356,14 @@ export function PrelevementScreen() {
                     <span className="rounded-full bg-[var(--danger)] px-2 py-0.5 text-xs font-bold text-white">
                       🔴 Réponse attendue
                     </span>
+                  ) : ruleRequestsAll.some((r) => r.statut === 'a_verifier') ? (
+                    <span className="rounded-full bg-[var(--warning)] px-2 py-0.5 text-xs font-medium text-[var(--warning-foreground)]">
+                      🧪 {ruleRequestsAll.filter((r) => r.statut === 'a_verifier').length} à vérifier
+                    </span>
                   ) : (
                     ruleRequestsAll.some((r) => r.statut !== 'valide') && (
                       <span className="rounded-full bg-[var(--primary)] px-2 py-0.5 text-xs font-medium text-[var(--primary-foreground)]">
-                        {ruleRequestsAll.filter((r) => r.statut !== 'valide').length} en cours
+                        {ruleRequestsAll.filter((r) => r.statut !== 'valide').length} en cours de codage
                       </span>
                     )
                   )}

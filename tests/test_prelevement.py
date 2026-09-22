@@ -128,9 +128,12 @@ def test_compute_first_prelevement_date_keeps_later_scheduled_date():
     assert compute_first_prelevement_date("15/10/2026", today, 3) == date(2026, 10, 15)
 
 
-def test_compute_first_prelevement_date_none_when_not_scheduled():
-    assert compute_first_prelevement_date("", date(2026, 9, 21), 3) is None
-    assert compute_first_prelevement_date(None, date(2026, 9, 21), 3) is None
+def test_compute_first_prelevement_date_falls_back_to_delay_when_not_scheduled():
+    """Depuis le 2026-09-22 (demande du père de Raphaël, réponse : "la
+    date du jour + 3") : aucune date renseignée n'exclut plus le
+    client -- utilise directement le plancher aujourd'hui + délai."""
+    assert compute_first_prelevement_date("", date(2026, 9, 21), 3) == date(2026, 9, 24)
+    assert compute_first_prelevement_date(None, date(2026, 9, 21), 3) == date(2026, 9, 24)
 
 
 def test_build_motif_one_mandate_one_suffix():
@@ -459,11 +462,18 @@ def test_generate_mandats_excludes_missing_iban():
     assert len(result.exclus) == 1
 
 
-def test_generate_mandats_excludes_missing_first_prelevement_date():
+def test_generate_mandats_no_longer_excludes_missing_first_prelevement_date():
+    """Depuis le 2026-09-22 (demande du père de Raphaël, question posée,
+    réponse : "la date du jour + 3") : plus d'exclusion sur ce critère --
+    le mandat est généré avec la date plancher (aujourd'hui + délai)."""
     row = _base_row(**{"Date de premier prélèvement": ""})
     result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
-    assert len(result.exclus) == 1
-    assert "date" in result.exclus[0].raison.lower()
+    assert result.exclus == []
+    assert len(result.ooff) == 1
+    # +1 mois : règle Optilife existante (date d'effet absente/passée),
+    # sans rapport avec ce correctif -- part bien de 24/09 (aujourd'hui
+    # + 3 jours, plus de date renseignée) avant ce décalage.
+    assert result.ooff[0].date_premiere_echeance == "24/10/2026"
 
 
 def test_generate_mandats_no_longer_excludes_refused_or_cancel_status():

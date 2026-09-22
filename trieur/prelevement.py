@@ -347,17 +347,18 @@ def _parse_date(raw: object) -> date | None:
     return None
 
 
-def compute_first_prelevement_date(raw_scheduled: object, today: date, delay_days: int) -> date | None:
+def compute_first_prelevement_date(raw_scheduled: object, today: date, delay_days: int) -> date:
     """La date du 1er prélèvement n'est JAMAIS avant aujourd'hui +
     délai (3 jours par défaut, toujours le même -- confirmé par
     Raphaël) : `MAX(TODAY()+3, date_prévue)` dans le fichier de
-    référence. Si aucune date n'était prévue au départ, retourne None
-    -- ce cas est exclu du lot par `generate_mandats` plutôt que
-    d'inventer une date."""
+    référence. Si aucune date n'était prévue au départ, le client
+    n'est PLUS exclu (changé le 2026-09-22, demande du père de
+    Raphaël, question posée -- réponse : "la date du jour + 3") :
+    utilise directement le plancher aujourd'hui + délai."""
     scheduled = _parse_date(raw_scheduled)
-    if scheduled is None:
-        return None
     plancher = today + timedelta(days=delay_days)
+    if scheduled is None:
+        return plancher
     return max(plancher, scheduled)
 
 
@@ -416,9 +417,6 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
         date_premiere = compute_first_prelevement_date(
             _get(row, COL_DATE_PREMIER, keyed), today, rules.delay_days,
         )
-        if date_premiere is None:
-            exclure("Pas de date de premier prélèvement renseignée")
-            continue
 
         optilife_optivie = to_amount(_get(row, COL_OPTILIFE, keyed)) + to_amount(_get(row, COL_OPTIVIE, keyed))
         amounts = {
@@ -671,11 +669,14 @@ def explain_rules(rules: PrelevementRules) -> list[dict[str, str]]:
             "titre": "Exclusions (jamais envoyé en banque)",
             "detail": (
                 "Mode de paiement autre que \"Prélèvement\" -- IBAN manquant ou "
-                "invalide (contrôle mod-97) -- RUM manquant -- pas de date de "
-                "premier prélèvement renseignée -- aucun produit actif (tous les "
-                "montants à 0). \"Statut agent IA\" contenant \"Refusé\" ou "
-                "\"Annuler\" retiré des exclusions le 2026-09-22 (demande du père "
-                "de Raphaël, risque signalé et confirmé explicitement)."
+                "invalide (contrôle mod-97) -- RUM manquant -- aucun produit "
+                "actif (tous les montants à 0). \"Statut agent IA\" contenant "
+                "\"Refusé\" ou \"Annuler\" retiré des exclusions le 2026-09-22 "
+                "(demande du père de Raphaël, risque signalé et confirmé "
+                "explicitement) ; pas de date de premier prélèvement renseignée "
+                "retiré des exclusions le même jour -- n'exclut plus, voir "
+                "\"Date du premier prélèvement\" ci-dessous pour la date "
+                "utilisée à la place."
             ),
         },
         {
@@ -731,7 +732,9 @@ def explain_rules(rules: PrelevementRules) -> list[dict[str, str]]:
             "detail": (
                 f"Jamais avant aujourd'hui + {rules.delay_days} jour(s) (réglable) : "
                 f"si la date prévue dans le fichier est déjà passée ou trop proche, "
-                f"repoussée à ce délai minimum."
+                f"repoussée à ce délai minimum. Si aucune date n'est renseignée, "
+                f"cette même valeur (aujourd'hui + {rules.delay_days} jour(s)) est "
+                f"utilisée directement, sans exclure le client."
             ),
         },
         {

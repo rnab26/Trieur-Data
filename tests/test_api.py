@@ -2025,7 +2025,10 @@ def test_prelevement_generate_mandat_columns_match_requested_order(client_factor
     frst = next(m for m in mandats if m["Type_prelevement"] == "FRST")
     assert frst["Prenom"] == ""
     assert frst["ICS_Crediteur"] == ""
-    assert frst["Date_fin"] == "" and frst["Statut"] == "" and frst["Reference_facture"] == ""
+    assert frst["Date_fin"] == "" and frst["Statut"] == ""
+    # "La règle du MOTIF devient -> Référence Facture" (2026-09-22) --
+    # même valeur que Motif, jamais vide alors que Motif la contient.
+    assert frst["Reference_facture"] == frst["Motif"] != ""
     assert frst["Frequence_mois"] == 1  # "Mensuelle"
     # Jour_prelevement = jour du mois de Date_premiere_echeance (calculée
     # à partir d'aujourd'hui + délai, jamais une date fixe -- ne pas

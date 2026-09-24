@@ -2077,10 +2077,11 @@ def test_prelevement_generate_returns_mandat_rows_and_file_for_preview(client_fa
     """Aperçu avant téléchargement demandé par Raphaël (2026-09-22) : le
     endpoint renvoie du JSON (lignes de l'onglet "Mandat" + classeur
     encodé en base64), plus de téléchargement automatique côté serveur.
-    Structure du classeur inchangée : Mandat, FRST, RCUR, Exclus --
-    jamais "OOFF" (renommé), jamais de colonne "Nature" (réglage global,
-    pas une donnée par ligne). Chaque mandat génère systématiquement une
-    ligne FRST et une ligne RCUR (2026-09-22)."""
+    Structure du classeur : Mandat, FRST, RCUR, Exclus, export CRM
+    (nouvel onglet, 2026-09-24) -- jamais "OOFF" (renommé), jamais de
+    colonne "Nature" (réglage global, pas une donnée par ligne). Chaque
+    mandat génère systématiquement une ligne FRST et une ligne RCUR
+    (2026-09-22)."""
     import base64
 
     import openpyxl
@@ -2100,7 +2101,11 @@ def test_prelevement_generate_returns_mandat_rows_and_file_for_preview(client_fa
     assert "Date d'effet" in body["mandats"][0]
 
     wb = openpyxl.load_workbook(io.BytesIO(base64.b64decode(body["file_base64"])))
-    assert wb.sheetnames == ["Mandat", "FRST", "RCUR", "Exclus"]
+    assert wb.sheetnames == ["Mandat", "FRST", "RCUR", "Exclus", "export CRM"]
+    export_crm_sheet = wb["export CRM"]
+    header = [c.value for c in export_crm_sheet[1]]
+    assert header[:3] == ["Référence du client", "RUM", "Statut"]
+    assert export_crm_sheet.max_row == 2  # en-tête + 1 client
 
 
 def test_prelevement_generate_mandat_columns_match_requested_order(client_factory):

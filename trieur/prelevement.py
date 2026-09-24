@@ -214,6 +214,44 @@ class ExclusionRow:
     raison: str
 
 
+# Onglet "export CRM" (demande du père de Raphaël, 24/09/2026, 3
+# questions posées et répondues le même jour) : UNE LIGNE PAR CLIENT
+# (pas par mandat -- réponse "Une ligne par client (résumé)"), à
+# l'inverse des onglets Mandat/FRST/RCUR qui ont une ligne par mandat.
+# Colonnes dans l'ordre exact de sa demande. Sources documentées dans
+# generate_mandats, au point où chaque champ est construit -- jamais
+# une valeur devinée : ce qui n'a aucune source dans le CRM reste vide
+# (même discipline que Date_fin/Reference_facture côté mandats).
+@dataclass
+class ExportCrmRow:
+    reference_client: str
+    rum: str
+    statut: str
+    date_creation: str
+    createur: str
+    nom_complet: str
+    telephone: str
+    mobile: str
+    adresse_complete: str
+    iban: str
+    bic: str
+    iban_validator: str
+    type_prelevement: str
+    periodicite: str
+    date_prelevement: str
+    date_premier_prelevement: str
+    optilife_optivie: float
+    carte_mgs: float
+    myjuris_myhospi: float
+    admin_aide_a_dom: float
+    auditif: float
+    immo: float
+    total_frais_dossier: float
+    total_cotisation_et_frais_dossier: float
+    montant_a_prelever: float
+    motif: str
+
+
 @dataclass
 class GenerationResult:
     # Tous les mandats (FRST + RCUR), dans l'ordre de génération -- pour
@@ -224,6 +262,7 @@ class GenerationResult:
     ooff: list[MandatRow] = field(default_factory=list)
     rcur: list[MandatRow] = field(default_factory=list)
     exclus: list[ExclusionRow] = field(default_factory=list)
+    export_crm: list[ExportCrmRow] = field(default_factory=list)
 
 
 def normalize_iban(raw: object) -> str:
@@ -595,6 +634,14 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
         else:
             bundle_infos[0]["date_premiere_ligne"] = bundle_infos[0]["date_base"]
 
+        # Un mandat FRST + un mandat RCUR par bundle de ce client --
+        # accumulés ici pour construire la ligne "export CRM" (une par
+        # CLIENT, pas par mandat) une fois tous les bundles traités,
+        # sans rien recalculer séparément (même source que les onglets
+        # Mandat/FRST/RCUR).
+        row_ooff: list[MandatRow] = []
+        row_rcur: list[MandatRow] = []
+
         for b in bundle_infos:
             suffix = b["suffix"]
             montant_produits = b["montant_produits"]
@@ -657,6 +704,7 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
             )
             result.mandats.append(mandat_frst)
             result.ooff.append(mandat_frst)
+            row_ooff.append(mandat_frst)
 
             mandat_rcur = MandatRow(
                 reference_client=ref_client,
@@ -686,6 +734,82 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
             )
             result.mandats.append(mandat_rcur)
             result.rcur.append(mandat_rcur)
+            row_rcur.append(mandat_rcur)
+
+        # Ligne "export CRM" de ce client -- une seule, même si plusieurs
+        # mandats (bundles) actifs. Sources par colonne, dans l'ordre de
+        # sa demande du 24/09/2026 :
+        # - Référence client/RUM/IBAN/BIC/Nom complet/Téléphone/Mobile :
+        #   mêmes valeurs déjà lues/validées pour les mandats de ce
+        #   client (une seule source).
+        # - Statut, Type de prélèvement, Date création : colonnes brutes
+        #   du CRM (COL_STATUT/COL_TYPE_PRELEVEMENT/COL_DATE_CREATION),
+        #   jamais exploitées ailleurs dans le moteur -- passées telles
+        #   quelles.
+        # - Créateur : AUCUNE colonne source dans le CRM -- laissé vide,
+        #   jamais inventé (même discipline que Date_fin côté mandats).
+        # - IBAN VALIDATOR : toujours "OK" ici -- un IBAN invalide (mod-97
+        #   ou longueur) exclut le client bien avant ce point, il ne peut
+        #   pas y avoir de ligne export CRM pour un IBAN invalide.
+        # - Adresse complète : Adresse + Code postal + Ville combinés (la
+        #   demande ne les sépare pas, contrairement au fichier mandats).
+        # - Périodicité, Date prélèvement/Date de premier prélèvement,
+        #   Optilife&Optivie...IMMO, Total frais de dossier, Total
+        #   cotisation et frais de dossier, Motif : agrégés sur TOUS les
+        #   mandats FRST/RCUR de ce client (un client peut avoir plusieurs
+        #   produits actifs, donc plusieurs mandats) -- "il faut afficher
+        #   tous les mandats avec tous les motifs" (réponse du 24/09).
+        # - Montant à prélever : somme des montants RCUR (réponse
+        #   confirmée "Total RCUR (produits seuls, sans frais)").
+        # - Date prélèvement / Date de premier prélèvement : la demande
+        #   liste deux colonnes au nom très proche sans les distinguer --
+        #   même valeur (la plus ancienne date de 1er prélèvement parmi
+        #   les mandats de ce client) faute d'une différence identifiée ;
+        #   à corriger si Raphaël en voulait deux distinctes.
+        if row_ooff:
+            dates_premiere = [
+                datetime.strptime(m.date_premiere_echeance, "%d/%m/%Y").date() for m in row_ooff
+            ]
+            date_premiere_min = min(dates_premiere).strftime("%d/%m/%Y")
+            periodicites = sorted({m.periodicite for m in row_ooff if m.periodicite})
+            result.export_crm.append(ExportCrmRow(
+                reference_client=ref_client,
+                rum=rum,
+                statut=str(_get(row, COL_STATUT, keyed) or ""),
+                date_creation=date_signature.strftime("%d/%m/%Y"),
+                createur="",
+                nom_complet=nom,
+                telephone=str(_get(row, COL_TELEPHONE, keyed) or ""),
+                mobile=str(_get(row, COL_MOBILE, keyed) or ""),
+                adresse_complete=", ".join(
+                    p for p in [
+                        str(_get(row, COL_ADRESSE, keyed) or "").strip(),
+                        " ".join(
+                            p2 for p2 in [
+                                str(_get(row, COL_CODE_POSTAL, keyed) or "").strip(),
+                                str(_get(row, COL_VILLE, keyed) or "").strip(),
+                            ] if p2
+                        ),
+                    ] if p
+                ),
+                iban=iban,
+                bic=bic,
+                iban_validator="OK",
+                type_prelevement=str(_get(row, COL_TYPE_PRELEVEMENT, keyed) or ""),
+                periodicite=" + ".join(periodicites),
+                date_prelevement=date_premiere_min,
+                date_premier_prelevement=date_premiere_min,
+                optilife_optivie=round(optilife_optivie, 2),
+                carte_mgs=round(amounts[COL_CARTE_MGS], 2),
+                myjuris_myhospi=round(amounts[COL_MYJURIS], 2),
+                admin_aide_a_dom=round(amounts[COL_ADMIN_AIDE], 2),
+                auditif=round(amounts[COL_AUDITIF], 2),
+                immo=round(amounts[COL_IMMO], 2),
+                total_frais_dossier=round(sum(b["frais"] for b in bundle_infos), 2),
+                total_cotisation_et_frais_dossier=round(sum(m.montant_eur for m in row_ooff), 2),
+                montant_a_prelever=round(sum(m.montant_eur for m in row_rcur), 2),
+                motif="+".join(m.motif for m in row_ooff),
+            ))
 
     # Tri du fichier de sortie (Raphaël, 2026-09-22, "tri fichier") :
     # par nom du client, puis par ordre des produits (Optilife, puis
@@ -706,6 +830,7 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
     result.mandats.sort(key=_cle_tri)
     result.ooff.sort(key=_cle_tri)
     result.rcur.sort(key=_cle_tri)
+    result.export_crm.sort(key=lambda e: e.nom_complet.strip().lower())
 
     return result
 

@@ -599,6 +599,54 @@ def test_generate_mandats_accepts_empty_bic():
     assert result.ooff[0].bic == ""
 
 
+def test_generate_mandats_export_crm_one_row_per_client():
+    """Onglet "export CRM" (demande du père de Raphaël, 24/09/2026) : UNE
+    ligne par CLIENT (réponse "Une ligne par client (résumé)"), même si
+    ce client a plusieurs mandats -- pas une ligne par mandat comme
+    Mandat/FRST/RCUR."""
+    row = _base_row(**{"MYJURIS & MYHOSPI": 29.89})  # + Optilife 99.0 de la fixture -> 2 mandats
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    assert len(result.ooff) == 2  # Optilife + MYJURIS, deux bundles distincts
+    assert len(result.export_crm) == 1
+    e = result.export_crm[0]
+    assert e.reference_client == "MGS-000001"
+    assert e.rum == "RUM000001"
+    assert e.nom_complet == "TEST CLIENT"
+
+
+def test_generate_mandats_export_crm_montant_is_total_rcur_sans_frais():
+    """Réponse confirmée (24/09/2026) : "Montant à prélever" = Total RCUR
+    (produits seuls, sans frais) -- jamais le montant FRST (qui inclut
+    les frais de dossier)."""
+    row = _base_row(**{"MYJURIS & MYHOSPI": 29.89})
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    e = result.export_crm[0]
+    assert e.montant_a_prelever == 128.89  # 99.0 + 29.89, sans les 40€ de frais (2 x 20)
+    assert e.total_frais_dossier == 40.0
+    assert e.total_cotisation_et_frais_dossier == 168.89  # 128.89 + 40
+
+
+def test_generate_mandats_export_crm_motif_lists_all_mandates():
+    """Réponse confirmée (24/09/2026, correction du père de Raphaël sur
+    sa propre réponse initiale) : "il faut afficher tous les mandats
+    avec tous les motifs" -- le Motif d'un client à plusieurs mandats
+    liste tous les motifs, pas seulement le premier."""
+    row = _base_row(**{"MYJURIS & MYHOSPI": 29.89})
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    e = result.export_crm[0]
+    assert "MGS-RUM000001-O" in e.motif
+    assert "MGS-RUM000001-J" in e.motif
+
+
+def test_generate_mandats_export_crm_no_row_for_excluded_client():
+    """Un client exclu (ex. IBAN invalide) n'a aucune ligne "export CRM"
+    -- même périmètre que les onglets Mandat/FRST/RCUR."""
+    row = _base_row(**{"IBAN  ": "PAS UN IBAN VALIDE"})
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    assert len(result.exclus) == 1
+    assert result.export_crm == []
+
+
 def test_generate_mandats_no_longer_excludes_missing_first_prelevement_date():
     """Depuis le 2026-09-22 (demande du père de Raphaël, question posée,
     réponse : "la date du jour + 3") : plus d'exclusion sur ce critère --

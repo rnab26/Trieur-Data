@@ -442,33 +442,41 @@ function CertifiedRuleCard({
           )}
         </div>
         {!editing && (
-          <div className="flex shrink-0 items-center gap-1">
+          // Écart volontairement large entre les deux boutons (retour de
+          // Raphaël, 2026-09-24 : "trop proches [...] pas facile pour
+          // cliquer, même sur mobile") -- cibles tactiles distinctes.
+          <div className="flex shrink-0 items-center gap-4">
             <EditPencil onClick={startEditing} title="Modifier le titre / le résumé" />
             <button
               type="button"
               onClick={() => setOpen((v) => !v)}
-              className="text-xs text-[var(--muted)] hover:text-[var(--foreground)]"
+              className="p-1 text-xs text-[var(--muted)] hover:text-[var(--foreground)]"
             >
               {open ? '▲' : '▼'}
             </button>
           </div>
         )}
       </div>
+      {/* Toujours visible, même en édition -- retour de Raphaël (2026-09-24) :
+          "je ne peux plus demander une modification sur la règle active [...]
+          comme ce qu'il y avait avant". Ne dépend plus de "Détails" (open) :
+          une règle active qui a un problème doit rester signalable en un
+          clic, sans avoir à dérouler le reste. */}
+      {canReportProblem && (
+        <ValidationBlock
+          orgId={orgId}
+          request={r}
+          mode="valide"
+          onValidated={() => {}}
+          onCorrected={(demande) => onCorrected(r.id, demande)}
+        />
+      )}
       {open && (
         <div className="mt-1.5 flex flex-col gap-1.5 border-t border-[var(--border)] pt-1.5 text-xs">
           <div>
             <p className="mb-0.5 font-medium text-[var(--muted)]">Demande d'origine :</p>
             <p className="whitespace-pre-wrap text-[var(--foreground)]">{r.demande}</p>
           </div>
-          {canReportProblem && (
-            <ValidationBlock
-              orgId={orgId}
-              request={r}
-              mode="valide"
-              onValidated={() => {}}
-              onCorrected={(demande) => onCorrected(r.id, demande)}
-            />
-          )}
           <RuleHistory request={r} />
           <div className="mt-0.5 flex items-center justify-between">
             <span className="text-[var(--muted)]">
@@ -604,7 +612,7 @@ function RuleCard({
           )}
         </div>
         {!editing && (
-          <div className="flex shrink-0 items-center gap-1.5">
+          <div className="flex shrink-0 items-center gap-2.5">
             {pendingQuestions.length > 0 ? (
               <span className="rounded-full bg-[var(--danger)] px-2 py-0.5 text-[0.65rem] font-bold text-white">
                 🔴 Réponse attendue
@@ -870,7 +878,23 @@ export function PrelevementRuleRequests({
   // carte, voir ValidationBlock) repasse automatiquement ici, jamais une
   // nouvelle ligne.
   const actifs = requests.filter((r) => r.statut === 'valide')
-  const enCours = requests.filter((r) => r.statut !== 'valide')
+  // Regroupées par catégorie, pas dans l'ordre de création (retour de
+  // Raphaël, 2026-09-24 : "tu ne les as pas regroupées [...] pourquoi tu
+  // ne regroupes pas bloc par bloc, par type de catégorie" -- une
+  // régression jugée bête à éviter partout, pas seulement ici). Ordre par
+  // urgence de l'action attendue : question bloquante d'abord, puis à
+  // vérifier, puis en cours de codage, puis pas encore examinée. `sort`
+  // est stable (ES2019+) : au sein d'une même catégorie, l'ordre de
+  // création est conservé.
+  function ruleCardPriority(r: PrelevementRuleRequest): number {
+    if (r.questions.some((q) => !q.answered_at)) return 0
+    if (r.statut === 'a_verifier') return 1
+    if (r.statut === 'en_cours') return 2
+    return 3 // en_attente
+  }
+  const enCours = requests
+    .filter((r) => r.statut !== 'valide')
+    .sort((a, b) => ruleCardPriority(a) - ruleCardPriority(b))
 
   return (
     <div className="mt-2 border-t border-[var(--border)] pt-3">

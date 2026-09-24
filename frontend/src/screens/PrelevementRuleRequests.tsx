@@ -21,9 +21,22 @@ import {
 // dessus ("je regarde le code existant", "PR créée, CI en cours"...) --
 // pas un vrai chat (pas de réponse possible ici, voir RuleQuestionBlock
 // pour ça), juste la narration en quasi direct de ce qui se passe.
+// Retour de Raphaël (2026-09-24) : "toujours mettre les heures à côté
+// des dates [...] dans la même journée on peut s'embrouiller" + "si ça
+// date de la veille mets hier, si on est aujourd'hui mets aujourd'hui,
+// sinon tu restes sur le format dd/mm/yy" -- heure TOUJOURS affichée ;
+// jour relatif seulement pour aujourd'hui/hier (au-delà, une date
+// relative se lirait mal -- "il y a 5 jours" n'aide pas à situer un
+// évènement), date absolue avec année sur 2 chiffres sinon.
 function formatEventTime(iso: string) {
   const d = new Date(iso)
-  return d.toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+  const now = new Date()
+  const startOfDay = (date: Date) => new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
+  const diffDays = Math.round((startOfDay(now) - startOfDay(d)) / 86400000)
+  const time = d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
+  if (diffDays === 0) return `Aujourd'hui à ${time}`
+  if (diffDays === 1) return `Hier à ${time}`
+  return `${d.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: '2-digit' })} à ${time}`
 }
 
 // Réponse à une question à choix cliquables posée par une session
@@ -180,8 +193,15 @@ function ValidationBlock({
     setSubmitting(true)
     setError(null)
     try {
+      // Date ET heure (retour de Raphaël, 2026-09-24 : "l'heure de ma
+      // réponse aussi est importante") -- absolues, jamais relatives
+      // ("aujourd'hui") : ce texte est enregistré tel quel dans la
+      // demande, donc encore lu comme ça des mois plus tard.
+      const now = new Date()
+      const dateHeure =
+        `${now.toLocaleDateString('fr-FR')} à ${now.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}`
       const demande =
-        `${request.demande}\n\n--- Correction du ${new Date().toLocaleDateString('fr-FR')} ` +
+        `${request.demande}\n\n--- Correction du ${dateHeure} ` +
         `(cette règle a été codée mais ne fonctionne pas comme attendu) ---\n${precision}`
       await updatePrelevementRuleRequest(orgId, request.id, { demande, statut: 'en_cours' })
       onCorrected(demande)
@@ -508,8 +528,8 @@ function CertifiedRuleCard({
           <RuleHistory request={r} />
           <div className="flex items-center justify-between">
             <span className="text-[var(--muted)]">
-              Créée le {formatEventTime(r.created_at)}
-              {r.updated_at !== r.created_at && ` -- modifiée le ${formatEventTime(r.updated_at)}`}
+              Créée : {formatEventTime(r.created_at)}
+              {r.updated_at !== r.created_at && ` -- modifiée : ${formatEventTime(r.updated_at)}`}
             </span>
             {confirmingDelete ? (
               <span className="flex items-center gap-1">
@@ -658,6 +678,15 @@ function RuleCard({
           </div>
         )}
       </div>
+      {/* Ordre chronologique de lecture (retour de Raphaël, 2026-09-24 :
+          "toujours respecter l'ordre chronologique [...] et en dernier
+          le bloc de réponses utilisateur") : l'historique (le passé,
+          replié) d'abord, puis en tout dernier le bloc où une réponse
+          est attendue MAINTENANT -- c'est l'évènement le plus récent de
+          la carte, il doit rester en bas, pas coincé avant l'historique. */}
+      <div className="mt-1">
+        <RuleHistory request={r} />
+      </div>
       {pendingQuestions.map((q) => (
         <RuleQuestionBlock key={q.id} orgId={orgId} requestId={r.id} question={q} onAnswered={onQuestionAnswered} />
       ))}
@@ -670,13 +699,10 @@ function RuleCard({
           onCorrected={(demande) => onCorrected(r.id, demande)}
         />
       )}
-      <div className="mt-1">
-        <RuleHistory request={r} />
-      </div>
       <div className="mt-1 flex items-center justify-between text-xs">
         <span className="text-[var(--muted)]">
-          Créée le {formatEventTime(r.created_at)}
-          {r.updated_at !== r.created_at && ` -- modifiée le ${formatEventTime(r.updated_at)}`}
+          Créée : {formatEventTime(r.created_at)}
+          {r.updated_at !== r.created_at && ` -- modifiée : ${formatEventTime(r.updated_at)}`}
         </span>
         {confirmingDelete ? (
           <span className="flex items-center gap-1">

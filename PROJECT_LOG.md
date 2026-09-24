@@ -4469,3 +4469,51 @@ statut au lieu d'une bordure pleine. Vérifié avec le CSS réellement
 compilé (capture Playwright statique) -- l'écran authentifié réel n'a
 pas pu être ouvert dans cet environnement (pas d'identifiants Supabase
 disponibles ici).
+
+### PR #95 : 6 corrections de règles, demandes du père de Raphaël (2026-09-24)
+
+Traite 6 des 8 demandes de modification de règles ouvertes (corrections
+du 24/09 sur des règles codées le 22/09) : Exclusions ("Mode de
+paiement" n'exclut plus le mandat), Optilife (seuil date d'effet RCUR
+>= aujourd'hui + 2 jours), délai minimum avant le 1er prélèvement (3
+jours calendaires -> 4 jours ouvrés, nouveau `add_business_days`),
+"Statut" du fichier de mandats toujours "actif", IBAN (longueur exacte
+27 caractères en plus du mod-97), BIC (longueur finale exacte 11
+caractères). Les 2 demandes restantes (interrupteur activer/désactiver
+une règle, export CRM) non traitées : la première est un gros chantier
+à part (texte de la demande lui-même), la seconde a 3 points ambigus --
+questions à choix cliquables postées sur la demande plutôt que devinées
+sur un fichier bancaire. `pytest tests/test_prelevement.py` : 68 passés
+(7 nouveaux tests). Déployé et vérifié `live` (API + front, commit de
+merge `5b08e43`).
+
+### PR #96 : règles certifiées compactées + résumé simple + historique chronologique (2026-09-24)
+
+Raphaël : "avoir visuellement une règle qui fonctionne avec le titre et
+le résumé en vert certifié et compacté [...] seulement si on déplie, on
+voit ce qu'il y a avant" -- même logique de compaction pour l'historique
+question/réponse, "trop dépassé" visuellement. Nouvelle colonne `resume`
+(texte libre, éditable) sur `prelevement_rule_requests`. Carte
+compacte (`CertifiedRuleCard`) pour le bac "✅ Actif" : titre + résumé
+en vert visibles d'entrée, "Détails" déplie la demande d'origine,
+signaler un problème et l'historique. `RuleHistory` remplace
+`AnsweredQuestions` + `ActivityFeed` par une seule liste triée
+chronologiquement (questions répondues + messages d'activité), repliée
+par défaut sur toutes les cartes. Backfill : résumé écrit pour les 11
+règles déjà certifiées à ce jour. `pytest tests/` (hors e2e) : 526
+passés. `npm run build` : ok.
+
+**Question de Raphaël restée ouverte (24/09)** : le cycle
+question/réponse sur une demande de règle peut-il être plus rapide que
+le passage systématique par push + merge sur `main` + déploiement
+Render ? Réponse donnée dans la session : poser une question à choix
+cliquables et recevoir la réponse est déjà instantané aujourd'hui (pur
+échange de données via l'API déjà déployée, `prelevement_rule_request_questions`)
+-- aucun push nécessaire pour ça. Ce qui reste forcément lent, c'est
+l'étape suivante quand la réponse implique un vrai changement de code
+(règle métier ou nouvelle fonctionnalité d'écran) : ça reste soumis au
+cycle code + tests + PR + merge + déploiement Render (quelques minutes
+de build, observé sur les PR #95/#96). Pas de solution plus rapide
+identifiée pour cette partie sans changer l'architecture (règles en dur
+dans le code, pas un moteur de règles piloté par données) -- un tel
+changement serait un chantier à part, pas décidé ici.

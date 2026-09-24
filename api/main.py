@@ -2588,6 +2588,40 @@ def _build_prelevement_generate_response(
     df_exclus = pd.DataFrame(
         [{"Référence client": e.reference_client, "Nom": e.nom, "Raison": e.raison} for e in result.exclus]
     )
+    # Onglet "export CRM" (demande du père de Raphaël, 24/09/2026) : une
+    # ligne par CLIENT (résumé), colonnes dans l'ordre exact de sa
+    # demande -- voir ExportCrmRow/generate_mandats pour les sources.
+    def _export_crm_dict(e):
+        return {
+            "Référence du client": e.reference_client,
+            "RUM": e.rum,
+            "Statut": e.statut,
+            "Date création": e.date_creation,
+            "Créateur": e.createur,
+            "Nom complet": e.nom_complet,
+            "Téléphone": e.telephone,
+            "Mobile": e.mobile,
+            "Adresse complète": e.adresse_complete,
+            "IBAN": e.iban,
+            "BIC": e.bic,
+            "IBAN VALIDATOR": e.iban_validator,
+            "Type de prélèvement": e.type_prelevement,
+            "Périodicité (Mensuel/trimestre/annuel)": e.periodicite,
+            "Date prélèvement": e.date_prelevement,
+            "Date de premier prélèvement": e.date_premier_prelevement,
+            "Optilife&Optivie": e.optilife_optivie,
+            "Carte MGS": e.carte_mgs,
+            "MYJURIS & MYHOSPI": e.myjuris_myhospi,
+            "Admin & Aide a dom": e.admin_aide_a_dom,
+            "Auditif": e.auditif,
+            "IMMO": e.immo,
+            "Total frais de dossier": e.total_frais_dossier,
+            "Total cotisation et frais de dossier": e.total_cotisation_et_frais_dossier,
+            "Montant à prélever": e.montant_a_prelever,
+            "Motif": e.motif,
+        }
+
+    df_export_crm = pd.DataFrame([_export_crm_dict(e) for e in result.export_crm])
 
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
@@ -2602,6 +2636,9 @@ def _build_prelevement_generate_response(
         )
         (df_exclus if not df_exclus.empty else pd.DataFrame(columns=["Aucune ligne exclue"])).to_excel(
             writer, index=False, sheet_name="Exclus",
+        )
+        (df_export_crm if not df_export_crm.empty else pd.DataFrame(columns=["Aucun client"])).to_excel(
+            writer, index=False, sheet_name="export CRM",
         )
     buffer.seek(0)
 
@@ -2633,6 +2670,7 @@ def _build_prelevement_generate_response(
         "n_first": len(result.ooff),
         "n_rcur": len(result.rcur),
         "n_fusions": n_fusions,
+        "n_export_crm": len(result.export_crm),
     }
     # Signalement des mandats sans AUCUN numéro (ni Téléphone ni Mobile
     # trouvés sur la ligne CRM) -- décision de Raphaël (2026-09-22) : ne

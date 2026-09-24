@@ -214,6 +214,46 @@ class ExclusionRow:
     raison: str
 
 
+# Onglet "export CRM" (demande du père de Raphaël, 24/09/2026, 3
+# questions posées et répondues le même jour) : UNE LIGNE PAR MANDAT --
+# comme les onglets FRST/RCUR, un client avec 2 produits actifs donne 2
+# lignes. Sa réponse initiale à la question de granularité ("une ligne
+# par client") était une erreur de frappe, corrigée par lui le jour
+# même en "une ligne par mandat". Colonnes dans l'ordre exact de sa
+# demande. Sources documentées dans generate_mandats, au point où
+# chaque champ est construit -- jamais une valeur devinée : ce qui n'a
+# aucune source dans le CRM reste vide (même discipline que
+# Date_fin/Reference_facture côté mandats).
+@dataclass
+class ExportCrmRow:
+    reference_client: str
+    rum: str
+    statut: str
+    date_creation: str
+    createur: str
+    nom_complet: str
+    telephone: str
+    mobile: str
+    adresse_complete: str
+    iban: str
+    bic: str
+    iban_validator: str
+    type_prelevement: str
+    periodicite: str
+    date_prelevement: str
+    date_premier_prelevement: str
+    optilife_optivie: float
+    carte_mgs: float
+    myjuris_myhospi: float
+    admin_aide_a_dom: float
+    auditif: float
+    immo: float
+    total_frais_dossier: float
+    total_cotisation_et_frais_dossier: float
+    montant_a_prelever: float
+    motif: str
+
+
 @dataclass
 class GenerationResult:
     # Tous les mandats (FRST + RCUR), dans l'ordre de génération -- pour
@@ -224,6 +264,7 @@ class GenerationResult:
     ooff: list[MandatRow] = field(default_factory=list)
     rcur: list[MandatRow] = field(default_factory=list)
     exclus: list[ExclusionRow] = field(default_factory=list)
+    export_crm: list[ExportCrmRow] = field(default_factory=list)
 
 
 def normalize_iban(raw: object) -> str:
@@ -687,6 +728,77 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
             result.mandats.append(mandat_rcur)
             result.rcur.append(mandat_rcur)
 
+            # Ligne "export CRM" de CE mandat (bundle) -- une ligne par
+            # MANDAT, pas par client (correction de Raphaël, 24/09/2026 :
+            # sa réponse initiale "une ligne par client" était une erreur
+            # de frappe, corrigée en "une ligne par mandat" -- "comme les
+            # onglets FRST/RCUR, un client avec 2 produits = 2 lignes").
+            # Sources par colonne :
+            # - Référence client/RUM/IBAN/BIC/Nom complet/Téléphone/
+            #   Mobile : mêmes valeurs que ce mandat FRST/RCUR.
+            # - Statut, Type de prélèvement, Date création : colonnes
+            #   brutes du CRM (COL_STATUT/COL_TYPE_PRELEVEMENT/
+            #   COL_DATE_CREATION), jamais exploitées ailleurs dans le
+            #   moteur -- passées telles quelles.
+            # - Créateur : AUCUNE colonne source dans le CRM -- laissé
+            #   vide, jamais inventé (même discipline que Date_fin côté
+            #   mandats).
+            # - IBAN VALIDATOR : toujours "OK" -- un IBAN invalide exclut
+            #   le client bien avant ce point.
+            # - Adresse complète : Adresse + Code postal + Ville combinés
+            #   (la demande ne les sépare pas, contrairement au fichier
+            #   mandats).
+            # - Date de premier prélèvement = date du FRST de CE mandat ;
+            #   Date prélèvement = date du RCUR qui en découle (les deux
+            #   dates réelles et distinctes du même mandat, maintenant
+            #   qu'une ligne = un mandat et non plus un résumé client).
+            # - Montant à prélever = montant RCUR de CE mandat (réponse
+            #   confirmée "Total RCUR (produits seuls, sans frais)").
+            # - Optilife&Optivie...IMMO : seul(s) le/les produit(s) DE CE
+            #   mandat a/ont un montant, les autres colonnes produit
+            #   restent à 0 -- un mandat cumulé (ex. MYJURIS+IMMO) peut
+            #   avoir plusieurs colonnes renseignées en même temps.
+            # - Motif : celui de ce seul mandat (plus de concaténation,
+            #   il n'y a qu'un motif par ligne désormais).
+            result.export_crm.append(ExportCrmRow(
+                reference_client=ref_client,
+                rum=rum,
+                statut=str(_get(row, COL_STATUT, keyed) or ""),
+                date_creation=date_signature.strftime("%d/%m/%Y"),
+                createur="",
+                nom_complet=nom,
+                telephone=str(_get(row, COL_TELEPHONE, keyed) or ""),
+                mobile=str(_get(row, COL_MOBILE, keyed) or ""),
+                adresse_complete=", ".join(
+                    p for p in [
+                        str(_get(row, COL_ADRESSE, keyed) or "").strip(),
+                        " ".join(
+                            p2 for p2 in [
+                                str(_get(row, COL_CODE_POSTAL, keyed) or "").strip(),
+                                str(_get(row, COL_VILLE, keyed) or "").strip(),
+                            ] if p2
+                        ),
+                    ] if p
+                ),
+                iban=iban,
+                bic=bic,
+                iban_validator="OK",
+                type_prelevement=str(_get(row, COL_TYPE_PRELEVEMENT, keyed) or ""),
+                periodicite=str(periodicite_effective or ""),
+                date_prelevement=mandat_rcur.date_premiere_echeance,
+                date_premier_prelevement=mandat_frst.date_premiere_echeance,
+                optilife_optivie=round(amounts[COL_OPTILIFE] if COL_OPTILIFE in b["cols"] else 0.0, 2),
+                carte_mgs=round(amounts[COL_CARTE_MGS] if COL_CARTE_MGS in b["cols"] else 0.0, 2),
+                myjuris_myhospi=round(amounts[COL_MYJURIS] if COL_MYJURIS in b["cols"] else 0.0, 2),
+                admin_aide_a_dom=round(amounts[COL_ADMIN_AIDE] if COL_ADMIN_AIDE in b["cols"] else 0.0, 2),
+                auditif=round(amounts[COL_AUDITIF] if COL_AUDITIF in b["cols"] else 0.0, 2),
+                immo=round(amounts[COL_IMMO] if COL_IMMO in b["cols"] else 0.0, 2),
+                total_frais_dossier=round(frais, 2),
+                total_cotisation_et_frais_dossier=mandat_frst.montant_eur,
+                montant_a_prelever=mandat_rcur.montant_eur,
+                motif=mandat_frst.motif,
+            ))
+
     # Tri du fichier de sortie (Raphaël, 2026-09-22, "tri fichier") :
     # par nom du client, puis par ordre des produits (Optilife, puis
     # MGS, puis le cumul des ordres cartes -- même ordre canonique que
@@ -706,6 +818,7 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
     result.mandats.sort(key=_cle_tri)
     result.ooff.sort(key=_cle_tri)
     result.rcur.sort(key=_cle_tri)
+    result.export_crm.sort(key=lambda e: (e.nom_complet.strip().lower(), _rang_motif(e.motif)))
 
     return result
 

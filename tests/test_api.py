@@ -2105,7 +2105,7 @@ def test_prelevement_generate_returns_mandat_rows_and_file_for_preview(client_fa
     export_crm_sheet = wb["export CRM"]
     header = [c.value for c in export_crm_sheet[1]]
     assert header[:3] == ["Référence du client", "RUM", "Statut"]
-    assert export_crm_sheet.max_row == 2  # en-tête + 1 client
+    assert export_crm_sheet.max_row == 2  # en-tête + 1 mandat (1 seul produit actif dans la fixture)
 
 
 def test_prelevement_generate_mandat_columns_match_requested_order(client_factory):

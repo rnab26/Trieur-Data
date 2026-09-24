@@ -285,6 +285,14 @@ function ValidationBlock({
 // principe d'affichage compact : date + contenu, une ligne.
 type HistoryItem = { ts: string; node: ReactNode }
 
+// Retour de Raphaël (2026-09-24) : "il faut toujours mettre de qui vient
+// quel message [...] sinon on ne s'en sort pas, on ne comprend pas qui
+// dit quoi" -- chaque ligne de l'historique porte désormais qui parle
+// (🤖 une session Claude Code qui pose une question ou note son
+// avancement, la personne qui répond côté écran). Une session Claude
+// Code qui écrit un message d'activité (prelevement_rule_request_events)
+// doit rester courte et synthétique -- ce fil n'est pas un journal de
+// debug, jamais un pavé de texte.
 function buildHistory(r: PrelevementRuleRequest): HistoryItem[] {
   const items: HistoryItem[] = []
   for (const q of r.questions) {
@@ -293,15 +301,15 @@ function buildHistory(r: PrelevementRuleRequest): HistoryItem[] {
       ts: q.answered_at,
       node: (
         <>
-          <p className="text-[var(--muted)]">{q.question}</p>
-          <p className="mt-0.5 font-medium">→ {q.answer}</p>
+          <p className="text-[var(--muted)]">🤖 Claude a demandé : {q.question}</p>
+          <p className="mt-0.5 font-medium">🙋 Réponse : {q.answer}</p>
           {q.comment && <p className="mt-0.5 text-[var(--muted)]">Précision : {q.comment}</p>}
         </>
       ),
     })
   }
   for (const e of r.events) {
-    items.push({ ts: e.created_at, node: <p>{e.message}</p> })
+    items.push({ ts: e.created_at, node: <p>🤖 {e.message}</p> })
   }
   return items.sort((a, b) => a.ts.localeCompare(b.ts))
 }
@@ -311,7 +319,7 @@ function RuleHistory({ request }: { request: PrelevementRuleRequest }) {
   const items = buildHistory(request)
   if (items.length === 0) return null
   return (
-    <div className="mt-1">
+    <div>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -322,7 +330,7 @@ function RuleHistory({ request }: { request: PrelevementRuleRequest }) {
       {open && (
         <ul className="mt-1 flex flex-col gap-1">
           {items.map((item, i) => (
-            <li key={i} className="rounded-lg bg-[var(--card)] p-1.5 text-xs shadow-[var(--ring-card)]">
+            <li key={i} className="rounded-lg bg-[var(--card)] p-1 text-xs shadow-[var(--ring-card)]">
               <span className="text-[var(--muted)]">{formatEventTime(item.ts)}</span>
               <div className="mt-0.5">{item.node}</div>
             </li>
@@ -349,6 +357,26 @@ function EditPencil({ onClick, title }: { onClick: () => void; title: string }) 
       className="shrink-0 rounded p-0.5 text-xs text-[var(--muted)] hover:text-[var(--foreground)]"
     >
       ✏️
+    </button>
+  )
+}
+
+// Déclencheur de suppression léger (retour de Raphaël, 2026-09-24 : "pas
+// obligé de mettre un truc rouge dégueulasse [...] une petite corbeille
+// et un petit encadrement rouge, ça suffit") -- un simple contour rouge
+// fin, pas le gros bouton plein rouge du composant Button (pensé pour
+// une action primaire, 44px de haut). La confirmation avant suppression
+// réelle (boutons "Confirmer"/"Annuler", gérée par le parent via
+// confirmingDelete) est inchangée -- seul ce déclencheur devient discret.
+function DeleteTrigger({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title="Supprimer"
+      className="shrink-0 rounded p-1 text-xs text-[var(--danger)] shadow-[inset_0_0_0_1px_var(--danger)] hover:bg-[var(--danger)]/10"
+    >
+      🗑️
     </button>
   )
 }
@@ -472,13 +500,13 @@ function CertifiedRuleCard({
         />
       )}
       {open && (
-        <div className="mt-1.5 flex flex-col gap-1.5 border-t border-[var(--border)] pt-1.5 text-xs">
+        <div className="mt-1 flex flex-col gap-1 border-t border-[var(--border)] pt-1 text-xs">
           <div>
-            <p className="mb-0.5 font-medium text-[var(--muted)]">Demande d'origine :</p>
+            <p className="font-medium text-[var(--muted)]">Demande d'origine :</p>
             <p className="whitespace-pre-wrap text-[var(--foreground)]">{r.demande}</p>
           </div>
           <RuleHistory request={r} />
-          <div className="mt-0.5 flex items-center justify-between">
+          <div className="flex items-center justify-between">
             <span className="text-[var(--muted)]">
               Créée le {formatEventTime(r.created_at)}
               {r.updated_at !== r.created_at && ` -- modifiée le ${formatEventTime(r.updated_at)}`}
@@ -493,9 +521,7 @@ function CertifiedRuleCard({
                 </Button>
               </span>
             ) : (
-              <Button variant="danger" onClick={() => onConfirmDeleteToggle(r.id)}>
-                🗑️
-              </Button>
+              <DeleteTrigger onClick={() => onConfirmDeleteToggle(r.id)} />
             )}
           </div>
         </div>
@@ -644,7 +670,9 @@ function RuleCard({
           onCorrected={(demande) => onCorrected(r.id, demande)}
         />
       )}
-      <RuleHistory request={r} />
+      <div className="mt-1">
+        <RuleHistory request={r} />
+      </div>
       <div className="mt-1 flex items-center justify-between text-xs">
         <span className="text-[var(--muted)]">
           Créée le {formatEventTime(r.created_at)}
@@ -660,9 +688,7 @@ function RuleCard({
             </Button>
           </span>
         ) : (
-          <Button variant="danger" onClick={() => onConfirmDeleteToggle(r.id)}>
-            🗑️
-          </Button>
+          <DeleteTrigger onClick={() => onConfirmDeleteToggle(r.id)} />
         )}
       </div>
     </li>

@@ -2943,6 +2943,11 @@ def post_prelevement_rule_request(
 class PrelevementRuleRequestUpdate(BaseModel):
     titre: Optional[str] = None
     demande: Optional[str] = None
+    # Résumé en langage simple, affiché à la place de `demande` sur une
+    # carte certifiée (Raphaël, 2026-09-24). Chaîne vide autorisée pour
+    # effacer un résumé déjà écrit -- seul `None` (champ absent) signifie
+    # "ne pas toucher".
+    resume: Optional[str] = None
     statut: Optional[str] = None
 
 
@@ -2962,6 +2967,8 @@ def patch_prelevement_rule_request(
         if not demande:
             raise HTTPException(status_code=400, detail="Demande vide.")
         data["demande"] = demande
+    if body.resume is not None:
+        data["resume"] = body.resume.strip()
     if body.statut is not None:
         if body.statut not in RULE_REQUEST_STATUTS:
             raise HTTPException(status_code=400, detail="Statut invalide.")

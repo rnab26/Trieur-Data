@@ -2548,6 +2548,39 @@ def test_prelevement_rule_requests_patch_statut_and_text(client_factory):
     assert res.json()["statut"] == "valide"
 
 
+def test_prelevement_rule_requests_patch_resume(client_factory):
+    """Résumé en langage simple (2026-09-24, "un résumé simple et clair,
+    facile à comprendre") -- éditable séparément du texte de la demande,
+    et effaçable (chaîne vide), sans toucher au reste."""
+    fake = _make_client(profiles=[ADMIN_PROFILE])
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    created = tc.post(
+        "/orgs/org-1/prelevement/rule-requests",
+        json={"titre": "Frais VETO", "demande": "Passer à 25€"},
+        headers=headers,
+    ).json()
+    assert created.get("resume") is None
+
+    res = tc.patch(
+        f"/orgs/org-1/prelevement/rule-requests/{created['id']}",
+        json={"resume": "Les frais vétérinaires prélevés sont maintenant de 25€."},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["resume"] == "Les frais vétérinaires prélevés sont maintenant de 25€."
+    assert body["demande"] == "Passer à 25€"  # texte inchangé
+
+    res = tc.patch(
+        f"/orgs/org-1/prelevement/rule-requests/{created['id']}",
+        json={"resume": ""},
+        headers=headers,
+    )
+    assert res.status_code == 200
+    assert res.json()["resume"] == ""
+
+
 def test_prelevement_rule_requests_patch_accepts_a_verifier_statut(client_factory):
     """Nouveau statut (2026-09-22, "vrai système question réponse [...]
     bouton validé par l'admin fonctionnel sinon bouton à corriger") :

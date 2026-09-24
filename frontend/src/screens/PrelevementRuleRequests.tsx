@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -9,7 +9,6 @@ import {
   listPrelevementRuleRequests,
   updatePrelevementRuleRequest,
   type PrelevementRuleRequest,
-  type RuleRequestEvent,
   type RuleRequestQuestion,
   type RuleRequestStatut,
 } from '@/lib/api'
@@ -25,24 +24,6 @@ import {
 function formatEventTime(iso: string) {
   const d = new Date(iso)
   return d.toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
-}
-
-function ActivityFeed({ events }: { events: RuleRequestEvent[] }) {
-  if (events.length === 0) return null
-  const sorted = [...events].sort((a, b) => a.created_at.localeCompare(b.created_at))
-  return (
-    <div className="mt-2 rounded-lg bg-[var(--muted-bg)] p-3 shadow-[var(--ring-card)]">
-      <p className="mb-1 text-xs font-medium text-[var(--muted)]">💬 Ce que je fais sur cette demande</p>
-      <ul className="flex flex-col gap-1">
-        {sorted.map((e) => (
-          <li key={e.id} className="text-xs">
-            <span className="text-[var(--muted)]">{formatEventTime(e.created_at)}</span>{' '}
-            <span>{e.message}</span>
-          </li>
-        ))}
-      </ul>
-    </div>
-  )
 }
 
 // Réponse à une question à choix cliquables posée par une session
@@ -295,6 +276,177 @@ function ValidationBlock({
   )
 }
 
+// Historique chronologique unifié d'une demande (2026-09-24, Raphaël :
+// "les requêtes, les demandes de modification, les questions, les
+// réponses, les mettre dans l'ordre chronologique [...] uniquement si on
+// souhaite déplier ça") -- remplace les deux blocs séparés
+// AnsweredQuestions + ActivityFeed (l'un au-dessus de l'autre, sans lien
+// temporel entre eux) par une seule liste triée dans le temps, repliée
+// par défaut. Une question répondue et un message d'activité n'ont pas
+// le même contenu (Q/R vs. simple message) mais partagent le même
+// principe d'affichage compact : date + contenu, une ligne.
+type HistoryItem = { ts: string; node: ReactNode }
+
+function buildHistory(r: PrelevementRuleRequest): HistoryItem[] {
+  const items: HistoryItem[] = []
+  for (const q of r.questions) {
+    if (!q.answered_at) continue
+    items.push({
+      ts: q.answered_at,
+      node: (
+        <>
+          <p className="text-[var(--muted)]">{q.question}</p>
+          <p className="mt-0.5 font-medium">→ {q.answer}</p>
+          {q.comment && <p className="mt-0.5 text-[var(--muted)]">Précision : {q.comment}</p>}
+        </>
+      ),
+    })
+  }
+  for (const e of r.events) {
+    items.push({ ts: e.created_at, node: <p>{e.message}</p> })
+  }
+  return items.sort((a, b) => a.ts.localeCompare(b.ts))
+}
+
+function RuleHistory({ request }: { request: PrelevementRuleRequest }) {
+  const [open, setOpen] = useState(false)
+  const items = buildHistory(request)
+  if (items.length === 0) return null
+  return (
+    <div className="mt-2">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="text-xs text-[var(--muted)] hover:text-[var(--foreground)]"
+      >
+        {open ? '▲' : '▼'} Historique ({items.length})
+      </button>
+      {open && (
+        <ul className="mt-1 flex flex-col gap-2">
+          {items.map((item, i) => (
+            <li key={i} className="rounded-lg bg-[var(--card)] p-2 text-xs shadow-[var(--ring-card)]">
+              <span className="text-[var(--muted)]">{formatEventTime(item.ts)}</span>
+              <div className="mt-0.5">{item.node}</div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+// Carte compacte d'une règle certifiée (2026-09-24, Raphaël : "avoir
+// visuellement une règle qui fonctionne avec le titre et le résumé en
+// vert certifié et compacté. Seulement si on déplie, on voit ce qu'il y
+// a avant"). Définie au niveau module (pas dans le corps de
+// PrelevementRuleRequests) : sinon une nouvelle "fonction composant"
+// serait recréée à chaque rendu du parent (le polling 15s en
+// particulier) et React démonterait/remonterait la carte à chaque fois,
+// perdant son état "déplié" -- même bug de fond que celui déjà corrigé
+// pour le scroll (markScroll), juste sur l'ouverture/fermeture au lieu
+// de la position de la page.
+function CertifiedRuleCard({
+  orgId,
+  request: r,
+  savingId,
+  confirmingDelete,
+  onConfirmDeleteToggle,
+  onDelete,
+  onFieldChange,
+  onFieldBlur,
+  onCorrected,
+}: {
+  orgId: string
+  request: PrelevementRuleRequest
+  savingId: string | null
+  confirmingDelete: boolean
+  onConfirmDeleteToggle: (id: string | null) => void
+  onDelete: (id: string) => void
+  onFieldChange: (id: string, field: 'titre' | 'demande' | 'resume', value: string) => void
+  onFieldBlur: (id: string, field: 'titre' | 'demande' | 'resume', value: string, original: string) => void
+  onCorrected: (id: string, demande: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const canReportProblem = r.questions.every((q) => q.answered_at)
+
+  return (
+    <li className="rounded-xl p-3 shadow-[inset_3px_0_0_var(--success),var(--ring-card)] bg-[var(--success)]/5">
+      <div className="flex items-center gap-2">
+        <span title="Certifiée -- ne sera plus retouchée" className="text-lg leading-none">
+          ✅
+        </span>
+        <Input
+          className="min-w-[8rem] flex-1 border-none bg-transparent p-0 font-bold text-[var(--success)] shadow-none"
+          value={r.titre}
+          disabled={savingId === r.id}
+          onChange={(e) => onFieldChange(r.id, 'titre', e.target.value)}
+          onBlur={(e) => onFieldBlur(r.id, 'titre', e.target.value.trim(), r.titre)}
+        />
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="shrink-0 text-xs font-medium text-[var(--muted)] hover:text-[var(--foreground)]"
+        >
+          {open ? '▲ Replier' : '▼ Détails'}
+        </button>
+      </div>
+      <Input
+        className="mt-1 border-none bg-transparent p-0 text-sm text-[var(--success)] shadow-none"
+        placeholder="Résumé simple : à quoi sert cette règle, en une phrase sans jargon…"
+        value={r.resume ?? ''}
+        disabled={savingId === r.id}
+        onChange={(e) => onFieldChange(r.id, 'resume', e.target.value)}
+        onBlur={(e) => onFieldBlur(r.id, 'resume', e.target.value.trim(), r.resume ?? '')}
+      />
+      {open && (
+        <div className="mt-2 flex flex-col gap-2 border-t border-[var(--border)] pt-2">
+          <div>
+            <p className="mb-1 text-xs font-medium text-[var(--muted)]">Demande d'origine :</p>
+            <textarea
+              className="w-full rounded-lg bg-[var(--card)] p-2 text-xs shadow-[var(--ring-card)]"
+              rows={2}
+              value={r.demande}
+              disabled={savingId === r.id}
+              onChange={(e) => onFieldChange(r.id, 'demande', e.target.value)}
+              onBlur={(e) => onFieldBlur(r.id, 'demande', e.target.value.trim(), r.demande)}
+            />
+          </div>
+          {canReportProblem && (
+            <ValidationBlock
+              orgId={orgId}
+              request={r}
+              mode="valide"
+              onValidated={() => {}}
+              onCorrected={(demande) => onCorrected(r.id, demande)}
+            />
+          )}
+          <RuleHistory request={r} />
+          <div className="mt-1 flex items-center justify-between">
+            <span className="text-xs text-[var(--muted)]">
+              Créée le {formatEventTime(r.created_at)}
+              {r.updated_at !== r.created_at && ` -- modifiée le ${formatEventTime(r.updated_at)}`}
+            </span>
+            {confirmingDelete ? (
+              <span className="flex items-center gap-1">
+                <Button variant="danger" disabled={savingId === r.id} onClick={() => onDelete(r.id)}>
+                  Confirmer
+                </Button>
+                <Button variant="secondary" onClick={() => onConfirmDeleteToggle(null)}>
+                  Annuler
+                </Button>
+              </span>
+            ) : (
+              <Button variant="danger" onClick={() => onConfirmDeleteToggle(r.id)}>
+                🗑️
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
+    </li>
+  )
+}
+
 // Statut affiché seulement quand il n'y a AUCUNE question en attente sur
 // la demande -- une question en attente prime toujours sur le statut
 // (voir renderStatutBadge ci-dessous), pour ne jamais laisser croire
@@ -311,38 +463,6 @@ const STATUT_COLOR: Record<RuleRequestStatut, string> = {
   en_cours: 'text-[var(--primary)]',
   a_verifier: 'text-[var(--warning)]',
   valide: 'text-[var(--success)]',
-}
-
-// Retour de Raphaël : certaines réponses données "ne sont pas prises en
-// compte et je ne les retrouve pas" -- une fois répondue, une question
-// disparaît complètement de l'écran (remplacée par le statut), sans
-// aucune trace de ce qui a été répondu. Repliable pour ne pas polluer
-// visuellement une demande déjà validée.
-function AnsweredQuestions({ questions }: { questions: RuleRequestQuestion[] }) {
-  const [open, setOpen] = useState(false)
-  if (questions.length === 0) return null
-  return (
-    <div className="mt-1">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="text-xs text-[var(--muted)] hover:text-[var(--foreground)]"
-      >
-        {open ? '▲' : '▼'} {questions.length} réponse{questions.length > 1 ? 's' : ''} donnée{questions.length > 1 ? 's' : ''}
-      </button>
-      {open && (
-        <ul className="mt-1 flex flex-col gap-2">
-          {questions.map((q) => (
-            <li key={q.id} className="rounded-lg bg-[var(--card)] p-2 text-xs shadow-[var(--ring-card)]">
-              <p className="text-[var(--muted)]">{q.question}</p>
-              <p className="mt-1 font-medium">→ {q.answer}</p>
-              {q.comment && <p className="mt-0.5 text-[var(--muted)]">Précision : {q.comment}</p>}
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  )
 }
 
 // Demandes de modification des règles codées en dur du moteur
@@ -469,7 +589,10 @@ export function PrelevementRuleRequests({
     }
   }
 
-  async function persist(id: string, patch: Partial<{ titre: string; demande: string; statut: RuleRequestStatut }>) {
+  async function persist(
+    id: string,
+    patch: Partial<{ titre: string; demande: string; resume: string; statut: RuleRequestStatut }>,
+  ) {
     markScroll()
     setSavingId(id)
     setError(null)
@@ -486,6 +609,18 @@ export function PrelevementRuleRequests({
     } finally {
       setSavingId(null)
     }
+  }
+
+  // Mêmes deux temps que titre/demande dans renderCard (frappe locale
+  // immédiate, sauvegarde au blur) -- factorisés ici pour la carte
+  // certifiée compacte, qui ne peut pas fermer sur setRequests/persist
+  // directement (composant séparé, voir CertifiedRuleCard).
+  function handleFieldChange(id: string, field: 'titre' | 'demande' | 'resume', value: string) {
+    setRequests((prev) => prev.map((x) => (x.id === id ? { ...x, [field]: value } : x)))
+  }
+  function handleFieldBlur(id: string, field: 'titre' | 'demande' | 'resume', value: string, original: string) {
+    if (field !== 'resume' && !value) return // titre/demande jamais vides
+    if (value !== original) void persist(id, { [field]: value })
   }
 
   async function handleDelete(id: string) {
@@ -545,9 +680,11 @@ export function PrelevementRuleRequests({
   const enCours = requests.filter((r) => r.statut !== 'valide')
 
   function renderCard(r: PrelevementRuleRequest) {
+    // Cette carte n'est plus jamais utilisée pour une demande "valide"
+    // (voir CertifiedRuleCard, plus compacte, pour le bac "✅ Actif") --
+    // seuls en_attente/en_cours/a_verifier passent encore par ici.
     const pendingQuestions = r.questions.filter((q) => !q.answered_at)
     const awaitingValidation = pendingQuestions.length === 0 && r.statut === 'a_verifier'
-    const canReportProblem = pendingQuestions.length === 0 && r.statut === 'valide'
     // Thème "Mix" validé par Raphaël (2026-09-22) : compact, mais chaque
     // statut garde une identité claire -- liseré de couleur sur le bord
     // gauche + fond très légèrement teinté (4-5%), au lieu d'une bordure
@@ -562,17 +699,10 @@ export function PrelevementRuleRequests({
       ? 'shadow-[inset_3px_0_0_var(--danger),var(--ring-card)] bg-[var(--danger)]/5'
       : awaitingValidation
         ? 'shadow-[inset_3px_0_0_var(--warning),var(--ring-card)] bg-[var(--warning)]/5'
-        : r.statut === 'valide'
-          ? 'shadow-[inset_3px_0_0_var(--success),var(--ring-card)] bg-[var(--success)]/5'
-          : 'shadow-[var(--ring-card)]'
+        : 'shadow-[var(--ring-card)]'
     return (
       <li key={r.id} className={'rounded-xl p-4 ' + accentClass}>
         <div className="mb-1 flex flex-wrap items-center gap-2">
-          {r.statut === 'valide' && (
-            <span title="Certifiée -- ne sera plus retouchée" className="text-lg leading-none">
-              ✅
-            </span>
-          )}
           <Input
             className="min-w-[10rem] flex-1 font-bold"
             value={r.titre}
@@ -628,12 +758,11 @@ export function PrelevementRuleRequests({
             }}
           />
         ))}
-        <AnsweredQuestions questions={r.questions.filter((q) => q.answered_at)} />
-        {(awaitingValidation || canReportProblem) && (
+        {awaitingValidation && (
           <ValidationBlock
             orgId={orgId}
             request={r}
-            mode={awaitingValidation ? 'a_verifier' : 'valide'}
+            mode="a_verifier"
             onValidated={() => {
               markScroll()
               setRequests((prev) => prev.map((x) => (x.id === r.id ? { ...x, statut: 'valide' } : x)))
@@ -646,7 +775,7 @@ export function PrelevementRuleRequests({
             }}
           />
         )}
-        <ActivityFeed events={r.events} />
+        <RuleHistory request={r} />
         <div className="mt-1 flex items-center justify-between">
           <span className="text-xs text-[var(--muted)]">
             Créée le {formatEventTime(r.created_at)}
@@ -701,7 +830,25 @@ export function PrelevementRuleRequests({
       {!loading && actifs.length > 0 && (
         <div className="mb-3">
           <p className="mb-2 text-xs font-bold text-[var(--success)]">✅ Actif ({actifs.length})</p>
-          <ul className="flex flex-col gap-3">{actifs.map(renderCard)}</ul>
+          <ul className="flex flex-col gap-2">
+            {actifs.map((r) => (
+              <CertifiedRuleCard
+                key={r.id}
+                orgId={orgId}
+                request={r}
+                savingId={savingId}
+                confirmingDelete={confirmingDeleteId === r.id}
+                onConfirmDeleteToggle={setConfirmingDeleteId}
+                onDelete={(id) => void handleDelete(id)}
+                onFieldChange={handleFieldChange}
+                onFieldBlur={handleFieldBlur}
+                onCorrected={(id, demande) => {
+                  markScroll()
+                  setRequests((prev) => prev.map((x) => (x.id === id ? { ...x, demande, statut: 'en_cours' } : x)))
+                }}
+              />
+            ))}
+          </ul>
         </div>
       )}
 

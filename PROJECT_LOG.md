@@ -4517,3 +4517,20 @@ de build, observé sur les PR #95/#96). Pas de solution plus rapide
 identifiée pour cette partie sans changer l'architecture (règles en dur
 dans le code, pas un moteur de règles piloté par données) -- un tel
 changement serait un chantier à part, pas décidé ici.
+
+### PR #97 : cartes vraiment compactes, édition via crayon uniquement (2026-09-24)
+
+Retour direct de Raphaël sur le rendu de la PR #96, jugé "hyper gros,
+hyper épais [...] pas du tout ce que je t'ai demandé" : fond vert sur
+vert supprimé (carte neutre, liseré fin + petit ✅ comme seul élément
+coloré), titre en texte simple qui passe à la ligne (au lieu d'un
+`<input>` qui débordait), titre/résumé/demande plus tapables en
+permanence -- un crayon ✏️ explicite bascule en édition avec un bouton
+"✓ Terminé". Même traitement appliqué aux cartes non certifiées
+(nouveau composant `RuleCard`, même principe que `CertifiedRuleCard`,
+liseré rouge/orange selon l'action attendue) et aux blocs
+question/validation (`RuleQuestionBlock`/`ValidationBlock`, bandeau
+plein remplacé par un encadré fin). Espacements réduits partout.
+Vérifié par une capture Playwright statique du CSS réellement compilé
+avant de pousser (écran authentifié réel non ouvrable dans cet
+environnement). `npm run build` : ok. Déployé et vérifié `live`.

@@ -4602,3 +4602,28 @@ retomber sur "Trieur de Data" par défaut.
 `npm run build` : ok. `pytest tests/` (hors e2e) : 526 passés (changement
 frontend uniquement). Vérifié visuellement (capture Playwright statique,
 CSS réellement compilé). Déployé et vérifié `live`.
+
+### PR #101 : nouvel onglet "export CRM" (2026-09-24)
+
+Traite la demande "export CRM" (dernière des 8 demandes du 22/09, 3
+questions posées et répondues le 24/09). Nouvel onglet Excel "export
+CRM" ajouté au classeur existant (Mandat/FRST/RCUR/Exclus), 26 colonnes
+dans l'ordre exact demandé. Granularité corrigée EN COURS DE ROUTE :
+première implémentation "une ligne par client (résumé)" (réponse
+littérale à la question posée), puis Raphaël a signalé dans le chat que
+sa réponse était une erreur de frappe -- corrigé en "une ligne par
+MANDAT" (comme FRST/RCUR, un client à 2 produits = 2 lignes), ce qui a
+aussi simplifié le calcul (motif/montant/colonnes produit d'un seul
+mandat, plus d'agrégation) et résolu proprement l'ambiguïté "Date
+prélèvement" vs "Date de premier prélèvement" (ce sont les deux vraies
+dates FRST/RCUR du même mandat). Sources des colonnes sans équivalent
+dans le moteur documentées un par un dans `generate_mandats`
+(`ExportCrmRow`) -- "Créateur" reste vide (aucune source), "IBAN
+VALIDATOR" toujours "OK" (un IBAN invalide exclut déjà le client avant
+ce point). `pytest tests/` (hors e2e) : 529 passés (tests dédiés). Un
+test e2e Playwright legacy Streamlit (`test_master_columns_localstorage_fallback`,
+sans rapport avec Prélèvement) a échoué de façon répétée pendant cette
+session -- déjà documenté flaky dans son propre commentaire depuis les
+PR #35/#38/#40, pas retesté davantage. Déployé (API + front) et vérifié
+`live`. Demande passée à `a_verifier` (jamais `valide`, réservé à un
+humain).

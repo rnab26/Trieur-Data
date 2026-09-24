@@ -322,7 +322,7 @@ export function Tab2ImportMapping({
             bien plus rapide et léger que le .xlsx.
           </p>
           {pendingFiles.length > 0 && (
-            <div className="flex flex-col gap-2 rounded-md border border-[var(--border)] p-3">
+            <div className="flex flex-col gap-2 rounded-md shadow-[var(--ring-card)] p-3">
               {pendingFiles.map((f, i) => (
                 <div key={`${f.name}-${i}`} className="flex items-center gap-3 text-sm">
                   {uploading ? (
@@ -364,7 +364,7 @@ export function Tab2ImportMapping({
       {session && !mappingResult && (
         <div className="flex flex-col gap-4">
           {/* [3] Choisir les fichiers et onglets à inclure */}
-          <div className="rounded-md border border-[var(--border)]">
+          <div className="rounded-md shadow-[var(--ring-card)]">
             <button
               type="button"
               onClick={() => setIncludeExpanderOpen((v) => !v)}
@@ -515,7 +515,7 @@ export function Tab2ImportMapping({
           </p>
 
           {mappingResult.iban_warnings.length > 0 && (
-            <div className="rounded-md border border-[var(--danger)] p-3">
+            <div className="rounded-md shadow-[inset_0_0_0_1px_var(--danger)] p-3">
               <p className="text-sm text-[var(--danger)]">
                 ⚠️{' '}
                 {mappingResult.iban_warnings.reduce((n, w) => n + w.n_invalid, 0)} IBAN(s) avec un
@@ -578,7 +578,7 @@ function SheetMappingCard({
   }
 
   return (
-    <div className="rounded-lg border border-[var(--border)] p-3">
+    <div className="rounded-lg shadow-[var(--ring-card)] p-3">
       <h4 className="mb-1 text-sm font-semibold">📄 {sheet.sheet_key}</h4>
       <p className="mb-2 text-xs text-[var(--muted)]">
         {sheet.row_count} ligne(s) | {cols.length} colonne(s) | {sheet.n_duplicates} doublon(s)
@@ -594,7 +594,7 @@ function SheetMappingCard({
         aligné, à la même largeur, au-dessus de sa colonne.
       </p>
 
-      <div className="overflow-x-auto rounded-md border border-[var(--border)]">
+      <div className="overflow-x-auto rounded-md shadow-[var(--ring-card)]">
         <div
           className="grid gap-px bg-[var(--border)]"
           style={{ gridTemplateColumns: gridTemplate, minWidth: `${cols.length * 150}px` }}
@@ -612,7 +612,7 @@ function SheetMappingCard({
                   value={isInvalid ? PIPELINE_UNASSIGNED : current}
                   onChange={(e) => onColumnChange(col, e.target.value)}
                   disabled={autoLoading}
-                  className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-1 text-xs disabled:opacity-60"
+                  className="w-full rounded-md shadow-[var(--ring-card)] bg-[var(--card)] px-2 py-1 text-xs disabled:opacity-60"
                 >
                   {options.map((opt) => (
                     <option key={opt} value={opt}>

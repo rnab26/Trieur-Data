@@ -61,7 +61,7 @@ function CriterionRow({
   return (
     <div className="flex flex-wrap items-center gap-2">
       <select
-        className="rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-2 text-sm"
+        className="rounded-md shadow-[var(--ring-card)] bg-[var(--card)] px-2 py-2 text-sm"
         value={criterion.column}
         onChange={(e) => {
           const column = e.target.value
@@ -377,7 +377,7 @@ export function Tab3FiltrageDedup({
                 {gi > 0 && (
                   <div className="my-1 text-center text-sm font-semibold text-[var(--muted)]">OU</div>
                 )}
-                <div className="rounded-md border border-[var(--border)] p-3">
+                <div className="rounded-md shadow-[var(--ring-card)] p-3">
                   <div className="flex flex-col gap-2">
                     {group.criteria.map((crit, ci) => (
                       <CriterionRow
@@ -443,7 +443,7 @@ export function Tab3FiltrageDedup({
         </p>
       )}
       {!rowsLoading && !rowsError && rows.length > 0 && (
-        <div className="overflow-x-auto rounded-lg border border-[var(--border)]">
+        <div className="overflow-x-auto rounded-lg shadow-[var(--ring-card)]">
           <table className="w-full min-w-max text-sm">
             <thead>
               <tr className="bg-[var(--muted-bg)] text-left">
@@ -489,7 +489,7 @@ export function Tab3FiltrageDedup({
         <div className="flex flex-wrap items-center gap-2">
           <select
             id="dup-col"
-            className="rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-2 text-sm"
+            className="rounded-md shadow-[var(--ring-card)] bg-[var(--card)] px-2 py-2 text-sm"
             value={dupCol}
             onChange={(e) => {
               setDupCol(e.target.value)
@@ -528,12 +528,12 @@ export function Tab3FiltrageDedup({
               const key = g.value ?? ''
               const preview = key ? groupPreviews[key] : undefined
               return (
-                <div key={g.row_ids.join(',')} className="rounded-md border border-[var(--border)] p-3">
+                <div key={g.row_ids.join(',')} className="rounded-md shadow-[var(--ring-card)] p-3">
                   <p className="mb-1 text-sm">
                     <strong>{g.value ?? '(vide)'}</strong> — {g.row_ids.length} lignes
                   </p>
                   {preview && preview.length > 0 && (
-                    <div className="mb-2 overflow-x-auto rounded border border-[var(--border)]">
+                    <div className="mb-2 overflow-x-auto rounded shadow-[var(--ring-card)]">
                       <table className="w-full min-w-max text-xs">
                         <thead>
                           <tr className="bg-[var(--muted-bg)] text-left">
@@ -564,7 +564,7 @@ export function Tab3FiltrageDedup({
                   )}
                   <label className="mb-1 block text-xs text-[var(--muted)]">Ligne à conserver</label>
                   <select
-                    className="w-full rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-2 text-sm sm:w-auto"
+                    className="w-full rounded-md shadow-[var(--ring-card)] bg-[var(--card)] px-2 py-2 text-sm sm:w-auto"
                     value={groupChoices[key] ?? g.suggested_keep_id}
                     onChange={(e) => setGroupChoices((prev) => ({ ...prev, [key]: e.target.value }))}
                   >
@@ -590,7 +590,7 @@ export function Tab3FiltrageDedup({
                 </Button>
               </div>
             ) : (
-              <div className="rounded-md border border-[var(--danger)] p-3">
+              <div className="rounded-md shadow-[inset_0_0_0_1px_var(--danger)] p-3">
                 <p className="text-sm text-[var(--danger)]">
                   ⚠️ Suppression définitive : contrairement à l'ancienne version, cette suppression
                   ne peut plus être annulée une fois confirmée (le staging est modifié directement en
@@ -635,7 +635,7 @@ export function Tab3FiltrageDedup({
                 </Button>
               </div>
             ) : (
-              <div className="rounded-md border border-[var(--danger)] p-3">
+              <div className="rounded-md shadow-[inset_0_0_0_1px_var(--danger)] p-3">
                 <p className="text-sm text-[var(--danger)]">
                   ⚠️ Suppression définitive et non annulable : {dupAnalysis.duplicate_row_count} ligne(s)
                   concernée(s) par des doublons, la règle choisie s'applique à TOUS les groupes.

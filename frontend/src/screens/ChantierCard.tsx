@@ -102,7 +102,7 @@ function QuestionBlock({
 
   if (question.answered_at) {
     return (
-      <div className="rounded-md border border-[var(--border)] bg-[var(--muted-bg)] p-2 text-sm">
+      <div className="rounded-md shadow-[var(--ring-card)] bg-[var(--muted-bg)] p-2 text-sm">
         <p className="text-[var(--muted)]">{question.question}</p>
         <p className="mt-1">
           Ta réponse : <span className="font-medium">{question.answer}</span>
@@ -113,7 +113,7 @@ function QuestionBlock({
   }
 
   return (
-    <div className="rounded-md border border-[var(--primary)] bg-[var(--muted-bg)] p-3 text-sm">
+    <div className="rounded-md shadow-[inset_0_0_0_1px_var(--primary)] bg-[var(--muted-bg)] p-3 text-sm">
       <p className="font-medium">{question.question}</p>
       <div className="mt-2 flex flex-wrap gap-2">
         {question.options.map((option) => (
@@ -267,7 +267,7 @@ export function ChantierCard({
   }
 
   return (
-    <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-3">
+    <div className="rounded-lg shadow-[var(--ring-card)] bg-[var(--card)] p-3">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
           <p className="font-medium text-[var(--foreground)]">{chantier.title}</p>
@@ -277,7 +277,7 @@ export function ChantierCard({
         </div>
         <select
           aria-label={`Statut de ${chantier.title}`}
-          className="rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-1 text-xs text-[var(--foreground)]"
+          className="rounded-md shadow-[var(--ring-card)] bg-[var(--card)] px-2 py-1 text-xs text-[var(--foreground)]"
           value={chantier.status}
           disabled={statusSaving}
           onChange={(e) => void handleStatusChange(e.target.value as ChantierStatus)}

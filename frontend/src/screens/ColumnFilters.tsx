@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button'
 import { FILTER_OPERATORS, type ColFilters, type FilterOperator } from '@/lib/api'
 
 const SELECT_CLASS =
-  'rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-2 text-sm text-[var(--foreground)]'
+  'rounded-md shadow-[var(--ring-card)] bg-[var(--card)] px-2 py-2 text-sm text-[var(--foreground)]'
 
 // Filtres par colonne "façon Google Sheets" -- mirroir de
 // views/tab_database.py:_render_client_list (section "🔎 Filtres par
@@ -69,7 +69,7 @@ export function ColumnFilters({
   }
 
   return (
-    <div className="mb-4 rounded-lg border border-[var(--border)]">
+    <div className="mb-4 rounded-lg shadow-[var(--ring-card)]">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}

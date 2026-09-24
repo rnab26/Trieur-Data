@@ -1113,6 +1113,13 @@ export type PrelevementRuleRequest = {
   org_id: string
   titre: string
   demande: string
+  // Résumé en langage simple (pas de jargon) de ce que fait la règle une
+  // fois active -- affiché à la place de `demande` sur une carte
+  // certifiée, pour ne montrer que "ce que ça fait" et pas comment ça a
+  // été demandé/codé. Vide tant que personne (Raphaël ou une session
+  // Claude Code) ne l'a rempli -- la carte certifiée retombe alors sur le
+  // titre seul.
+  resume: string | null
   statut: RuleRequestStatut
   created_at: string
   updated_at: string
@@ -1151,7 +1158,7 @@ export function createPrelevementRuleRequest(orgId: string, titre: string, deman
 export function updatePrelevementRuleRequest(
   orgId: string,
   requestId: string,
-  patch: Partial<{ titre: string; demande: string; statut: RuleRequestStatut }>,
+  patch: Partial<{ titre: string; demande: string; resume: string; statut: RuleRequestStatut }>,
 ) {
   return request<PrelevementRuleRequest>(`/orgs/${orgId}/prelevement/rule-requests/${requestId}`, {
     method: 'PATCH',

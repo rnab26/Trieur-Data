@@ -1403,7 +1403,7 @@ def create_prelevement_rule_request(
 def update_prelevement_rule_request(
     client: Client, request_id: str, org_id: str, data: dict, user_id: str,
 ) -> dict | None:
-    """`data` : sous-ensemble de {titre, demande, statut} -- fusion
+    """`data` : sous-ensemble de {titre, demande, resume, statut} -- fusion
     partielle, jamais un remplacement de ligne complète (contrairement
     aux réglages Prélèvement) : Raphaël peut éditer le texte d'une
     demande pendant qu'une session Claude Code n'a touché que le statut,

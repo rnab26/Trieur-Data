@@ -155,7 +155,7 @@ export function ImportPanel({
 
           {preview && (
             <>
-              <div className="overflow-x-auto rounded-lg border border-[var(--border)]">
+              <div className="overflow-x-auto rounded-lg shadow-[var(--ring-card)]">
                 <table className="w-full min-w-max text-sm">
                   <thead>
                     <tr className="bg-[var(--muted-bg)] text-left">
@@ -195,7 +195,7 @@ export function ImportPanel({
                 </label>
                 <select
                   id="iban-col"
-                  className="rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm"
+                  className="rounded-md shadow-[var(--ring-card)] bg-[var(--card)] px-3 py-2 text-sm"
                   value={ibanCol}
                   onChange={(e) => setIbanCol(e.target.value)}
                 >
@@ -209,7 +209,7 @@ export function ImportPanel({
               </div>
 
               {preview.unknown_columns.length > 0 && (
-                <div className="rounded-md border border-[var(--border)] bg-[var(--muted-bg)] p-3 text-sm">
+                <div className="rounded-md shadow-[var(--ring-card)] bg-[var(--muted-bg)] p-3 text-sm">
                   <p className="mb-1 font-medium">
                     Colonne(s) inconnue(s) dans ce fichier : {preview.unknown_columns.join(', ')}
                   </p>
@@ -257,7 +257,7 @@ export function ImportPanel({
           </p>
 
           {result.unknown_columns.length > 0 && (
-            <div className="rounded-md border border-[var(--border)] bg-[var(--muted-bg)] p-3 text-sm">
+            <div className="rounded-md shadow-[var(--ring-card)] bg-[var(--muted-bg)] p-3 text-sm">
               {result.added_to_master_columns.length > 0 && (
                 <p>
                   Ajoutée(s) aux colonnes maîtres : {result.added_to_master_columns.join(', ')}

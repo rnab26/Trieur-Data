@@ -190,7 +190,7 @@ export function PipelineScreen() {
             </label>
             <select
               id="pipeline-org-switcher"
-              className="rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm"
+              className="rounded-md shadow-[var(--ring-card)] bg-[var(--card)] px-3 py-2 text-sm"
               value={orgId ?? ''}
               onChange={(e) => handleOrgChange(e.target.value)}
             >

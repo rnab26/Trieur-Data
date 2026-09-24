@@ -844,7 +844,7 @@ export function PrelevementScreen() {
                       </label>
                       <select
                         id="prelevement-nature"
-                        className="rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm"
+                        className="rounded-md shadow-[var(--ring-card)] bg-[var(--card)] px-3 py-2 text-sm"
                         value={nature}
                         onChange={(e) => setNature(e.target.value as 'CORE' | 'B2B')}
                       >
@@ -982,7 +982,7 @@ export function PrelevementScreen() {
                     </div>
 
                     {modelesOpen && (
-                      <div className="rounded-md border border-[var(--border)] bg-[var(--card)] shadow-sm">
+                      <div className="rounded-md bg-[var(--card)] shadow-[var(--ring-card)]">
                         <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-2.5">
                           <span className="text-sm font-bold">🗂️✏️ Modèles tableau</span>
                           <button
@@ -1053,7 +1053,7 @@ export function PrelevementScreen() {
                                       type="button"
                                       onClick={() => startRenamePreset(p)}
                                       aria-label={`Modifier le modèle ${p.name}`}
-                                      className="rounded-md border border-[var(--border)] px-2 py-1 text-xs hover:bg-[var(--muted-bg)]"
+                                      className="rounded-md shadow-[var(--ring-card)] px-2 py-1 text-xs hover:bg-[var(--muted-bg)]"
                                     >
                                       ✏️
                                     </button>
@@ -1062,7 +1062,7 @@ export function PrelevementScreen() {
                                       onClick={() => void handleDeleteColonnesMandatPreset(p.id)}
                                       disabled={deletingPresetId === p.id}
                                       aria-label={`Supprimer le modèle ${p.name}`}
-                                      className="rounded-md border border-[var(--danger)] px-2 py-1 text-xs text-[var(--danger)] hover:bg-[var(--muted-bg)]"
+                                      className="rounded-md shadow-[inset_0_0_0_1px_var(--danger)] px-2 py-1 text-xs text-[var(--danger)] hover:bg-[var(--muted-bg)]"
                                     >
                                       🗑️
                                     </button>
@@ -1104,7 +1104,7 @@ export function PrelevementScreen() {
                             pour masquer.
                           </span>
 
-                          <div className="overflow-x-auto rounded-md border border-[var(--border)]">
+                          <div className="overflow-x-auto rounded-md shadow-[var(--ring-card)]">
                             <DndContext
                               sensors={dndSensors}
                               collisionDetection={closestCenter}
@@ -1160,7 +1160,7 @@ export function PrelevementScreen() {
                           </div>
 
                           {attributingCle && (
-                            <div className="flex flex-col gap-2 rounded-md border border-[var(--border)] bg-[var(--muted-bg)] p-3">
+                            <div className="flex flex-col gap-2 rounded-md shadow-[var(--ring-card)] bg-[var(--muted-bg)] p-3">
                               <span className="text-xs font-bold">
                                 Attribuer une règle à la colonne « {attributingCle} »
                               </span>
@@ -1172,7 +1172,7 @@ export function PrelevementScreen() {
                                       key={r.id}
                                       type="button"
                                       onClick={() => pickExistingRuleForColumn(attributingCle, r.id)}
-                                      className="flex flex-col rounded-md border border-[var(--border)] bg-[var(--card)] px-2.5 py-1 text-left text-xs hover:border-[var(--primary)]"
+                                      className="flex flex-col rounded-md shadow-[var(--ring-card)] bg-[var(--card)] px-2.5 py-1 text-left text-xs hover:border-[var(--primary)]"
                                     >
                                       <span>
                                         {RULE_STATUT_ICON[r.statut]} {r.titre}
@@ -1226,7 +1226,7 @@ export function PrelevementScreen() {
                           )}
 
                           {ruleAttributedNotice && (
-                            <div className="rounded-md border border-[var(--success)] bg-[var(--muted-bg)] p-2.5 text-xs text-[var(--success)]">
+                            <div className="rounded-md shadow-[inset_0_0_0_1px_var(--success)] bg-[var(--muted-bg)] p-2.5 text-xs text-[var(--success)]">
                               ✅ Règle créée -- visible dans "Règles appliquées par le moteur &rsaquo; + nouvelles
                               règles" et traitée à la prochaine session Claude Code. Une fois codée, elle rejoint
                               "Règles appliquées" automatiquement, comme les autres.
@@ -1378,7 +1378,7 @@ export function PrelevementScreen() {
                   <p className="text-xs text-[var(--muted)]">Excel (.xlsx) ou CSV -- plusieurs fichiers possibles</p>
                 </div>
                 {selectedFiles.length > 0 && (
-                  <div className="mt-3 flex flex-col gap-2 rounded-md border border-[var(--border)] p-3">
+                  <div className="mt-3 flex flex-col gap-2 rounded-md shadow-[var(--ring-card)] p-3">
                     <p className="text-sm font-medium text-[var(--foreground)]">
                       ✅ {selectedFiles.length} fichier{selectedFiles.length > 1 ? 's' : ''} sélectionné
                       {selectedFiles.length > 1 ? 's' : ''}
@@ -1416,7 +1416,7 @@ export function PrelevementScreen() {
                 </p>
               )}
               {result && (
-                <div className="flex flex-col gap-3 rounded-md border border-[var(--border)] p-3">
+                <div className="flex flex-col gap-3 rounded-md shadow-[var(--ring-card)] p-3">
                   <p className="text-sm font-medium text-[var(--foreground)]">
                     Résumé du traitement
                   </p>
@@ -1480,7 +1480,7 @@ export function PrelevementScreen() {
                   )}
 
                   {result.telephonesManquants.length > 0 && (
-                    <div className="rounded-md border border-[var(--danger)] bg-[var(--danger)]/10 p-3">
+                    <div className="rounded-md shadow-[inset_0_0_0_1px_var(--danger)] bg-[var(--danger)]/10 p-3">
                       <p className="text-sm font-medium text-[var(--danger)]">
                         ⚠️ {result.telephonesManquants.length} mandat
                         {result.telephonesManquants.length > 1 ? 's' : ''} SANS numéro de téléphone
@@ -1503,7 +1503,7 @@ export function PrelevementScreen() {
                         Aperçu ({Math.min(result.mandats.length, PREVIEW_ROW_LIMIT)} sur{' '}
                         {result.mandats.length} mandat{result.mandats.length > 1 ? 's' : ''})
                       </p>
-                      <div className="overflow-x-auto rounded-md border border-[var(--border)]">
+                      <div className="overflow-x-auto rounded-md shadow-[var(--ring-card)]">
                         <table className="w-full text-xs">
                           <thead>
                             <tr className="border-b border-[var(--border)] bg-[var(--muted-bg,transparent)]">

@@ -320,7 +320,7 @@ export function DatabaseScreen() {
           </label>
           <select
             id="org-switcher"
-            className="rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm"
+            className="rounded-md shadow-[var(--ring-card)] bg-[var(--card)] px-3 py-2 text-sm"
             value={orgId ?? ''}
             onChange={(e) => setOrgId(e.target.value)}
           >
@@ -403,7 +403,7 @@ export function DatabaseScreen() {
           />
 
           {columns.length > 0 && (
-            <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-[var(--border)] p-3">
+            <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg shadow-[var(--ring-card)] p-3">
               <span className="text-sm font-medium">Colonnes affichées</span>
               {columns.map((col) => (
                 <label key={col} className="flex items-center gap-1 text-sm">
@@ -479,7 +479,7 @@ export function DatabaseScreen() {
           )}
 
           {!loading && !error && rows.length > 0 && (
-            <div className="overflow-x-auto rounded-lg border border-[var(--border)]">
+            <div className="overflow-x-auto rounded-lg shadow-[var(--ring-card)]">
               <table className="w-full min-w-max text-sm">
                 <thead>
                   <tr className="bg-[var(--muted-bg)] text-left">

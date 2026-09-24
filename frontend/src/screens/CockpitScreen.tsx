@@ -290,7 +290,7 @@ export function CockpitScreen() {
               </label>
               <select
                 id="cockpit-org-switcher"
-                className="rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)]"
+                className="rounded-md shadow-[var(--ring-card)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)]"
                 value={orgId ?? ''}
                 onChange={(e) => setOrgId(e.target.value)}
               >
@@ -338,7 +338,7 @@ export function CockpitScreen() {
                       onChange={(e) => setNewTitle(e.target.value)}
                     />
                     <select
-                      className="self-start rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)]"
+                      className="self-start rounded-md shadow-[var(--ring-card)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)]"
                       value={newPriority}
                       onChange={(e) => setNewPriority(e.target.value as ChantierPriority)}
                     >
@@ -413,7 +413,7 @@ export function CockpitScreen() {
                   onChange={(e) => setRecherche(e.target.value)}
                 />
                 <select
-                  className="rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)]"
+                  className="rounded-md shadow-[var(--ring-card)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)]"
                   value={filtreStatut}
                   onChange={(e) => setFiltreStatut(e.target.value as 'tous' | ChantierStatus)}
                 >

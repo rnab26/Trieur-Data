@@ -13,7 +13,7 @@ export function ThemeToggle() {
   const { theme, setTheme } = useTheme()
 
   return (
-    <div className="inline-flex overflow-hidden rounded-md border border-[var(--border)]">
+    <div className="inline-flex overflow-hidden rounded-md shadow-[var(--ring-card)]">
       {OPTIONS.map((opt) => (
         <button
           key={opt.value}

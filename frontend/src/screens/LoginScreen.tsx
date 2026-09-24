@@ -50,7 +50,7 @@ export function LoginScreen() {
         </CardHeader>
         <CardContent>
           {sessionExpired && (
-            <p className="mb-3 rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)]">
+            <p className="mb-3 rounded-md shadow-[var(--ring-card)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)]">
               Ta session a expiré ou n'est plus valide. Reconnecte-toi.
             </p>
           )}

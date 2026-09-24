@@ -190,7 +190,7 @@ export function Tab4Export({
           <p className="text-sm">{rowCount} ligne(s) prête(s) à l'export.</p>
 
           {colOrder.length > 0 && (
-            <details className="rounded-md border border-[var(--border)] p-3" open={false}>
+            <details className="rounded-md shadow-[var(--ring-card)] p-3" open={false}>
               <summary className="cursor-pointer text-sm font-medium">
                 🔀 Ordre et sélection des colonnes à l'export ({includedCount}/{colOrder.length} incluse(s))
               </summary>

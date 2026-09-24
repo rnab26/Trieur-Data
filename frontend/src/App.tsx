@@ -104,12 +104,42 @@ class EcranErrorBoundary extends Component<{ children: ReactNode }, { failed: bo
 
 type Ecran = 'database' | 'pipeline' | 'cockpit' | 'prelevement'
 
+const ECRAN_VALIDES: Ecran[] = ['database', 'pipeline', 'cockpit', 'prelevement']
+const ECRAN_STORAGE_KEY = 'trieur_dernier_ecran'
+
+// Retour de Raphaël (2026-09-24) : "quoi qu'il arrive on arrive sur
+// Trieur de data [...] si je suis sur prélèvement, j'ai envie de revenir
+// sur prélèvement" -- mémorise le dernier onglet ouvert (localStorage,
+// pas juste l'état en mémoire) pour qu'un rechargement de page ou une
+// nouvelle visite rouvre là où on était, comme n'importe quelle appli
+// à onglets. Lu une seule fois au montage (lazy initializer) : lire
+// localStorage à chaque rendu serait inutile et un peu plus lent.
+function lireDernierEcran(): Ecran {
+  try {
+    const v = localStorage.getItem(ECRAN_STORAGE_KEY)
+    if (v && (ECRAN_VALIDES as string[]).includes(v)) return v as Ecran
+  } catch {
+    // Stockage indisponible (navigation privée, quota...) -- retombe sur
+    // le comportement précédent plutôt que de bloquer l'écran.
+  }
+  return 'pipeline'
+}
+
 function AppContent() {
   const { session, loading } = useAuth()
   const { isAdmin, loaded: isAdminLoaded } = useIsAdmin(!loading && Boolean(session))
-  // Trieur de Data par défaut (usage quotidien) -- Base de données et
-  // Cockpit restent accessibles via les onglets du haut.
-  const [ecran, setEcran] = useState<Ecran>('pipeline')
+  // Trieur de Data par défaut au tout premier lancement (usage
+  // quotidien) -- ensuite, le dernier onglet ouvert est mémorisé.
+  const [ecran, setEcranState] = useState<Ecran>(lireDernierEcran)
+  function setEcran(next: Ecran) {
+    setEcranState(next)
+    try {
+      localStorage.setItem(ECRAN_STORAGE_KEY, next)
+    } catch {
+      // Idem : navigation privée ou quota -- l'onglet change quand même
+      // pour cette visite, juste pas mémorisé pour la suivante.
+    }
+  }
 
   // Précharge les autres écrans dès que le statut admin est connu (donc
   // dès que la liste d'onglets définitive est connue) -- voir

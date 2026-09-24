@@ -221,7 +221,7 @@ export function PrelevementMandatsPanel({ orgId }: { orgId: string }) {
       )}
 
       {!loading && !error && selectedIds.length > 0 && (
-        <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-3">
+        <div className="rounded-lg shadow-[var(--ring-card)] bg-[var(--card)] p-3">
           <p className="mb-2 text-sm font-medium">{selectedIds.length} ligne(s) sélectionnée(s).</p>
           <div className="flex flex-wrap items-center gap-2">
             {!confirmingDelete ? (
@@ -229,7 +229,7 @@ export function PrelevementMandatsPanel({ orgId }: { orgId: string }) {
                 🗑️ Supprimer la sélection ({selectedIds.length})
               </Button>
             ) : (
-              <div className="flex flex-1 flex-col gap-2 rounded-md border border-[var(--danger)] p-2">
+              <div className="flex flex-1 flex-col gap-2 rounded-md shadow-[inset_0_0_0_1px_var(--danger)] p-2">
                 <p className="text-sm text-[var(--danger)]">
                   Suppression définitive, impossible à annuler après coup.
                 </p>
@@ -257,13 +257,13 @@ export function PrelevementMandatsPanel({ orgId }: { orgId: string }) {
           </div>
 
           {editOpen && (
-            <div className="mt-3 rounded-md border border-[var(--border)] p-3">
+            <div className="mt-3 rounded-md shadow-[var(--ring-card)] p-3">
               <p className="mb-2 text-sm text-[var(--muted)]">
                 Modifier un champ pour les {selectedIds.length} ligne(s) sélectionnée(s).
               </p>
               <div className="flex flex-wrap items-center gap-2">
                 <select
-                  className="rounded-md border border-[var(--border)] bg-[var(--card)] px-2 py-2 text-sm"
+                  className="rounded-md shadow-[var(--ring-card)] bg-[var(--card)] px-2 py-2 text-sm"
                   value={editField || editableColumns[0] || ''}
                   onChange={(e) => setEditField(e.target.value)}
                 >
@@ -286,7 +286,7 @@ export function PrelevementMandatsPanel({ orgId }: { orgId: string }) {
                 )}
               </div>
               {confirmingEdit && (
-                <div className="mt-2 flex flex-col gap-2 rounded-md border border-[var(--danger)] p-2">
+                <div className="mt-2 flex flex-col gap-2 rounded-md shadow-[inset_0_0_0_1px_var(--danger)] p-2">
                   <p className="text-sm text-[var(--danger)]">
                     Remplace « {editField || editableColumns[0]} » pour {selectedIds.length} mandat(s), sans
                     annulation possible après coup.
@@ -315,7 +315,7 @@ export function PrelevementMandatsPanel({ orgId }: { orgId: string }) {
       )}
 
       {!loading && !error && rows.length > 0 && (
-        <div className="overflow-x-auto rounded-lg border border-[var(--border)]">
+        <div className="overflow-x-auto rounded-lg shadow-[var(--ring-card)]">
           <table className="w-full min-w-max text-sm">
             <thead>
               <tr className="bg-[var(--muted-bg)] text-left">

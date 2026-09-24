@@ -71,14 +71,14 @@ export function DedupAlertsPanel({
   if (!alerts || alerts.length === 0) return null
 
   return (
-    <div className="mb-4 rounded-lg border border-[var(--danger)] bg-[var(--card)] p-3">
+    <div className="mb-4 rounded-lg shadow-[inset_0_0_0_1px_var(--danger)] bg-[var(--card)] p-3">
       <p className="mb-3 text-sm font-semibold text-[var(--danger)]">
         ⚠️ {alerts.length} alerte{alerts.length > 1 ? 's' : ''} de doublon IBAN en attente
       </p>
       {resolveError && <p className="mb-2 text-sm text-[var(--danger)]">Erreur : {resolveError}</p>}
       <div className="flex flex-col gap-4">
         {alerts.map((alert) => (
-          <div key={alert.id} className="rounded-md border border-[var(--border)] p-3">
+          <div key={alert.id} className="rounded-md shadow-[var(--ring-card)] p-3">
             <div className="overflow-x-auto">
               <table className="w-full min-w-max text-sm">
                 <thead>

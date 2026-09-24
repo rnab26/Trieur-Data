@@ -145,7 +145,7 @@ export function SavedViews({
   }
 
   return (
-    <div className="mb-4 rounded-lg border border-[var(--border)]">
+    <div className="mb-4 rounded-lg shadow-[var(--ring-card)]">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}

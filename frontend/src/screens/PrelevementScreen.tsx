@@ -227,7 +227,7 @@ export function PrelevementScreen() {
   const [rulesError, setRulesError] = useState<string | null>(null)
   const [ics, setIcs] = useState('')
   const [nature, setNature] = useState<'CORE' | 'B2B'>('CORE')
-  const [delayDays, setDelayDays] = useState(3)
+  const [delayDays, setDelayDays] = useState(4)
   const [fraisSetupEur, setFraisSetupEur] = useState(20)
   // Frais par produit + libellés de périodicité (Raphaël, 2026-09-22) --
   // réglables directement dans l'écran, jamais codés en dur (voir
@@ -854,7 +854,7 @@ export function PrelevementScreen() {
                     </div>
                     <div>
                       <label htmlFor="prelevement-delay" className="mb-1 block text-sm text-[var(--muted)]">
-                        Délai minimum avant le 1er prélèvement (jours)
+                        Délai minimum avant le 1er prélèvement (jours ouvrés)
                       </label>
                       <Input
                         id="prelevement-delay"

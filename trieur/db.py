@@ -1126,13 +1126,14 @@ def get_prelevement_rules(client: Client, org_id: str) -> dict:
         return res.data[0]
     # Pas encore de réglage enregistré pour cet environnement -- les
     # valeurs par défaut du module trieur.prelevement (ICS vide, CORE,
-    # 3 jours, 20€ de frais de dossier par produit), jamais une ligne
-    # vide qui forcerait l'appelant à gérer un cas particulier.
+    # 4 jours ouvrés depuis le 2026-09-24, 20€ de frais de dossier par
+    # produit), jamais une ligne vide qui forcerait l'appelant à gérer
+    # un cas particulier.
     return {
         "org_id": org_id,
         "ics": None,
         "nature": "CORE",
-        "delay_days": 3,
+        "delay_days": 4,
         "frais_setup_eur": 20.0,
         "frais_par_produit": {},
         "periodicites": {},

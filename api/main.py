@@ -214,7 +214,7 @@ MANDAT_COLONNES_NOTES: dict[str, str] = {
     "Jour_prelevement": "Jour du mois de Date_premiere_echeance.",
     "Prochaine_echeance": "Date_premiere_echeance + périodicité du contrat.",
     "Date_fin": "Toujours vide -- aucune source dans le CRM.",
-    "Statut": "Toujours vide -- aucune source dans le CRM.",
+    "Statut": "Toujours \"actif\" -- demande explicite du père de Raphaël (2026-09-24).",
     "Reference_facture": "Règle \"MOTIF -> Référence Facture\" -- même valeur que Motif.",
     "Libelle": "\"intégré le {date de génération du fichier}\".",
     "Référence client": "Copiée telle quelle du CRM.",
@@ -2222,7 +2222,7 @@ def _rules_from_row(rules_row: dict) -> PrelevementRules:
     return PrelevementRules(
         ics=rules_row.get("ics"),
         nature=rules_row.get("nature") or "CORE",
-        delay_days=rules_row.get("delay_days") if rules_row.get("delay_days") is not None else 3,
+        delay_days=rules_row.get("delay_days") if rules_row.get("delay_days") is not None else 4,
         frais_setup_eur=(
             rules_row.get("frais_setup_eur") if rules_row.get("frais_setup_eur") is not None else 20.0
         ),
@@ -2288,7 +2288,7 @@ class ColonneMandat(BaseModel):
 class PrelevementRulesUpdate(BaseModel):
     ics: Optional[str] = None
     nature: str = "CORE"
-    delay_days: int = 3
+    delay_days: int = 4
     frais_setup_eur: float = 20.0
     frais_par_produit: dict[str, float] = {}
     periodicites: dict[str, str] = {}
@@ -2513,9 +2513,12 @@ def _build_prelevement_generate_response(
         # Type_prelevement = FRST/RCUR (type_sequence) ; Frequence_mois
         # = périodicité en mois ; Jour_prelevement = jour du mois de la
         # date de 1er prélèvement ; Prochaine_echeance = cette date +
-        # la périodicité. "Statut", "Reference_facture", "Date_fin"
-        # n'ont AUCUNE source dans le moteur (confirmé par la réponse) :
-        # laissées vides, jamais inventées.
+        # la périodicité. "Reference_facture", "Date_fin" n'ont AUCUNE
+        # source dans le moteur : Date_fin laissée vide, jamais inventée.
+        # "Statut" = toujours "actif" depuis le 2026-09-24 (correction du
+        # père de Raphaël sur la règle codée le 2026-09-22, qui la
+        # laissait vide faute de source -- valeur fixe demandée
+        # explicitement, pas déduite d'une colonne du CRM).
         date_premiere_dt = _parse_date(m.date_premiere_echeance)
         mois_periodicite = _mois_periodicite(m.periodicite)
         prochaine_echeance = _add_months(date_premiere_dt, mois_periodicite) if date_premiere_dt else None
@@ -2543,7 +2546,7 @@ def _build_prelevement_generate_response(
             "Jour_prelevement": date_premiere_dt.day if date_premiere_dt else None,
             "Prochaine_echeance": prochaine_echeance.strftime("%d/%m/%Y") if prochaine_echeance else "",
             "Date_fin": "",
-            "Statut": "",
+            "Statut": "actif",
             # "La règle du MOTIF devient -> Référence Facture" (demande du
             # père de Raphaël, 2026-09-22) : le motif ("MGS-{RUM}{suffixe
             # produit}", déjà calculé par build_motif) EST la référence de

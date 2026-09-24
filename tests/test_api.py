@@ -1557,7 +1557,7 @@ def test_prelevement_rules_defaults_when_never_saved(client_factory):
     assert body["org_id"] == "org-1"
     assert body["ics"] is None
     assert body["nature"] == "CORE"
-    assert body["delay_days"] == 3
+    assert body["delay_days"] == 4
     assert body["frais_setup_eur"] == 20.0
     assert len(body["explication"]) > 0
 
@@ -2130,7 +2130,10 @@ def test_prelevement_generate_mandat_columns_match_requested_order(client_factor
     assert frst["Nom"] == "CLIENT"
     assert frst["Prenom"] == "UN"
     assert frst["ICS_Crediteur"] == ""
-    assert frst["Date_fin"] == "" and frst["Statut"] == ""
+    # "Statut" = toujours "actif" depuis le 2026-09-24 (correction du
+    # père de Raphaël sur la règle codée le 2026-09-22, qui la laissait
+    # vide faute de source dans le CRM).
+    assert frst["Date_fin"] == "" and frst["Statut"] == "actif"
     # "La règle du MOTIF devient -> Référence Facture" (2026-09-22) --
     # même valeur que Motif, jamais vide alors que Motif la contient.
     assert frst["Reference_facture"] == frst["Motif"] != ""

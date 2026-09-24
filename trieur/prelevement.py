@@ -151,7 +151,12 @@ class PrelevementRules:
 
     ics: str | None = None
     nature: str = "CORE"
-    delay_days: int = 3
+    # JOURS OUVRÉS (lundi-vendredi, week-end sauté) depuis le 2026-09-24
+    # (correction du père de Raphaël sur la règle codée le 2026-09-22 :
+    # "passer de 3 à 4 jours ouvrés, il faut donc décaler au-delà si dans
+    # les 4 jours il y a un samedi ou un dimanche") -- voir
+    # add_business_days ci-dessous, jamais un simple +N jours calendaires.
+    delay_days: int = 4
     # Frais de dossier facturés UNE FOIS PAR PRODUIT au 1er prélèvement
     # (jamais sur les suivants) -- confirmé à 20€/produit en croisant le
     # fichier CRM de référence avec le vrai fichier de remise bancaire du
@@ -348,16 +353,31 @@ def _parse_date(raw: object) -> date | None:
     return None
 
 
+def add_business_days(d: date, n: int) -> date:
+    """Ajoute `n` jours OUVRÉS (lundi-vendredi, samedi/dimanche sautés)
+    à `d` -- règle du père de Raphaël (2026-09-24, correction sur le
+    délai du 1er prélèvement) : "il faut décaler au-delà si dans les N
+    jours il y a un samedi ou un dimanche"."""
+    result = d
+    added = 0
+    while added < n:
+        result += timedelta(days=1)
+        if result.weekday() < 5:  # 0=lundi ... 4=vendredi
+            added += 1
+    return result
+
+
 def compute_first_prelevement_date(raw_scheduled: object, today: date, delay_days: int) -> date:
     """La date du 1er prélèvement n'est JAMAIS avant aujourd'hui +
-    délai (3 jours par défaut, toujours le même -- confirmé par
-    Raphaël) : `MAX(TODAY()+3, date_prévue)` dans le fichier de
-    référence. Si aucune date n'était prévue au départ, le client
-    n'est PLUS exclu (changé le 2026-09-22, demande du père de
-    Raphaël, question posée -- réponse : "la date du jour + 3") :
-    utilise directement le plancher aujourd'hui + délai."""
+    délai en JOURS OUVRÉS (4 par défaut depuis le 2026-09-24, voir
+    add_business_days -- avant cette date, 3 jours calendaires) :
+    `MAX(TODAY()+délai_ouvré, date_prévue)`. Si aucune date n'était
+    prévue au départ, le client n'est PAS exclu (changé le 2026-09-22,
+    demande du père de Raphaël, question posée -- réponse : "la date du
+    jour + délai") : utilise directement le plancher aujourd'hui +
+    délai ouvré."""
     scheduled = _parse_date(raw_scheduled)
-    plancher = today + timedelta(days=delay_days)
+    plancher = add_business_days(today, delay_days)
     if scheduled is None:
         return plancher
     return max(plancher, scheduled)
@@ -415,14 +435,35 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
         def exclure(raison: str) -> None:
             result.exclus.append(ExclusionRow(reference_client=ref_client, nom=nom, raison=raison))
 
-        type_prelevement = str(_get(row, COL_TYPE_PRELEVEMENT, keyed) or "").strip()
-        if type_prelevement.lower() != "prélèvement":
-            exclure(f"Mode de paiement \"{type_prelevement or 'non renseigné'}\", pas un prélèvement SEPA")
-            continue
+        # Exclusion sur "Type de prélèvement" != "Prélèvement" RETIRÉE le
+        # 2026-09-24 (correction du père de Raphaël sur la règle codée le
+        # 2026-09-22) : "il faut tout de même conserver le mandat car des
+        # fois ça ne s'affiche pas dans le CRM" -- cette colonne ne fiabilise
+        # plus rien, le mandat est désormais généré quelle que soit sa
+        # valeur (y compris absente).
 
         iban = normalize_iban(_get(row, COL_IBAN, keyed))
-        if not iban or not iban_checksum_valid(iban):
+        # Longueur exacte 27 caractères exigée en plus du checksum mod-97
+        # (correction du père de Raphaël, 2026-09-24, "tester l'IBAN...
+        # vérifier la longueur de l'IBAN 27 caractères") -- tous les
+        # clients de cette activité sont français (Pays toujours "FR"),
+        # un IBAN FR fait toujours 27 caractères ; un IBAN d'une autre
+        # longueur est donc déjà rejeté par iban_checksum_valid dans la
+        # plupart des cas réels, mais cette vérification explicite couvre
+        # aussi un IBAN FR mal formé qui passerait le mod-97 par coïncidence.
+        if not iban or len(iban) != 27 or not iban_checksum_valid(iban):
             exclure("IBAN manquant ou invalide")
+            continue
+
+        bic = pad_bic(_get(row, COL_BIC, keyed))
+        # BIC final toujours exactement 11 caractères (correction du père
+        # de Raphaël, 2026-09-24, "vérifier la longueur du BIC final à 11
+        # caractères fixe") -- pad_bic complète un BIC à 8 caractères,
+        # mais ne peut rien faire d'un BIC d'une autre longueur (9, 10,
+        # 12+) : jamais deviné/tronqué, le mandat part en exclusion comme
+        # pour un IBAN invalide.
+        if bic and len(bic) != 11:
+            exclure("BIC de longueur invalide (11 caractères attendus)")
             continue
 
         rum = str(_get(row, COL_RUM, keyed) or "").strip()
@@ -572,14 +613,16 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
             explication = _explication_periodicite(periodicite_effective, rules.periodicites)
             # Date d'effet -- UNIQUEMENT pour le mandat Optilife, sur la
             # ligne RCUR (déplacé du FRST vers le RCUR le 2026-09-22,
-            # demande du père de Raphaël, question posée et confirmée) :
-            # - date d'effet renseignée ET future (> aujourd'hui) ->
+            # demande du père de Raphaël, question posée et confirmée ;
+            # seuil corrigé le 2026-09-24, la première version codée ne
+            # fonctionnait pas comme attendu) :
+            # - date d'effet renseignée ET >= aujourd'hui + 2 jours ->
             #   date du RCUR = date d'effet + 1 mois.
-            # - sinon (pas de date d'effet, ou déjà passée) -> date du
-            #   RCUR = date du FRST (déjà décalée par la règle "décalage
-            #   remise" ci-dessus si plusieurs mandats) + 1 mois.
+            # - sinon (pas de date d'effet, ou trop proche/passée) -> date
+            #   du RCUR = date du FRST (déjà décalée par la règle
+            #   "décalage remise" ci-dessus si plusieurs mandats) + 1 mois.
             if b["cols"] == [COL_OPTILIFE]:
-                if date_effet_raw is not None and date_effet_raw > today:
+                if date_effet_raw is not None and date_effet_raw >= today + timedelta(days=2):
                     date_rcur = _add_months(date_effet_raw, 1)
                 else:
                     date_rcur = _add_months(date_premiere_ligne, 1)
@@ -592,7 +635,7 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
                 prenom=prenom,
                 rum=rum,
                 iban=iban,
-                bic=pad_bic(_get(row, COL_BIC, keyed)),
+                bic=bic,
                 adresse=str(_get(row, COL_ADRESSE, keyed) or ""),
                 ville=str(_get(row, COL_VILLE, keyed) or ""),
                 code_postal=str(_get(row, COL_CODE_POSTAL, keyed) or ""),
@@ -621,7 +664,7 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
                 prenom=prenom,
                 rum=rum,
                 iban=iban,
-                bic=pad_bic(_get(row, COL_BIC, keyed)),
+                bic=bic,
                 adresse=str(_get(row, COL_ADRESSE, keyed) or ""),
                 ville=str(_get(row, COL_VILLE, keyed) or ""),
                 code_postal=str(_get(row, COL_CODE_POSTAL, keyed) or ""),
@@ -721,15 +764,19 @@ def explain_rules(rules: PrelevementRules) -> list[dict[str, str]]:
         {
             "titre": "Exclusions (jamais envoyé en banque)",
             "detail": (
-                "Mode de paiement autre que \"Prélèvement\" -- IBAN manquant ou "
-                "invalide (contrôle mod-97) -- RUM manquant -- aucun produit "
-                "actif (tous les montants à 0). \"Statut agent IA\" contenant "
-                "\"Refusé\" ou \"Annuler\" retiré des exclusions le 2026-09-22 "
-                "(demande du père de Raphaël, risque signalé et confirmé "
-                "explicitement) ; pas de date de premier prélèvement renseignée "
-                "retiré des exclusions le même jour -- n'exclut plus, voir "
-                "\"Date du premier prélèvement\" ci-dessous pour la date "
-                "utilisée à la place."
+                "IBAN manquant ou invalide (contrôle mod-97 + longueur exacte "
+                "27 caractères) -- BIC final d'une longueur autre que 11 "
+                "caractères -- RUM manquant -- aucun produit actif (tous les "
+                "montants à 0). \"Mode de paiement\" autre que \"Prélèvement\" "
+                "retiré des exclusions le 2026-09-24 (correction du père de "
+                "Raphaël : \"il faut tout de même conserver le mandat car des "
+                "fois ça ne s'affiche pas dans le CRM\") ; \"Statut agent IA\" "
+                "contenant \"Refusé\" ou \"Annuler\" retiré des exclusions le "
+                "2026-09-22 (demande du père de Raphaël, risque signalé et "
+                "confirmé explicitement) ; pas de date de premier prélèvement "
+                "renseignée retiré des exclusions le même jour -- n'exclut "
+                "plus, voir \"Date du premier prélèvement\" ci-dessous pour la "
+                "date utilisée à la place."
             ),
         },
         {
@@ -783,11 +830,12 @@ def explain_rules(rules: PrelevementRules) -> list[dict[str, str]]:
         {
             "titre": "Date du premier prélèvement",
             "detail": (
-                f"Jamais avant aujourd'hui + {rules.delay_days} jour(s) (réglable) : "
-                f"si la date prévue dans le fichier est déjà passée ou trop proche, "
-                f"repoussée à ce délai minimum. Si aucune date n'est renseignée, "
-                f"cette même valeur (aujourd'hui + {rules.delay_days} jour(s)) est "
-                f"utilisée directement, sans exclure le client."
+                f"Jamais avant aujourd'hui + {rules.delay_days} jour(s) OUVRÉS "
+                f"(réglable, week-end sauté) : si la date prévue dans le fichier "
+                f"est déjà passée ou trop proche, repoussée à ce délai minimum. "
+                f"Si aucune date n'est renseignée, cette même valeur (aujourd'hui "
+                f"+ {rules.delay_days} jour(s) ouvrés) est utilisée directement, "
+                f"sans exclure le client."
             ),
         },
         {
@@ -795,10 +843,10 @@ def explain_rules(rules: PrelevementRules) -> list[dict[str, str]]:
             "detail": (
                 "Uniquement pour le mandat Optilife, sur sa ligne RCUR (les "
                 "autres produits, et le FRST Optilife lui-même, gardent la date "
-                "du 1er prélèvement normale) : date d'effet renseignée et future "
-                "(> aujourd'hui) -> date du RCUR = date d'effet + 1 mois. Sinon "
-                "(pas de date d'effet, ou déjà passée) -> date du RCUR = date du "
-                "FRST + 1 mois."
+                "du 1er prélèvement normale) : date d'effet renseignée et >= "
+                "aujourd'hui + 2 jours -> date du RCUR = date d'effet + 1 mois. "
+                "Sinon (pas de date d'effet, ou trop proche/passée) -> date du "
+                "RCUR = date du FRST + 1 mois."
             ),
         },
         {

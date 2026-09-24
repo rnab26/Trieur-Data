@@ -30,6 +30,11 @@ function formatEventTime(iso: string) {
 // Claude Code sur une demande de règle ambiguë -- même principe que
 // ChantierCard/QuestionBlock côté Cockpit. Une réponse libre (le champ
 // commentaire) reste toujours possible en plus des options.
+//
+// Version compacte (2026-09-24, retour de Raphaël sur la 1ère version :
+// "fais-moi un truc propre [...] c'est juste qu'il y a un code couleur
+// qui change") -- un simple encadré fin (contour rouge, pas de bandeau
+// plein pleine largeur) au lieu d'une grosse boîte à bandeau.
 export function RuleQuestionBlock({
   orgId,
   requestId,
@@ -83,13 +88,10 @@ export function RuleQuestionBlock({
   }
 
   return (
-    <div className="mt-2 overflow-hidden rounded-xl shadow-[inset_0_0_0_1.5px_var(--danger)] text-sm">
-      <p className="bg-[var(--danger)] px-4 py-1.5 text-xs font-bold tracking-wide text-white">
-        🔴 RÉPONSE ATTENDUE
-      </p>
-      <div className="p-4">
+    <div className="mt-1.5 rounded-lg p-2 text-xs shadow-[inset_0_0_0_1px_var(--danger)]">
+      <p className="mb-1 font-bold text-[var(--danger)]">🔴 Réponse attendue</p>
       <p className="font-medium">{question.question}</p>
-      <div className="mt-2 flex flex-wrap gap-2">
+      <div className="mt-1.5 flex flex-wrap gap-1.5">
         {question.options.map((option) => (
           <Button
             key={option}
@@ -104,20 +106,19 @@ export function RuleQuestionBlock({
       </div>
       <Input
         ref={inputRef}
-        className="mt-2"
+        className="mt-1.5"
         placeholder={optionAPreciser ? 'Écris ta précision ici, puis valide ci-dessous…' : 'Préciser ta réponse (optionnel)…'}
         value={comment}
         onChange={(e) => setComment(e.target.value)}
       />
       {optionAPreciser && (
-        <div className="mt-2">
+        <div className="mt-1.5">
           <Button type="button" disabled={submitting || !comment.trim()} onClick={handleValiderPrecision}>
             {submitting ? 'Enregistrement…' : '✅ Valider cette réponse'}
           </Button>
         </div>
       )}
-      {error && <p className="mt-1 text-xs text-[var(--danger)]">Erreur : {error}</p>}
-      </div>
+      {error && <p className="mt-1 text-[var(--danger)]">Erreur : {error}</p>}
     </div>
   )
 }
@@ -140,6 +141,9 @@ export function RuleQuestionBlock({
 //   besoin de revalider ce qui l'était déjà.
 // Dans les deux cas, corriger ajoute la précision à LA MÊME demande et
 // repasse son statut à "en_cours" -- jamais une nouvelle ligne.
+//
+// Version compacte (2026-09-24) : même encadré fin que RuleQuestionBlock,
+// contour orange au lieu d'un bandeau plein pleine largeur.
 function ValidationBlock({
   orgId,
   request,
@@ -189,29 +193,27 @@ function ValidationBlock({
 
   if (mode === 'valide') {
     return (
-      <div className="mt-2 text-sm">
+      <div className="mt-1.5 text-xs">
         {!correcting ? (
           <button
             type="button"
             onClick={() => setCorrecting(true)}
-            className="text-xs text-[var(--primary)] hover:underline"
+            className="text-[var(--primary)] hover:underline"
           >
             ✏️ Signaler un problème / demander une correction
           </button>
         ) : (
-          <div className="overflow-hidden rounded-xl shadow-[inset_0_0_0_1.5px_var(--warning)]">
-            <p className="bg-[var(--warning)] px-4 py-1.5 text-xs font-bold tracking-wide text-white">
-              🧪 QU'EST-CE QUI NE VA PAS ?
-            </p>
-            <div className="flex flex-col gap-2 p-4">
+          <div className="rounded-lg p-2 shadow-[inset_0_0_0_1px_var(--warning)]">
+            <p className="mb-1 font-bold text-[var(--warning)]">🧪 Qu'est-ce qui ne va pas ?</p>
+            <div className="flex flex-col gap-1.5">
               <textarea
-                className="w-full rounded-lg bg-[var(--card)] p-2 text-sm shadow-[var(--ring-card)]"
-                rows={3}
+                className="w-full rounded-lg bg-[var(--card)] p-1.5 text-xs shadow-[var(--ring-card)]"
+                rows={2}
                 value={correctionText}
                 onChange={(e) => setCorrectionText(e.target.value)}
                 autoFocus
               />
-              <div className="flex gap-2">
+              <div className="flex gap-1.5">
                 <Button
                   type="button"
                   disabled={submitting || !correctionText.trim()}
@@ -224,7 +226,7 @@ function ValidationBlock({
                 </Button>
               </div>
             </div>
-            {error && <p className="mt-1 text-xs text-[var(--danger)]">Erreur : {error}</p>}
+            {error && <p className="mt-1 text-[var(--danger)]">Erreur : {error}</p>}
           </div>
         )}
       </div>
@@ -232,13 +234,10 @@ function ValidationBlock({
   }
 
   return (
-    <div className="mt-2 overflow-hidden rounded-xl text-sm shadow-[inset_0_0_0_1.5px_var(--warning)]">
-      <p className="bg-[var(--warning)] px-4 py-1.5 text-xs font-bold tracking-wide text-white">
-        🧪 CODÉE ET DÉPLOYÉE — FONCTIONNE-T-ELLE COMME ATTENDU ?
-      </p>
-      <div className="p-4">
+    <div className="mt-1.5 rounded-lg p-2 text-xs shadow-[inset_0_0_0_1px_var(--warning)]">
+      <p className="mb-1 font-bold text-[var(--warning)]">🧪 Codée et déployée — fonctionne-t-elle comme attendu ?</p>
       {!correcting ? (
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-1.5">
           <Button type="button" disabled={submitting} onClick={() => void handleValider()}>
             {submitting ? 'Enregistrement…' : '✅ Ça fonctionne, je certifie'}
           </Button>
@@ -247,16 +246,16 @@ function ValidationBlock({
           </Button>
         </div>
       ) : (
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-1.5">
           <textarea
-            className="w-full rounded-lg bg-[var(--card)] p-2 text-sm shadow-[var(--ring-card)]"
-            rows={3}
+            className="w-full rounded-lg bg-[var(--card)] p-1.5 text-xs shadow-[var(--ring-card)]"
+            rows={2}
             placeholder="Qu'est-ce qui ne va pas ? Sois précis (exemple concret si possible)..."
             value={correctionText}
             onChange={(e) => setCorrectionText(e.target.value)}
             autoFocus
           />
-          <div className="flex gap-2">
+          <div className="flex gap-1.5">
             <Button
               type="button"
               disabled={submitting || !correctionText.trim()}
@@ -270,8 +269,7 @@ function ValidationBlock({
           </div>
         </div>
       )}
-      {error && <p className="mt-1 text-xs text-[var(--danger)]">Erreur : {error}</p>}
-      </div>
+      {error && <p className="mt-1 text-[var(--danger)]">Erreur : {error}</p>}
     </div>
   )
 }
@@ -313,7 +311,7 @@ function RuleHistory({ request }: { request: PrelevementRuleRequest }) {
   const items = buildHistory(request)
   if (items.length === 0) return null
   return (
-    <div className="mt-2">
+    <div className="mt-1">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -322,9 +320,9 @@ function RuleHistory({ request }: { request: PrelevementRuleRequest }) {
         {open ? '▲' : '▼'} Historique ({items.length})
       </button>
       {open && (
-        <ul className="mt-1 flex flex-col gap-2">
+        <ul className="mt-1 flex flex-col gap-1">
           {items.map((item, i) => (
-            <li key={i} className="rounded-lg bg-[var(--card)] p-2 text-xs shadow-[var(--ring-card)]">
+            <li key={i} className="rounded-lg bg-[var(--card)] p-1.5 text-xs shadow-[var(--ring-card)]">
               <span className="text-[var(--muted)]">{formatEventTime(item.ts)}</span>
               <div className="mt-0.5">{item.node}</div>
             </li>
@@ -335,16 +333,37 @@ function RuleHistory({ request }: { request: PrelevementRuleRequest }) {
   )
 }
 
-// Carte compacte d'une règle certifiée (2026-09-24, Raphaël : "avoir
-// visuellement une règle qui fonctionne avec le titre et le résumé en
-// vert certifié et compacté. Seulement si on déplie, on voit ce qu'il y
-// a avant"). Définie au niveau module (pas dans le corps de
+// Bouton crayon compact, toujours le même partout dans ce fichier --
+// clique = entre en édition. Retour de Raphaël (2026-09-24) sur la 1ère
+// version des cartes : titre/résumé/demande ne doivent PLUS être des
+// champs texte directement modifiables en permanence ("je peux écrire
+// tout n'importe quoi, faire des erreurs de manipulation") -- affichage
+// en texte simple par défaut (qui passe à la ligne normalement, contrairement
+// à un <input>), un crayon à côté pour entrer en édition explicitement.
+function EditPencil({ onClick, title }: { onClick: () => void; title: string }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      className="shrink-0 rounded p-0.5 text-xs text-[var(--muted)] hover:text-[var(--foreground)]"
+    >
+      ✏️
+    </button>
+  )
+}
+
+// Carte compacte d'une règle certifiée (2026-09-24, Raphaël : "une petite
+// box légère, pas besoin de mettre tout en vert sur vert -- tu mets juste
+// la règle en noir, un petit logo vérifié/certifié en vert, le titre en
+// gras propre, fin" -- 2e passe après un premier essai jugé "hyper gros,
+// hyper épais"). Définie au niveau module (pas dans le corps de
 // PrelevementRuleRequests) : sinon une nouvelle "fonction composant"
 // serait recréée à chaque rendu du parent (le polling 15s en
 // particulier) et React démonterait/remonterait la carte à chaque fois,
-// perdant son état "déplié" -- même bug de fond que celui déjà corrigé
-// pour le scroll (markScroll), juste sur l'ouverture/fermeture au lieu
-// de la position de la page.
+// perdant son état "déplié"/"en édition" -- même bug de fond que celui
+// déjà corrigé pour le scroll (markScroll), juste sur l'ouverture/
+// fermeture au lieu de la position de la page.
 function CertifiedRuleCard({
   orgId,
   request: r,
@@ -352,7 +371,6 @@ function CertifiedRuleCard({
   confirmingDelete,
   onConfirmDeleteToggle,
   onDelete,
-  onFieldChange,
   onFieldBlur,
   onCorrected,
 }: {
@@ -362,54 +380,85 @@ function CertifiedRuleCard({
   confirmingDelete: boolean
   onConfirmDeleteToggle: (id: string | null) => void
   onDelete: (id: string) => void
-  onFieldChange: (id: string, field: 'titre' | 'demande' | 'resume', value: string) => void
   onFieldBlur: (id: string, field: 'titre' | 'demande' | 'resume', value: string, original: string) => void
   onCorrected: (id: string, demande: string) => void
 }) {
   const [open, setOpen] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [titreDraft, setTitreDraft] = useState(r.titre)
+  const [resumeDraft, setResumeDraft] = useState(r.resume ?? '')
   const canReportProblem = r.questions.every((q) => q.answered_at)
 
+  function startEditing() {
+    setTitreDraft(r.titre)
+    setResumeDraft(r.resume ?? '')
+    setEditing(true)
+  }
+  function finishEditing() {
+    const titre = titreDraft.trim()
+    const resume = resumeDraft.trim()
+    if (titre && titre !== r.titre) onFieldBlur(r.id, 'titre', titre, r.titre)
+    if (resume !== (r.resume ?? '')) onFieldBlur(r.id, 'resume', resume, r.resume ?? '')
+    setEditing(false)
+  }
+
   return (
-    <li className="rounded-xl p-3 shadow-[inset_3px_0_0_var(--success),var(--ring-card)] bg-[var(--success)]/5">
-      <div className="flex items-center gap-2">
-        <span title="Certifiée -- ne sera plus retouchée" className="text-lg leading-none">
+    <li className="rounded-lg px-2.5 py-1.5 shadow-[inset_2px_0_0_var(--success),var(--ring-card)]">
+      <div className="flex items-start gap-1.5">
+        <span title="Certifiée -- ne sera plus retouchée" className="mt-0.5 shrink-0 text-sm leading-none">
           ✅
         </span>
-        <Input
-          className="min-w-[8rem] flex-1 border-none bg-transparent p-0 font-bold text-[var(--success)] shadow-none"
-          value={r.titre}
-          disabled={savingId === r.id}
-          onChange={(e) => onFieldChange(r.id, 'titre', e.target.value)}
-          onBlur={(e) => onFieldBlur(r.id, 'titre', e.target.value.trim(), r.titre)}
-        />
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          className="shrink-0 text-xs font-medium text-[var(--muted)] hover:text-[var(--foreground)]"
-        >
-          {open ? '▲ Replier' : '▼ Détails'}
-        </button>
+        <div className="min-w-0 flex-1">
+          {editing ? (
+            <div className="flex flex-col gap-1">
+              <Input
+                className="font-bold"
+                value={titreDraft}
+                disabled={savingId === r.id}
+                onChange={(e) => setTitreDraft(e.target.value)}
+                autoFocus
+              />
+              <textarea
+                className="w-full rounded-lg bg-[var(--card)] p-1.5 text-xs shadow-[var(--ring-card)]"
+                rows={2}
+                placeholder="Résumé simple : à quoi sert cette règle, en une phrase sans jargon…"
+                value={resumeDraft}
+                disabled={savingId === r.id}
+                onChange={(e) => setResumeDraft(e.target.value)}
+              />
+              <div>
+                <Button type="button" disabled={savingId === r.id || !titreDraft.trim()} onClick={finishEditing}>
+                  ✓ Terminé
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <p className="text-sm font-semibold leading-snug break-words">{r.titre}</p>
+              <p className="text-xs leading-snug text-[var(--muted)]">
+                {r.resume || 'Pas encore de résumé -- clique sur ✏️ pour en ajouter un.'}
+              </p>
+            </>
+          )}
+        </div>
+        {!editing && (
+          <div className="flex shrink-0 items-center gap-1">
+            <EditPencil onClick={startEditing} title="Modifier le titre / le résumé" />
+            <button
+              type="button"
+              onClick={() => setOpen((v) => !v)}
+              className="text-xs text-[var(--muted)] hover:text-[var(--foreground)]"
+            >
+              {open ? '▲' : '▼'}
+            </button>
+          </div>
+        )}
       </div>
-      <Input
-        className="mt-1 border-none bg-transparent p-0 text-sm text-[var(--success)] shadow-none"
-        placeholder="Résumé simple : à quoi sert cette règle, en une phrase sans jargon…"
-        value={r.resume ?? ''}
-        disabled={savingId === r.id}
-        onChange={(e) => onFieldChange(r.id, 'resume', e.target.value)}
-        onBlur={(e) => onFieldBlur(r.id, 'resume', e.target.value.trim(), r.resume ?? '')}
-      />
       {open && (
-        <div className="mt-2 flex flex-col gap-2 border-t border-[var(--border)] pt-2">
+        <div className="mt-1.5 flex flex-col gap-1.5 border-t border-[var(--border)] pt-1.5 text-xs">
           <div>
-            <p className="mb-1 text-xs font-medium text-[var(--muted)]">Demande d'origine :</p>
-            <textarea
-              className="w-full rounded-lg bg-[var(--card)] p-2 text-xs shadow-[var(--ring-card)]"
-              rows={2}
-              value={r.demande}
-              disabled={savingId === r.id}
-              onChange={(e) => onFieldChange(r.id, 'demande', e.target.value)}
-              onBlur={(e) => onFieldBlur(r.id, 'demande', e.target.value.trim(), r.demande)}
-            />
+            <p className="mb-0.5 font-medium text-[var(--muted)]">Demande d'origine :</p>
+            <p className="whitespace-pre-wrap text-[var(--foreground)]">{r.demande}</p>
           </div>
           {canReportProblem && (
             <ValidationBlock
@@ -421,8 +470,8 @@ function CertifiedRuleCard({
             />
           )}
           <RuleHistory request={r} />
-          <div className="mt-1 flex items-center justify-between">
-            <span className="text-xs text-[var(--muted)]">
+          <div className="mt-0.5 flex items-center justify-between">
+            <span className="text-[var(--muted)]">
               Créée le {formatEventTime(r.created_at)}
               {r.updated_at !== r.created_at && ` -- modifiée le ${formatEventTime(r.updated_at)}`}
             </span>
@@ -453,9 +502,9 @@ function CertifiedRuleCard({
 // "en cours de codage" alors qu'une réponse est en fait attendue.
 const STATUT_LABEL: Record<RuleRequestStatut, string> = {
   en_attente: '⏳ Pas encore examinée',
-  en_cours: '🔧 En cours de codage -- rien à faire de ton côté',
-  a_verifier: '🧪 Codée et déployée -- à toi de vérifier',
-  valide: '✅ Certifiée -- ne sera plus retouchée',
+  en_cours: '🔧 En cours de codage',
+  a_verifier: '🧪 Codée -- à vérifier',
+  valide: '✅ Certifiée',
 }
 
 const STATUT_COLOR: Record<RuleRequestStatut, string> = {
@@ -463,6 +512,153 @@ const STATUT_COLOR: Record<RuleRequestStatut, string> = {
   en_cours: 'text-[var(--primary)]',
   a_verifier: 'text-[var(--warning)]',
   valide: 'text-[var(--success)]',
+}
+
+// Carte compacte d'une règle pas encore certifiée (en_attente/en_cours/
+// a_verifier) -- même principe que CertifiedRuleCard (texte simple qui
+// passe à la ligne, édition via un crayon explicite, pas de gros bandeau
+// coloré), juste le code couleur qui change selon ce qui attend une
+// action (Raphaël, 2026-09-24 : "pareil pour les questions [...] c'est
+// juste qu'il y a un code couleur qui change"). Composant au niveau
+// module pour la même raison que CertifiedRuleCard (polling 15s).
+function RuleCard({
+  orgId,
+  request: r,
+  savingId,
+  confirmingDelete,
+  onConfirmDeleteToggle,
+  onDelete,
+  onFieldBlur,
+  onQuestionAnswered,
+  onValidated,
+  onCorrected,
+}: {
+  orgId: string
+  request: PrelevementRuleRequest
+  savingId: string | null
+  confirmingDelete: boolean
+  onConfirmDeleteToggle: (id: string | null) => void
+  onDelete: (id: string) => void
+  onFieldBlur: (id: string, field: 'titre' | 'demande' | 'resume', value: string, original: string) => void
+  onQuestionAnswered: () => void
+  onValidated: (id: string) => void
+  onCorrected: (id: string, demande: string) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [titreDraft, setTitreDraft] = useState(r.titre)
+  const [demandeDraft, setDemandeDraft] = useState(r.demande)
+  const pendingQuestions = r.questions.filter((q) => !q.answered_at)
+  const awaitingValidation = pendingQuestions.length === 0 && r.statut === 'a_verifier'
+  // Contour fin, code couleur seulement (pas de fond teinté) -- rouge =
+  // bloquant, orange = à vérifier, neutre sinon.
+  const accentClass = pendingQuestions.length > 0
+    ? 'shadow-[inset_2px_0_0_var(--danger),var(--ring-card)]'
+    : awaitingValidation
+      ? 'shadow-[inset_2px_0_0_var(--warning),var(--ring-card)]'
+      : 'shadow-[var(--ring-card)]'
+
+  function startEditing() {
+    setTitreDraft(r.titre)
+    setDemandeDraft(r.demande)
+    setEditing(true)
+  }
+  function finishEditing() {
+    const titre = titreDraft.trim()
+    const demande = demandeDraft.trim()
+    if (titre && titre !== r.titre) onFieldBlur(r.id, 'titre', titre, r.titre)
+    if (demande && demande !== r.demande) onFieldBlur(r.id, 'demande', demande, r.demande)
+    setEditing(false)
+  }
+
+  return (
+    <li className={'rounded-lg px-2.5 py-1.5 ' + accentClass}>
+      <div className="flex items-start gap-1.5">
+        <div className="min-w-0 flex-1">
+          {editing ? (
+            <div className="flex flex-col gap-1">
+              <Input
+                className="font-bold"
+                value={titreDraft}
+                disabled={savingId === r.id}
+                onChange={(e) => setTitreDraft(e.target.value)}
+                autoFocus
+              />
+              <textarea
+                className="w-full rounded-lg bg-[var(--card)] p-1.5 text-xs shadow-[var(--ring-card)]"
+                rows={2}
+                value={demandeDraft}
+                disabled={savingId === r.id}
+                onChange={(e) => setDemandeDraft(e.target.value)}
+              />
+              <div>
+                <Button type="button" disabled={savingId === r.id || !titreDraft.trim() || !demandeDraft.trim()} onClick={finishEditing}>
+                  ✓ Terminé
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <p className="text-sm font-semibold leading-snug break-words">{r.titre}</p>
+              <p className="whitespace-pre-wrap text-xs leading-snug text-[var(--muted)]">{r.demande}</p>
+            </>
+          )}
+        </div>
+        {!editing && (
+          <div className="flex shrink-0 items-center gap-1.5">
+            {pendingQuestions.length > 0 ? (
+              <span className="rounded-full bg-[var(--danger)] px-2 py-0.5 text-[0.65rem] font-bold text-white">
+                🔴 Réponse attendue
+              </span>
+            ) : (
+              // Lecture seule -- le statut est décidé par la session
+              // Claude Code qui code la règle, jamais par Raphaël ou
+              // son père (retour explicite : "les statuts sont à
+              // statuer par toi, pas par moi").
+              <span
+                className={'rounded-full bg-[var(--card)] px-2 py-0.5 text-[0.65rem] font-semibold shadow-[inset_0_0_0_1px_currentColor] ' + STATUT_COLOR[r.statut]}
+              >
+                {STATUT_LABEL[r.statut]}
+              </span>
+            )}
+            <EditPencil onClick={startEditing} title="Modifier le titre / la demande" />
+          </div>
+        )}
+      </div>
+      {pendingQuestions.map((q) => (
+        <RuleQuestionBlock key={q.id} orgId={orgId} requestId={r.id} question={q} onAnswered={onQuestionAnswered} />
+      ))}
+      {awaitingValidation && (
+        <ValidationBlock
+          orgId={orgId}
+          request={r}
+          mode="a_verifier"
+          onValidated={() => onValidated(r.id)}
+          onCorrected={(demande) => onCorrected(r.id, demande)}
+        />
+      )}
+      <RuleHistory request={r} />
+      <div className="mt-1 flex items-center justify-between text-xs">
+        <span className="text-[var(--muted)]">
+          Créée le {formatEventTime(r.created_at)}
+          {r.updated_at !== r.created_at && ` -- modifiée le ${formatEventTime(r.updated_at)}`}
+        </span>
+        {confirmingDelete ? (
+          <span className="flex items-center gap-1">
+            <Button variant="danger" disabled={savingId === r.id} onClick={() => onDelete(r.id)}>
+              Confirmer
+            </Button>
+            <Button variant="secondary" onClick={() => onConfirmDeleteToggle(null)}>
+              Annuler
+            </Button>
+          </span>
+        ) : (
+          <Button variant="danger" onClick={() => onConfirmDeleteToggle(r.id)}>
+            🗑️
+          </Button>
+        )}
+      </div>
+    </li>
+  )
 }
 
 // Demandes de modification des règles codées en dur du moteur
@@ -611,13 +807,10 @@ export function PrelevementRuleRequests({
     }
   }
 
-  // Mêmes deux temps que titre/demande dans renderCard (frappe locale
-  // immédiate, sauvegarde au blur) -- factorisés ici pour la carte
-  // certifiée compacte, qui ne peut pas fermer sur setRequests/persist
-  // directement (composant séparé, voir CertifiedRuleCard).
-  function handleFieldChange(id: string, field: 'titre' | 'demande' | 'resume', value: string) {
-    setRequests((prev) => prev.map((x) => (x.id === id ? { ...x, [field]: value } : x)))
-  }
+  // Sauvegarde directe (pas de frappe locale intermédiaire à répercuter
+  // pendant la saisie) : le champ édité vit dans l'état local du
+  // formulaire d'édition (RuleCard/CertifiedRuleCard), pas dans
+  // `requests` -- seul le résultat final ("✓ Terminé") remonte ici.
   function handleFieldBlur(id: string, field: 'titre' | 'demande' | 'resume', value: string, original: string) {
     if (field !== 'resume' && !value) return // titre/demande jamais vides
     if (value !== original) void persist(id, { [field]: value })
@@ -679,133 +872,12 @@ export function PrelevementRuleRequests({
   const actifs = requests.filter((r) => r.statut === 'valide')
   const enCours = requests.filter((r) => r.statut !== 'valide')
 
-  function renderCard(r: PrelevementRuleRequest) {
-    // Cette carte n'est plus jamais utilisée pour une demande "valide"
-    // (voir CertifiedRuleCard, plus compacte, pour le bac "✅ Actif") --
-    // seuls en_attente/en_cours/a_verifier passent encore par ici.
-    const pendingQuestions = r.questions.filter((q) => !q.answered_at)
-    const awaitingValidation = pendingQuestions.length === 0 && r.statut === 'a_verifier'
-    // Thème "Mix" validé par Raphaël (2026-09-22) : compact, mais chaque
-    // statut garde une identité claire -- liseré de couleur sur le bord
-    // gauche + fond très légèrement teinté (4-5%), au lieu d'une bordure
-    // pleine tout autour ou d'un simple point. Les couleurs restent
-    // réservées aux statuts (rouge = bloquant, orange = à vérifier, vert
-    // = actif), jamais un accent décoratif.
-    // Classes ENTIÈREMENT statiques (jamais interpolées) -- Tailwind ne
-    // génère que les classes qu'il peut lire littéralement dans le
-    // code source, une chaîne construite par template string à
-    // l'exécution ne serait tout simplement pas compilée.
-    const accentClass = pendingQuestions.length > 0
-      ? 'shadow-[inset_3px_0_0_var(--danger),var(--ring-card)] bg-[var(--danger)]/5'
-      : awaitingValidation
-        ? 'shadow-[inset_3px_0_0_var(--warning),var(--ring-card)] bg-[var(--warning)]/5'
-        : 'shadow-[var(--ring-card)]'
-    return (
-      <li key={r.id} className={'rounded-xl p-4 ' + accentClass}>
-        <div className="mb-1 flex flex-wrap items-center gap-2">
-          <Input
-            className="min-w-[10rem] flex-1 font-bold"
-            value={r.titre}
-            disabled={savingId === r.id}
-            onChange={(e) =>
-              setRequests((prev) => prev.map((x) => (x.id === r.id ? { ...x, titre: e.target.value } : x)))
-            }
-            onBlur={(e) => {
-              const titre = e.target.value.trim()
-              if (titre && titre !== r.titre) void persist(r.id, { titre })
-            }}
-          />
-          {pendingQuestions.length > 0 ? (
-            <span className="rounded-full bg-[var(--danger)] px-3 py-1 text-xs font-bold text-white">
-              🔴 Ta réponse est nécessaire
-            </span>
-          ) : (
-            // Lecture seule -- le statut est décidé par la session
-            // Claude Code qui code la règle, jamais par Raphaël ou
-            // son père (retour explicite : "les statuts sont à
-            // statuer par toi, pas par moi"). Avant : un menu
-            // déroulant modifiable ici, source de confusion. Pilule à
-            // contour (pas de fond plein) -- thème Mix.
-            <span
-              className={'rounded-full bg-[var(--card)] px-3 py-1 text-xs font-semibold shadow-[inset_0_0_0_1px_currentColor] ' + STATUT_COLOR[r.statut]}
-            >
-              {STATUT_LABEL[r.statut]}
-            </span>
-          )}
-        </div>
-        <textarea
-          className="w-full rounded-lg bg-[var(--card)] p-2 text-sm shadow-[var(--ring-card)]"
-          rows={2}
-          value={r.demande}
-          disabled={savingId === r.id}
-          onChange={(e) =>
-            setRequests((prev) => prev.map((x) => (x.id === r.id ? { ...x, demande: e.target.value } : x)))
-          }
-          onBlur={(e) => {
-            const demande = e.target.value.trim()
-            if (demande && demande !== r.demande) void persist(r.id, { demande })
-          }}
-        />
-        {pendingQuestions.map((q) => (
-          <RuleQuestionBlock
-            key={q.id}
-            orgId={orgId}
-            requestId={r.id}
-            question={q}
-            onAnswered={() => {
-              markScroll()
-              setReloadNonce((n) => n + 1)
-            }}
-          />
-        ))}
-        {awaitingValidation && (
-          <ValidationBlock
-            orgId={orgId}
-            request={r}
-            mode="a_verifier"
-            onValidated={() => {
-              markScroll()
-              setRequests((prev) => prev.map((x) => (x.id === r.id ? { ...x, statut: 'valide' } : x)))
-            }}
-            onCorrected={(demande) => {
-              markScroll()
-              setRequests((prev) =>
-                prev.map((x) => (x.id === r.id ? { ...x, demande, statut: 'en_cours' } : x)),
-              )
-            }}
-          />
-        )}
-        <RuleHistory request={r} />
-        <div className="mt-1 flex items-center justify-between">
-          <span className="text-xs text-[var(--muted)]">
-            Créée le {formatEventTime(r.created_at)}
-            {r.updated_at !== r.created_at && ` -- modifiée le ${formatEventTime(r.updated_at)}`}
-          </span>
-          {confirmingDeleteId === r.id ? (
-            <span className="flex items-center gap-1">
-              <Button variant="danger" disabled={savingId === r.id} onClick={() => void handleDelete(r.id)}>
-                Confirmer
-              </Button>
-              <Button variant="secondary" onClick={() => setConfirmingDeleteId(null)}>
-                Annuler
-              </Button>
-            </span>
-          ) : (
-            <Button variant="danger" onClick={() => setConfirmingDeleteId(r.id)}>
-              🗑️
-            </Button>
-          )}
-        </div>
-      </li>
-    )
-  }
-
   return (
     <div className="mt-2 border-t border-[var(--border)] pt-3">
       {error && <p className="mb-2 text-sm text-[var(--danger)]">Erreur : {error}</p>}
 
       {latestActivity && (
-        <p className="mb-2 rounded-lg bg-[var(--muted-bg)] p-2 text-xs shadow-[inset_0_0_0_1px_var(--primary)]">
+        <p className="mb-1.5 rounded-lg bg-[var(--muted-bg)] p-1.5 text-xs shadow-[inset_0_0_0_1px_var(--primary)]">
           <span className="font-bold">🔧 Là, maintenant :</span>{' '}
           <span className="font-medium">{latestActivity.requestTitre}</span> --{' '}
           {latestActivity.event.message}{' '}
@@ -814,23 +886,23 @@ export function PrelevementRuleRequests({
       )}
 
       {nbPendingQuestions > 0 && (
-        <p className="mb-2 rounded-md bg-[var(--danger)] p-2 text-sm font-bold text-white">
+        <p className="mb-1.5 rounded-md bg-[var(--danger)] p-1.5 text-sm font-bold text-white">
           🔴 {nbPendingQuestions} question{nbPendingQuestions > 1 ? 's' : ''} en attente de ta réponse
           ci-dessous
         </p>
       )}
 
       {nbAwaitingValidation > 0 && (
-        <p className="mb-2 rounded-md bg-[var(--warning)] p-2 text-sm font-bold text-[var(--warning-foreground)]">
+        <p className="mb-1.5 rounded-md bg-[var(--warning)] p-1.5 text-sm font-bold text-[var(--warning-foreground)]">
           🧪 {nbAwaitingValidation} règle{nbAwaitingValidation > 1 ? 's' : ''} codée
           {nbAwaitingValidation > 1 ? 's' : ''} -- à valider ou corriger ci-dessous
         </p>
       )}
 
       {!loading && actifs.length > 0 && (
-        <div className="mb-3">
-          <p className="mb-2 text-xs font-bold text-[var(--success)]">✅ Actif ({actifs.length})</p>
-          <ul className="flex flex-col gap-2">
+        <div className="mb-2">
+          <p className="mb-1 text-xs font-bold text-[var(--success)]">✅ Actif ({actifs.length})</p>
+          <ul className="flex flex-col gap-1">
             {actifs.map((r) => (
               <CertifiedRuleCard
                 key={r.id}
@@ -840,7 +912,6 @@ export function PrelevementRuleRequests({
                 confirmingDelete={confirmingDeleteId === r.id}
                 onConfirmDeleteToggle={setConfirmingDeleteId}
                 onDelete={(id) => void handleDelete(id)}
-                onFieldChange={handleFieldChange}
                 onFieldBlur={handleFieldBlur}
                 onCorrected={(id, demande) => {
                   markScroll()
@@ -856,7 +927,7 @@ export function PrelevementRuleRequests({
         <button
           type="button"
           onClick={() => setHistoryOpen((v) => !v)}
-          className="mb-2 flex items-center gap-2 text-xs font-medium text-[var(--muted)] hover:text-[var(--foreground)]"
+          className="mb-1 flex items-center gap-2 text-xs font-medium text-[var(--muted)] hover:text-[var(--foreground)]"
         >
           <span>
             {historyOpen ? '▲' : '▼'} 🔧 En cours d'optimisation ({enCours.length})
@@ -870,10 +941,35 @@ export function PrelevementRuleRequests({
       )}
 
       {historyOpen && enCours.length > 0 && (
-        <ul className="mb-3 flex flex-col gap-3">{enCours.map(renderCard)}</ul>
+        <ul className="mb-2 flex flex-col gap-1">
+          {enCours.map((r) => (
+            <RuleCard
+              key={r.id}
+              orgId={orgId}
+              request={r}
+              savingId={savingId}
+              confirmingDelete={confirmingDeleteId === r.id}
+              onConfirmDeleteToggle={setConfirmingDeleteId}
+              onDelete={(id) => void handleDelete(id)}
+              onFieldBlur={handleFieldBlur}
+              onQuestionAnswered={() => {
+                markScroll()
+                setReloadNonce((n) => n + 1)
+              }}
+              onValidated={(id) => {
+                markScroll()
+                setRequests((prev) => prev.map((x) => (x.id === id ? { ...x, statut: 'valide' } : x)))
+              }}
+              onCorrected={(id, demande) => {
+                markScroll()
+                setRequests((prev) => prev.map((x) => (x.id === id ? { ...x, demande, statut: 'en_cours' } : x)))
+              }}
+            />
+          ))}
+        </ul>
       )}
 
-      <div className="flex flex-col gap-2 rounded-xl border border-dashed border-[var(--border)] p-4">
+      <div className="flex flex-col gap-2 rounded-xl border border-dashed border-[var(--border)] p-3">
         <p className="text-xs font-medium text-[var(--muted)]">
           ➕ Nouvelle règle (celle-ci n'existe pas encore dans la liste ci-dessus)
         </p>

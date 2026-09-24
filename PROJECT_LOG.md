@@ -4578,3 +4578,27 @@ changement frontend uniquement) : ok. Déployé et vérifié `live`.
 
 `npm run build` : ok. `pytest tests/` (hors e2e) : 526 passés (changement
 frontend uniquement). Déployé et vérifié `live`.
+
+### PR #100 : thème Jarvis sur tout le site + dernier onglet mémorisé (2026-09-24)
+
+Raphaël, deux demandes hors Prélèvement : (1) "applique le thème qu'on a
+mis sur la partie Prélèvement sur tout le reste du site" -- la PR #94
+avait appliqué le thème Jarvis aux composants partagés
+(Card/Button/Input/Dialog) et à l'écran Prélèvement, mais pas au
+balisage écrit à la main ailleurs (Cockpit, Base de données, Pipeline),
+qui gardait encore `border border-[var(--border)]` (bordure franche) au
+lieu de `shadow-[var(--ring-card)]` (contour 8% d'opacité déjà utilisé
+partout ailleurs) -- 49 occurrences remplacées dans 17 fichiers, +12
+occurrences d'encadrés colorés (danger/success/primary) passées au même
+principe que les blocs Question/Validation de Prélèvement
+(`shadow-[inset_0_0_0_1px_var(--...)]`). Changement mécanique, mêmes
+tokens déjà utilisés ailleurs, aucune logique touchée. (2) "quand on
+recharge la page, on arrive quoi qu'il arrive sur Trieur de Data [...]
+si je suis sur Prélèvement, j'ai envie de revenir sur Prélèvement" --
+dernier onglet ouvert mémorisé en localStorage (clé
+`trieur_dernier_ecran`), rouvert automatiquement au lieu de toujours
+retomber sur "Trieur de Data" par défaut.
+
+`npm run build` : ok. `pytest tests/` (hors e2e) : 526 passés (changement
+frontend uniquement). Vérifié visuellement (capture Playwright statique,
+CSS réellement compilé). Déployé et vérifié `live`.

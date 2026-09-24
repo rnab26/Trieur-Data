@@ -4534,3 +4534,19 @@ plein remplacé par un encadré fin). Espacements réduits partout.
 Vérifié par une capture Playwright statique du CSS réellement compilé
 avant de pousser (écran authentifié réel non ouvrable dans cet
 environnement). `npm run build` : ok. Déployé et vérifié `live`.
+
+### PR #98 : 3 corrections visuelles supplémentaires (2026-09-24)
+
+Retour direct de Raphaël sur la PR #97, captures d'écran annotées à
+l'appui ("des signes de régression bête") : (1) écart crayon/chevron sur
+une carte certifiée trop faible pour cliquer proprement (mobile inclus)
+-- gap élargi, cible tactile agrandie ; (2) "Signaler un problème /
+demander une correction" sur une règle active devenu injoignable sans
+déplier "Détails" -- remis toujours visible directement sous le
+titre/résumé, comme avant la refonte compacte (mécanisme de fond
+inchangé) ; (3) bac "En cours d'optimisation" pas regroupé par
+catégorie -- tri par urgence (question bloquante -\> à vérifier -\> en
+cours de codage -\> pas encore examinée), tri stable donc l'ordre de
+création est conservé au sein de chaque catégorie ; principe généralisé,
+pas juste appliqué à ce cas précis. `npm run build` + `pytest` (526,
+changement frontend uniquement) : ok. Déployé et vérifié `live`.

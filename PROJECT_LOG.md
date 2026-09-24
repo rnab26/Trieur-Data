@@ -4550,3 +4550,31 @@ cours de codage -\> pas encore examinée), tri stable donc l'ordre de
 création est conservé au sein de chaque catégorie ; principe généralisé,
 pas juste appliqué à ce cas précis. `npm run build` + `pytest` (526,
 changement frontend uniquement) : ok. Déployé et vérifié `live`.
+
+### PR #99 : historique attribué + dates relatives + poubelle discrète (2026-09-24)
+
+4 retours de Raphaël (deux vagues sur la même PR) :
+
+- Historique (questions/réponses + messages d'activité) : chaque ligne
+  indique qui parle -- "🤖 Claude a demandé" / "🙋 Réponse" pour les
+  questions, préfixe 🤖 pour les messages d'activité ("il faut toujours
+  mettre de qui vient quel message [...] sinon on ne comprend pas qui
+  dit quoi"). Rappel ajouté dans le code : ces messages doivent rester
+  courts et synthétiques.
+- Bouton de suppression : gros bouton plein rouge (44px, pensé pour une
+  action primaire) remplacé par un simple contour rouge fin
+  (`DeleteTrigger`) -- confirmation avant suppression réelle inchangée.
+- Bloc "Détails" (règle certifiée) : espacements resserrés.
+- Dates : heure TOUJOURS affichée à côté ("dans la même journée on peut
+  s'embrouiller"), "Aujourd'hui à HH:mm" / "Hier à HH:mm" quand c'est le
+  cas, sinon dd/mm/yy à HH:mm. Le texte de correction inséré dans une
+  demande (bouton "Signaler un problème") porte aussi désormais date ET
+  heure, en absolu (jamais "aujourd'hui", puisque ce texte reste écrit
+  tel quel dans la demande).
+- RuleCard (règle pas encore certifiée) : l'historique (le passé, replié)
+  s'affiche maintenant avant le bloc où une réponse est attendue
+  (question ou validation), qui reste en dernier -- c'est l'évènement le
+  plus récent de la carte.
+
+`npm run build` : ok. `pytest tests/` (hors e2e) : 526 passés (changement
+frontend uniquement). Déployé et vérifié `live`.

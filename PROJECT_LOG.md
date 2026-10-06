@@ -4627,3 +4627,15 @@ session -- déjà documenté flaky dans son propre commentaire depuis les
 PR #35/#38/#40, pas retesté davantage. Déployé (API + front) et vérifié
 `live`. Demande passée à `a_verifier` (jamais `valide`, réservé à un
 humain).
+
+
+## 2026-10-06 — Règle "Code postal" (demande du père de Raphaël)
+
+- [x] Code postal à 5 chiffres -> 0 devant (6 chiffres) : `to_code_postal`
+  dans `trieur/prelevement.py`, appliqué au fichier mandats (FRST+RCUR) et
+  à l'Adresse complète de l'export CRM. Tests dans
+  `tests/test_prelevement.py` (cas signalé inclus). Demande
+  `38053ac4-a5bc-421f-9f4a-e4df9950c08a` -> `a_verifier` après déploiement
+  vérifié.
+- Note : Raphaël a parlé de "règle sur les dates" mais la seule demande
+  lancée ce jour-là était celle du code postal -- traitée.

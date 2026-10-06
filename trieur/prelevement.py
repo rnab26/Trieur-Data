@@ -52,6 +52,7 @@ COL_IBAN = "IBAN"
 COL_BIC = "BIC"
 COL_DATE_PREMIER = "Date de premier prélèvement"
 COL_DATE_CREATION = "Date création"
+COL_DATE_PRELEVEMENT = "Date prélèvement"  # jour du mois choisi : "5 du mois", "1er du mois"...
 COL_ADRESSE = "Adresse"
 COL_VILLE = "Ville"
 COL_CODE_POSTAL = "Code postal"
@@ -411,12 +412,29 @@ def _parse_date(raw: object) -> date | None:
     if isinstance(raw, date):
         return raw
     text = str(raw).strip()
-    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
-        try:
-            return datetime.strptime(text, fmt).date()
-        except ValueError:
-            continue
+    # Le CRM écrit aussi l'heure ("06/08/2026 16:07", "2026-10-06 00:00:00") :
+    # sans ce repli la date n'était pas reconnue et Date_signature_mandat
+    # retombait sur la date du jour (constaté sur le vrai fichier, 2026-10-06).
+    for candidat in (text, text.split(" ")[0]):
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+            try:
+                return datetime.strptime(candidat, fmt).date()
+            except ValueError:
+                continue
     return None
+
+
+def parse_jour_prelevement(raw: object) -> int | None:
+    """Colonne "Date prélèvement" du CRM = le JOUR DU MOIS choisi par le
+    client : "5 du mois", "10 du mois", "1er du mois"... -> 5, 10, 1.
+    None si absente ou illisible (jamais deviné)."""
+    if raw is None or raw == "":
+        return None
+    m = re.match(r"\s*(\d{1,2})\s*(?:er|ème|e)?\b", str(raw).strip().lower())
+    if not m:
+        return None
+    jour = int(m.group(1))
+    return jour if 1 <= jour <= 31 else None
 
 
 def add_business_days(d: date, n: int) -> date:
@@ -433,7 +451,9 @@ def add_business_days(d: date, n: int) -> date:
     return result
 
 
-def compute_first_prelevement_date(raw_scheduled: object, today: date, delay_days: int) -> date:
+def compute_first_prelevement_date(
+    raw_scheduled: object, today: date, delay_days: int, jour_du_mois: int | None = None,
+) -> date:
     """La date du 1er prélèvement n'est JAMAIS avant aujourd'hui +
     délai en JOURS OUVRÉS (4 par défaut depuis le 2026-09-24, voir
     add_business_days -- avant cette date, 3 jours calendaires) :
@@ -441,12 +461,26 @@ def compute_first_prelevement_date(raw_scheduled: object, today: date, delay_day
     prévue au départ, le client n'est PAS exclu (changé le 2026-09-22,
     demande du père de Raphaël, question posée -- réponse : "la date du
     jour + délai") : utilise directement le plancher aujourd'hui +
-    délai ouvré."""
+    délai ouvré.
+
+    Correction du 2026-10-06 (père de Raphaël) : la colonne qui donne
+    VRAIMENT la date est "Date prélèvement" ("5 du mois"), pas "Date de
+    premier prélèvement" (constante = jour de l'export dans le CRM).
+    Quand `jour_du_mois` est connu, la date est le PREMIER jour portant ce
+    numéro à partir du plancher (le client choisit le 5 : on prélève un
+    5, jamais un autre jour)."""
     scheduled = _parse_date(raw_scheduled)
     plancher = add_business_days(today, delay_days)
-    if scheduled is None:
-        return plancher
-    return max(plancher, scheduled)
+    base = plancher if scheduled is None else max(plancher, scheduled)
+    if jour_du_mois is None:
+        return base
+    for decalage in (0, 1):
+        mois = _add_months(date(base.year, base.month, 1), decalage)
+        jour = min(jour_du_mois, calendar.monthrange(mois.year, mois.month)[1])
+        candidat = date(mois.year, mois.month, jour)
+        if candidat >= base:
+            return candidat
+    return base
 
 
 def build_motif(rum: str, suffix: str) -> str:
@@ -539,6 +573,7 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
 
         date_premiere = compute_first_prelevement_date(
             _get(row, COL_DATE_PREMIER, keyed), today, rules.delay_days,
+            parse_jour_prelevement(_get(row, COL_DATE_PRELEVEMENT, keyed)),
         )
 
         optilife_optivie = to_amount(_get(row, COL_OPTILIFE, keyed)) + to_amount(_get(row, COL_OPTIVIE, keyed))
@@ -980,6 +1015,13 @@ def explain_rules(rules: PrelevementRules) -> list[dict[str, str]]:
                 f"Jamais avant aujourd'hui + {rules.delay_days} jour(s) OUVRÉS "
                 f"(réglable, week-end sauté) : si la date prévue dans le fichier "
                 f"est déjà passée ou trop proche, repoussée à ce délai minimum. "
+                f"Depuis le 2026-10-06 la colonne \"Date prélèvement\" du CRM "
+                f"(\"5 du mois\", \"1er du mois\"...) est prise en compte : la "
+                f"date est le premier jour portant ce numéro à partir de ce "
+                f"minimum (le client choisit le 5 -> prélevé un 5). La colonne "
+                f"\"Date de premier prélèvement\" du CRM (constante = jour de "
+                f"l'export) n'est qu'un plancher. \"Date_signature_mandat\" = "
+                f"\"Date création\" (l'heure est ignorée). "
                 f"Si aucune date n'est renseignée, cette même valeur (aujourd'hui "
                 f"+ {rules.delay_days} jour(s) ouvrés) est utilisée directement, "
                 f"sans exclure le client."

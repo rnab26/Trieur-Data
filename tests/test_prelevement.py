@@ -938,3 +938,33 @@ def test_generate_mandats_export_crm_telephone_sans_point_zero():
     assert crm.telephone == "+33752946675"
     assert crm.mobile == "+33752946675"
     assert "001000" in crm.adresse_complete
+
+
+def test_parse_jour_prelevement():
+    from trieur.prelevement import parse_jour_prelevement
+    assert parse_jour_prelevement("5 du mois") == 5
+    assert parse_jour_prelevement("1er du mois") == 1
+    assert parse_jour_prelevement("10 du mois") == 10
+    assert parse_jour_prelevement("15 du mois") == 15
+    assert parse_jour_prelevement(None) is None
+    assert parse_jour_prelevement("n'importe quoi") is None
+
+
+def test_date_premier_prelevement_suit_le_jour_du_mois_choisi():
+    """Cas signalé 2026-10-06 : "5 du mois" doit donner un 5, au plus tôt
+    aujourd'hui + 4 jours ouvrés (06/10/2026 mardi -> plancher 12/10)."""
+    from trieur.prelevement import compute_first_prelevement_date as c
+    today = date(2026, 10, 6)
+    assert c("2026-10-06 00:00:00", today, 4, 5) == date(2026, 11, 5)
+    assert c("2026-10-06 00:00:00", today, 4, 1) == date(2026, 11, 1)
+    assert c("2026-10-06 00:00:00", today, 4, 15) == date(2026, 10, 15)
+    assert c("2026-10-06 00:00:00", today, 4, None) == date(2026, 10, 12)  # inchangé sans colonne
+
+
+def test_generate_mandats_date_prelevement_et_date_creation_avec_heure():
+    row = _base_row(**{"Date prélèvement": "5 du mois", "Date de premier prélèvement": "2026-10-06 00:00:00",
+                       "Date création": "06/08/2026 16:07"})
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 10, 6))
+    frst = result.ooff[0]
+    assert frst.date_premiere_echeance == "05/11/2026"
+    assert frst.date_signature_mandat == "06/08/2026"  # plus la date du jour

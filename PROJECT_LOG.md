@@ -4644,3 +4644,12 @@ humain).
   lignes, 0 de tête perdu) -> 6 chiffres aussi ; Téléphone de l'onglet export
   CRM sortait en "33752946675.0" (273 lignes) -> `to_telephone`. Rejoué : 676
   FRST / 676 RCUR / 6 exclus / 676 export CRM, plus aucun ".0".
+- 2026-10-06 (dates) : correction sur la règle "Date du premier prélèvement"
+  (demande 373b2246). Cause racine trouvée sur le vrai fichier : la colonne
+  "Date de premier prélèvement" du CRM est une constante (jour de l'export),
+  la vraie colonne est "Date prélèvement" ("5 du mois"...) ignorée jusque-là ;
+  et "Date création" avec l'heure ("06/08/2026 16:07") n'était pas reconnue
+  -> Date_signature_mandat = date du jour. Corrigé (parse_jour_prelevement,
+  _parse_date tolère l'heure). Hypothèse à confirmer par Raphaël : date =
+  premier jour portant le numéro choisi À PARTIR de aujourd'hui + 4 jours
+  ouvrés ; un 5 qui tombe un week-end n'est pas décalé.

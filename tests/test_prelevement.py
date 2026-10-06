@@ -910,7 +910,9 @@ def test_generate_mandats_one_bad_row_does_not_break_the_batch():
 
 def test_to_code_postal_5_chiffres_recoit_un_zero():
     assert to_code_postal("75001") == "075001"
-    assert to_code_postal("1000") == "1000"  # autre longueur : jamais devinée
+    assert to_code_postal("1000") == "001000"  # 01000 dont Excel a perdu le 0
+    assert to_code_postal("77380.0") == "077380"
+    assert to_code_postal("AB123") == "AB123"  # jamais deviné
     assert to_code_postal("075001") == "075001"  # déjà 6 chiffres
     assert to_code_postal(75001.0) == "075001"  # nombre lu par pandas
     assert to_code_postal(75001) == "075001"
@@ -925,3 +927,14 @@ def test_generate_mandats_code_postal_sur_6_chiffres_partout():
     result = generate_mandats([_base_row(**{"Code postal": 75001})], PrelevementRules(), today=date(2026, 9, 21))
     assert {m.code_postal for m in result.mandats} == {"075001"}
     assert all("075001 Paris" in c.adresse_complete for c in result.export_crm)
+
+
+def test_generate_mandats_export_crm_telephone_sans_point_zero():
+    """Constaté 2026-10-06 sur le vrai fichier : Téléphone lu en nombre
+    sortait "33752946675.0" dans l'onglet export CRM (273 lignes)."""
+    row = _base_row(**{"Téléphone": 33752946675.0, "Mobile": 33752946675.0, "Code postal": 1000.0})
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    crm = result.export_crm[0]
+    assert crm.telephone == "+33752946675"
+    assert crm.mobile == "+33752946675"
+    assert "001000" in crm.adresse_complete

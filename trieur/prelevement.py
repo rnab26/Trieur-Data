@@ -344,10 +344,14 @@ def to_amount(raw: object) -> float:
 
 def to_code_postal(raw: object) -> str:
     """Règle "Code postal" (demande du père de Raphaël, 2026-10-06) :
-    un code postal de 5 chiffres reçoit un 0 devant pour sortir sur 6
-    chiffres. Toute autre longueur est renvoyée telle quelle (jamais
-    devinée). Une cellule enregistrée comme NOMBRE (75001.0 sous pandas)
-    perd son ".0" d'abord -- même famille de bug que to_telephone."""
+    le code postal sort sur 6 chiffres -- un 0 devant un code à 5
+    chiffres. Un code à 4 chiffres est un code "01xxx"..."09xxx" dont
+    Excel a perdu le 0 de tête (cellule lue comme un nombre) : il est
+    complété à 6 chiffres lui aussi (constaté sur 110 lignes du vrai
+    fichier du 2026-10-06). Une cellule lue comme NOMBRE (77380.0 sous
+    pandas) perd d'abord son ".0" -- même famille de bug que
+    to_telephone. Toute autre forme (lettres, déjà 6 chiffres, longueur
+    inattendue) est renvoyée telle quelle, jamais devinée."""
     if raw is None or raw == "":
         return ""
     if isinstance(raw, float) and raw != raw:  # NaN
@@ -356,8 +360,10 @@ def to_code_postal(raw: object) -> str:
         text = str(int(raw))
     else:
         text = str(raw).strip()
-    if len(text) == 5 and text.isdigit():
-        return "0" + text
+        if text.endswith(".0") and text[:-2].isdigit():
+            text = text[:-2]
+    if text.isdigit() and len(text) in (4, 5):
+        return text.zfill(6)
     return text
 
 
@@ -786,8 +792,8 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
                 date_creation=date_signature.strftime("%d/%m/%Y"),
                 createur="",
                 nom_complet=nom,
-                telephone=str(_get(row, COL_TELEPHONE, keyed) or ""),
-                mobile=str(_get(row, COL_MOBILE, keyed) or ""),
+                telephone=to_telephone(_get(row, COL_TELEPHONE, keyed)),
+                mobile=to_telephone(_get(row, COL_MOBILE, keyed)),
                 adresse_complete=", ".join(
                     p for p in [
                         str(_get(row, COL_ADRESSE, keyed) or "").strip(),

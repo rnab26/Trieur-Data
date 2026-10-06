@@ -4639,3 +4639,8 @@ humain).
   vérifié.
 - Note : Raphaël a parlé de "règle sur les dates" mais la seule demande
   lancée ce jour-là était celle du code postal -- traitée.
+- 2026-10-06 (suite) : vérifié sur le vrai fichier de Raphaël (export de base
+  vs mandats "old"). Trouvé et corrigé : codes postaux à 4 chiffres (110
+  lignes, 0 de tête perdu) -> 6 chiffres aussi ; Téléphone de l'onglet export
+  CRM sortait en "33752946675.0" (273 lignes) -> `to_telephone`. Rejoué : 676
+  FRST / 676 RCUR / 6 exclus / 676 export CRM, plus aucun ".0".

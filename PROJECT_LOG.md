@@ -4653,3 +4653,11 @@ humain).
   _parse_date tolère l'heure). Hypothèse à confirmer par Raphaël : date =
   premier jour portant le numéro choisi À PARTIR de aujourd'hui + 4 jours
   ouvrés ; un 5 qui tombe un week-end n'est pas décalé.
+- 2026-10-06 (dates, retour arrière) : la règle "jour du mois" (colonne "Date
+  prélèvement") était une invention de ma part -- Raphaël : "tu dois prendre en
+  compte la date de premier prélèvement, n'invente rien". Retirée. Reste : la
+  date du FRST = colonne "Date de premier prélèvement" avec plancher
+  aujourd'hui + 4 jours ouvrés ; Date_signature_mandat = "Date création"
+  (parse avec heure corrigé). Dans le fichier réel la colonne vaut 06/10/2026
+  pour les 478 lignes -> tous les FRST tombent au plancher 12/10 (+ décalage
+  remise). Demande 373b2246 : retour du père attendu sur un exemple chiffré.

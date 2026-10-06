@@ -342,6 +342,25 @@ def to_amount(raw: object) -> float:
         return 0.0
 
 
+def to_code_postal(raw: object) -> str:
+    """Règle "Code postal" (demande du père de Raphaël, 2026-10-06) :
+    un code postal de 5 chiffres reçoit un 0 devant pour sortir sur 6
+    chiffres. Toute autre longueur est renvoyée telle quelle (jamais
+    devinée). Une cellule enregistrée comme NOMBRE (75001.0 sous pandas)
+    perd son ".0" d'abord -- même famille de bug que to_telephone."""
+    if raw is None or raw == "":
+        return ""
+    if isinstance(raw, float) and raw != raw:  # NaN
+        return ""
+    if isinstance(raw, (int, float)):
+        text = str(int(raw))
+    else:
+        text = str(raw).strip()
+    if len(text) == 5 and text.isdigit():
+        return "0" + text
+    return text
+
+
 def to_telephone(raw: object) -> str:
     """Corrige la REPRÉSENTATION d'un numéro déjà présent dans la
     cellule -- ne comble jamais un numéro manquant, ne devine jamais un
@@ -679,7 +698,7 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
                 bic=bic,
                 adresse=str(_get(row, COL_ADRESSE, keyed) or ""),
                 ville=str(_get(row, COL_VILLE, keyed) or ""),
-                code_postal=str(_get(row, COL_CODE_POSTAL, keyed) or ""),
+                code_postal=to_code_postal(_get(row, COL_CODE_POSTAL, keyed)),
                 pays="FR",
                 email=str(_get(row, COL_EMAIL, keyed) or ""),
                 telephone=(
@@ -708,7 +727,7 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
                 bic=bic,
                 adresse=str(_get(row, COL_ADRESSE, keyed) or ""),
                 ville=str(_get(row, COL_VILLE, keyed) or ""),
-                code_postal=str(_get(row, COL_CODE_POSTAL, keyed) or ""),
+                code_postal=to_code_postal(_get(row, COL_CODE_POSTAL, keyed)),
                 pays="FR",
                 email=str(_get(row, COL_EMAIL, keyed) or ""),
                 telephone=(
@@ -774,7 +793,7 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
                         str(_get(row, COL_ADRESSE, keyed) or "").strip(),
                         " ".join(
                             p2 for p2 in [
-                                str(_get(row, COL_CODE_POSTAL, keyed) or "").strip(),
+                                to_code_postal(_get(row, COL_CODE_POSTAL, keyed)),
                                 str(_get(row, COL_VILLE, keyed) or "").strip(),
                             ] if p2
                         ),
@@ -874,6 +893,15 @@ def explain_rules(rules: PrelevementRules) -> list[dict[str, str]]:
     toute règle ajoutée/modifiée ci-dessus doit mettre à jour cette
     liste dans le MÊME commit."""
     return [
+        {
+            "titre": "Code postal",
+            "detail": (
+                "Un code postal de 5 chiffres reçoit un 0 devant pour sortir "
+                "sur 6 chiffres (demande du père de Raphaël, 2026-10-06) -- "
+                "colonne Code_postal du fichier mandats ET Adresse complète de "
+                "l'export CRM. Toute autre longueur est laissée telle quelle."
+            ),
+        },
         {
             "titre": "Exclusions (jamais envoyé en banque)",
             "detail": (

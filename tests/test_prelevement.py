@@ -16,6 +16,7 @@ from trieur.prelevement import (
     pad_bic,
     split_nom_prenom,
     to_amount,
+    to_code_postal,
     to_telephone,
 )
 
@@ -905,3 +906,22 @@ def test_generate_mandats_one_bad_row_does_not_break_the_batch():
     result = generate_mandats(rows, PrelevementRules(), today=date(2026, 9, 21))
     assert len(result.ooff) == 1
     assert len(result.exclus) == 1
+
+
+def test_to_code_postal_5_chiffres_recoit_un_zero():
+    assert to_code_postal("75001") == "075001"
+    assert to_code_postal("1000") == "1000"  # autre longueur : jamais devinée
+    assert to_code_postal("075001") == "075001"  # déjà 6 chiffres
+    assert to_code_postal(75001.0) == "075001"  # nombre lu par pandas
+    assert to_code_postal(75001) == "075001"
+    assert to_code_postal(None) == ""
+    assert to_code_postal(float("nan")) == ""
+    assert to_code_postal("  75001 ") == "075001"
+
+
+def test_generate_mandats_code_postal_sur_6_chiffres_partout():
+    """Cas signalé 2026-10-06 : 5 chiffres -> 0 devant, dans le fichier
+    mandats (FRST et RCUR) ET dans l'adresse complète de l'export CRM."""
+    result = generate_mandats([_base_row(**{"Code postal": 75001})], PrelevementRules(), today=date(2026, 9, 21))
+    assert {m.code_postal for m in result.mandats} == {"075001"}
+    assert all("075001 Paris" in c.adresse_complete for c in result.export_crm)

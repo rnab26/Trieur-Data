@@ -197,7 +197,7 @@ MANDAT_COLONNES_NOTES: dict[str, str] = {
     "Telephone": "Règle \"Numéro de téléphone\" : Téléphone en priorité, repli sur Mobile.",
     "Adresse": "Copié tel quel du CRM.",
     "Ville": "Copié tel quel du CRM.",
-    "Code_postal": "Copié tel quel du CRM.",
+    "Code_postal": "Règle \"Code postal\" : 5 chiffres -> un 0 est ajouté devant (6 chiffres), sinon copié tel quel.",
     "Pays": "Toujours \"FR\".",
     "IBAN": "Du CRM, normalisé et vérifié (contrôle mod-97) -- règle \"Exclusions\".",
     "BIC": "Du CRM, complété à 11 caractères si besoin.",

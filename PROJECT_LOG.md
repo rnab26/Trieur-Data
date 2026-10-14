@@ -4713,3 +4713,10 @@ humain).
   de Raphaël y écrit ses demandes de règles) ou le remplacer par le cockpit central.
 - [ ] À vérifier en production avec un vrai compte administrateur : le bouton « Demandes »
   apparaît dans le menu (ordinateur) et ouvre le panneau (non vérifiable sans identifiants).
+- [x] Mise en ligne du 2026-10-14 : site `trieur-data-app-test` seulement (l'API `trieur-data` n'a pas
+  changé, donc pas redéployée). Vérifié ensuite sur le vrai site : il sert le nouveau code et le
+  parcours (33 contrôles) rejoué dessus avec des comptes simulés est complet. Tests du dépôt : verts.
+- **Piège Render** : Render ignore un envoi dont le MESSAGE contient `[skip render]` **n'importe où**,
+  même dans une phrase qui dit de ne pas l'utiliser. Le premier envoi de ce changement a été ignoré
+  pour cette raison (événement « commit ignoré ») ; mise en ligne lancée à la main (API Render,
+  `trigger_deploy`). Un message qui doit déployer ne contient jamais cette phrase.

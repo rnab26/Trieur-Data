@@ -4751,3 +4751,54 @@ Branche `agent/echelle-bdd` (pas fusionnée). Demande : mesurer à un volume ré
 - [ ] À appliquer : le reste de la migration 0034 sur la vraie base. Sur une table déjà grosse, créer les deux index avec `create index concurrently` avant (la création bloque les écritures le temps de sa durée).
 - [ ] Limites connues, non traitées : (a) la liste par page (`offset`) reste lente très en profondeur (11 à 20 s à la ligne 450 000 ; rarement atteint, l'export et la recherche passent par curseur) ; (b) l'export tient tout en mémoire (pandas) : plafond 250 000 lignes, un vrai export en flux serait la suite ; (c) un filtre sur « Modifié par » (nom résolu côté serveur d'appli) ne porte toujours que sur la page chargée ; (d) l'écran Streamlit historique (`views/tab_database.py`) garde l'ancien filtre sur le lot chargé (l'interface React/API est celle qui bénéficie du changement) ; (e) la recherche côté base ne couvre pas le nom du modifieur (« Modifié par ») ; (f) l'index de recherche pèse (~le tiers de la table) et alourdit un peu les imports : à surveiller sur de très gros imports.
 - Piège rencontré : `scripts/sql.sh` retire le `;` final de CHAQUE ligne (sed par ligne) : un SQL de plusieurs lignes (fonction) échoue ; l'envoyer sur une seule ligne. Et la base coupe toute requête à 8 s : les mesures longues passent par une tâche pg_cron à usage unique (qui se désinscrit seule ; si elle échoue avant, elle recommence : surveiller).
+
+
+## 2026-10-14 — Base « Leads » pour 50 à 60 millions de lignes — chantier cockpit 6547bd6a (rouvert)
+
+Branche `agent/leads-massifs` (poussée, pas de PR, pas fusionnée). Besoin : importer beaucoup de fichiers, supprimer les doublons, marquer des sources bonnes/mauvaises, exporter par département (10 à 15 M de lignes) en excluant des sources, sans jamais tout afficher.
+
+**Constat honnête** : la livraison du matin (`trieur_data.records`, jsonb + index trigramme + export en mémoire plafonné à 250 000 lignes) ne tient PAS à 60 M (jsonb ≈ 3 fois plus gros, index de recherche ≈ 1/3 en plus, export en mémoire sur Render 512 Mo). D'où une table à part ; `records` et l'écran Prélèvement ne sont pas touchés.
+
+**Contraintes lues dans le code / la base** : l'API n'a que `SUPABASE_URL` + clé publique (PostgREST avec le jeton de l'utilisateur) : aucune connexion Postgres directe sur Render ; la base coupe toute requête à 8 s (rôle `authenticated`, et aussi `scripts/sql.sh`) ; Supabase = offre GRATUITE (`get_organization`), projet partagé avec Jarvis et le cockpit, max 60 connexions, `shared_buffers` 224 Mo. Doc Supabase lue : le gratuit passe en lecture seule à 500 Mo de base.
+
+**Conception retenue** (`supabase/migrations/0035_leads_massifs.sql`, additive et idempotente) :
+- `leads` : colonnes typées, **partitionnée par département** (95 + Corse 2A/2B + DOM + « autres » = 104 partitions) ; clé = téléphone mobile, sinon fixe, sinon e-mail (hash) ; `PRIMARY KEY (dept, cle)` = le seul index ; import `insert … on conflict do nothing` (doublons comptés par source et par import, 1 000 exemples gardés par import) ; ligne sans téléphone ni e-mail = « invalide », non gardée.
+- Pourquoi par département : exporter un département = lire un fichier de bout en bout (parcours physique par blocs, sans index, progression exacte). Les index « département + source » et trigramme ne servent à rien ici et coûteraient des Go.
+- `leads_stats(dept, source_id, n)` tenue à jour par l'import : comptes exacts et instantanés (départements + sources exclues) sans balayer la table.
+- Une seule lecture `leads_lire` (aperçu / CSV / comptage), par fenêtres de `pas_blocs` blocs, curseur (département, position), temps borné (`budget_ms`) pour rester sous les 8 s : au-delà elle rend « suite ».
+- Tout est réglable dans `leads_reglages` (taille de lot, fenêtre, page d'aperçu, séparateur CSV, préfixe de téléphone, taille max d'import, durée du lien…), modifiable par un admin (`PUT /leads/reglages/{clé}`).
+- Droits : tables fermées (RLS sans politique, aucun droit), tout passe par des fonctions `security definer` qui vérifient `is_org_member` / `can_write` de l'environnement Leads. Les fonctions ne sont ouvertes qu'à `authenticated`.
+- **Export** : flux CSV HTTP (`GET /leads/exports/{id}/fichier`), l'API enchaîne les fenêtres (mémoire constante), lien à usage unique (un lien ne peut pas porter `Authorization`), suivi en base, annulation, reprise (point de reprise = début de la fenêtre en cours : aucune ligne perdue, au pire la jonction en double). Non retenu : fichier dans Supabase Storage (limite de taille de fichier du forfait gratuit, 60 Go de transit, pas de connexion directe pour un vrai « COPY »).
+- **Import** : l'API lit le fichier par morceaux (CSV : mémoire constante ; Excel : lu en entier, limite) et envoie des lots de 5 000 lignes à `leads_importer_lot` ; progression écrite dans la MÊME transaction que le lot (reprise sûre : on renvoie le même fichier, il saute les lignes déjà faites) ; un lot coupé par la base est coupé en deux.
+- Code : `trieur/leads.py` (logique), `api/leads.py` (routes `/leads/*`, branchées par 4 lignes à la fin d'`api/main.py`), `frontend/src/screens/LeadsScreen.tsx` (onglet « Leads », administrateurs seulement : Exporter / Importer / Sources).
+
+**Mesuré** (schéma jetable `test_leads_*`, données fictives, supprimé à chaque fois ; base partagée : plafond fixé à 345 Mo, jamais dépassé, 290 Mo au plus ; base 126 Mo avant et après) :
+| Mesure | Résultat |
+|---|---|
+| Poids par ligne (950 000 lignes dans 2 départements « pleins » de 630 000 et 300 000) | **177 octets** = 144 table + 33 index (150 000 lignes sur 94 départements : 189) |
+| Import par la fonction (lots de 5 000, depuis ce conteneur) | 3 800 à 4 600 lignes/s (table presque vide) |
+| Aperçu de 300 lignes | 0,35 à 0,9 s (aller-retour compris) ; filtre rare sur un département de 630 000 lignes : 0,5 à 2 s |
+| Compte instantané (statistiques) | 0,3 s (aller-retour) |
+| Compte exact d'un département de 630 000 lignes | 0,8 s à chaud ; 4,8 s (2 requêtes) juste après l'import |
+| Export CSV, 852 903 lignes (97 Mo), 17 requêtes | 65 s = 13 200 lignes/s depuis ce conteneur ; côté base ≈ 0,5 s pour 57 000 lignes |
+Le gros du temps d'un export est le transfert, pas la base. Première lecture après un import plus lente (la base marque les lignes : ça se règle seul, l'API réduit alors la fenêtre si la base coupe).
+
+**Extrapolé à 60 M (NON mesuré)** : 60 M × 177 à 189 octets = **10,6 à 11,3 Go**, donc **14 à 16 Go de disque** (journal d'écriture 1 Go, nettoyage, marge). Export de 15 M lignes : ≈ 19 min au débit mesuré ici (le débit réel dépend du lien Render ↔ Supabase, non mesuré). Import de 60 M : 4 h à 4 000 lignes/s, mais à cette taille l'index (≈ 2 Go) ne tient plus dans la mémoire (224 Mo) : le débit sera plus bas, NON mesuré (je ne pouvais pas remplir la base).
+
+**Argent** : le gratuit (500 Mo) ne tient qu'environ 2 millions de lignes. 60 M exige une offre payante. Rien n'est acheté. Prix lus dans la doc Supabase (à vérifier sur le compte) : Pro 25 $/mois, 8 Go de disque inclus, 0,125 $/Go/mois au-delà, calcul « Small » 15 $/mois dans leur exemple (crédit de 10 $). Question posée dans le cockpit (offre Pro / moins de colonnes / projet séparé).
+
+**Appliqué à la VRAIE base** : la migration 0035 (47 instructions : 6 tables, 104 partitions, 30 fonctions), objets neufs et vides, rien de modifié ni supprimé. Vérifié : 0 ligne, base 128 Mo, `authenticated` n'a aucun accès direct aux tables et peut exécuter les fonctions, `anon` non.
+
+**Tests** : `tests/test_leads.py` (44, faux client) ; `python3 scripts/verifier_leads_sql.py` (54 contrôles sur schéma jetable : normalisation, dédoublonnage, comptes, aperçu par curseur, CSV par fenêtres, droits, annulation) ; `python3 scripts/verifier_leads_api.py` (37 : le VRAI code de l'API contre la vraie base Postgres : import en tâche de fond, doublons, exports, coupure + reprise, annulation, reprise d'import) ; `python3 scripts/verifier_leads_page.py` (30 contrôles dans Chromium 390×844, API simulée : états vide / chargement / erreur, pagination, départements, filtres, compte exact, export + suivi + annulation, import + reprise, sources) ; `python3 scripts/mesurer_leads.py` (les mesures ci-dessus). Suite pytest : 595 verts ; 2 échecs `test_e2e_smoke.py` identiques sur `main` (Chromium de Playwright 1248 absent du conteneur, présent en 1194).
+
+**Bugs trouvés et corrigés en route** : `leads_job_annuler` / `leads_job_etat` rendaient un objet vide (donc « succès ») quand rien n'était mis à jour ; les doublons internes d'un lot étaient comptés « invalides » ; point de reprise d'export écrit après l'envoi (une coupure pendant l'envoi ne pouvait pas être reprise) ; fenêtre d'export trop grande (1500 blocs) coupée à 8 s sur des lignes toutes fraîches (budget de temps ajouté).
+
+**Limites connues**
+- Dédoublonnage « par département » : le même téléphone avec deux codes postaux de départements différents reste en deux lignes (une unicité mondiale coûterait une table de 2 Go de plus et doublerait les écritures).
+- Pas de suppression des lignes d'une source ni d'annulation d'un import (non demandé ; à faire en tâche découpée).
+- Le lien de téléchargement est valable 15 min et l'export tient tant que le jeton de connexion (1 h) vit : un export de plus d'une heure s'interrompt, « Reprendre » donne la suite.
+- Fichier d'import : 2 048 Mo au plus (réglable) ; limite de taille de requête du proxy Render NON vérifiée ; Excel lu en entier (préférer le CSV).
+- Pas de colonnes redimensionnables dans l'aperçu (défilement horizontal). Page visible des administrateurs seulement.
+- Tâche de fond dans le processus de l'API : un redémarrage de Render la coupe (elle est marquée interrompue au bout de `silence_job_s`, reprise possible).
+- `analyze` de la table parente dépasse 8 s : l'optimiseur travaille sans statistiques fraîches ; à lancer partition par partition si besoin.
+- [ ] À faire par Raphaël : décision d'offre (cockpit). [ ] À vérifier sur le vrai site après fusion et mise en ligne de l'API (la migration est déjà appliquée).

@@ -21,7 +21,11 @@ const importCockpitScreen = () =>
 const importPrelevementScreen = () =>
   import('@/screens/PrelevementScreen').then((m) => ({ default: m.PrelevementScreen }))
 
+const importLeadsScreen = () =>
+  import('@/screens/LeadsScreen').then((m) => ({ default: m.LeadsScreen }))
+
 const DatabaseScreen = lazy(importDatabaseScreen)
+const LeadsScreen = lazy(importLeadsScreen)
 const PipelineScreen = lazy(importPipelineScreen)
 const CockpitScreen = lazy(importCockpitScreen)
 const PrelevementScreen = lazy(importPrelevementScreen)
@@ -37,7 +41,7 @@ const PrelevementScreen = lazy(importPrelevementScreen)
 // sans repasser par le réseau ni afficher le fallback.
 function prefetchEcrans(isAdmin: boolean) {
   const importers = isAdmin
-    ? [importDatabaseScreen, importPipelineScreen, importCockpitScreen, importPrelevementScreen]
+    ? [importDatabaseScreen, importPipelineScreen, importCockpitScreen, importPrelevementScreen, importLeadsScreen]
     : [importDatabaseScreen, importPipelineScreen]
   for (const importer of importers) {
     importer().catch(() => {
@@ -103,9 +107,9 @@ class EcranErrorBoundary extends Component<{ children: ReactNode }, { failed: bo
   }
 }
 
-type Ecran = 'database' | 'pipeline' | 'cockpit' | 'prelevement'
+type Ecran = 'database' | 'pipeline' | 'cockpit' | 'prelevement' | 'leads'
 
-const ECRAN_VALIDES: Ecran[] = ['database', 'pipeline', 'cockpit', 'prelevement']
+const ECRAN_VALIDES: Ecran[] = ['database', 'pipeline', 'cockpit', 'prelevement', 'leads']
 const ECRAN_STORAGE_KEY = 'trieur_dernier_ecran'
 
 // Retour de Raphaël (2026-09-24) : "quoi qu'il arrive on arrive sur
@@ -201,6 +205,7 @@ function AppContent() {
     ['pipeline', 'Trieur de Data'],
     ...(isAdmin
       ? ([
+          ['leads', 'Leads'],
           ['prelevement', 'Prélèvement'],
           ['cockpit', 'Cockpit'],
         ] as [Ecran, string][])
@@ -237,8 +242,9 @@ function AppContent() {
         <Suspense fallback={<EcranFallback />}>
           {ecran === 'cockpit' && isAdmin && <CockpitScreen />}
           {ecran === 'prelevement' && isAdmin && <PrelevementScreen />}
+          {ecran === 'leads' && isAdmin && <LeadsScreen />}
           {ecran === 'pipeline' && <PipelineScreen />}
-          {(ecran === 'database' || ((ecran === 'cockpit' || ecran === 'prelevement') && !isAdmin)) && (
+          {(ecran === 'database' || ((ecran === 'cockpit' || ecran === 'prelevement' || ecran === 'leads') && !isAdmin)) && (
             <DatabaseScreen />
           )}
         </Suspense>

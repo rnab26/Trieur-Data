@@ -1419,3 +1419,139 @@ export function downloadPrelevementFile(result: PrelevementGenerateResult) {
   a.remove()
   URL.revokeObjectURL(url)
 }
+
+// ---------------------------------------------------------------
+// Base Leads à très grand volume (migration 0035, api/leads.py) -- page dédiée
+// ---------------------------------------------------------------
+
+export type LeadsStatut = 'a_verifier' | 'bonne' | 'mauvaise'
+
+export type LeadsSource = {
+  id: number
+  nom: string
+  statut: LeadsStatut
+  note: string | null
+  lignes: number
+  lignes_lues: number
+  doublons_rejetes: number
+  invalides: number
+}
+
+export type LeadsDept = { dept: number; libelle: string; n: number }
+
+export type LeadsJob = {
+  id: string
+  kind: 'import' | 'export' | 'comptage'
+  status: 'en_cours' | 'termine' | 'annule' | 'interrompu' | 'erreur'
+  filename: string | null
+  source_id: number | null
+  lignes_lues: number
+  lignes_total: number | null
+  inserees: number
+  doublons: number
+  invalides: number
+  message: string | null
+  params: Record<string, unknown> | null
+  created_at: string
+  updated_at: string
+  silencieuse?: boolean
+}
+
+export type LeadsSelection = {
+  depts: number[]
+  exclues: number[]
+  filtres: Record<string, { op: FilterOperator; value: string }>
+}
+
+export type LeadsApercu = {
+  rows: Record<string, string | number | null>[]
+  suite: { dept: number; apres: string } | null
+  taille_page: number
+}
+
+export type LeadsCurseur = { dept: number; apres: string } | null
+
+function listeParam(vals: number[]) {
+  return vals.join(',')
+}
+
+export function leadsCompter(depts: number[], exclues: number[]) {
+  const p = new URLSearchParams({ depts: listeParam(depts), exclues: listeParam(exclues) })
+  return request<{ par_departement: LeadsDept[]; total: number }>(`/leads/compter?${p.toString()}`)
+}
+
+export function leadsApercu(sel: LeadsSelection, curseur: LeadsCurseur) {
+  const p = new URLSearchParams({
+    depts: listeParam(sel.depts),
+    exclues: listeParam(sel.exclues),
+    filtres: JSON.stringify(sel.filtres),
+  })
+  if (curseur) {
+    p.set('dept', String(curseur.dept))
+    p.set('apres', curseur.apres)
+  }
+  return request<LeadsApercu>(`/leads/apercu?${p.toString()}`)
+}
+
+export function leadsSources() {
+  return request<{ sources: LeadsSource[] }>('/leads/sources')
+}
+
+export function leadsRegler(id: number, statut: LeadsStatut) {
+  return request<{ id: number; statut: LeadsStatut }>(`/leads/sources/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ statut }),
+  })
+}
+
+export function leadsJobs(kind?: LeadsJob['kind']) {
+  return request<{ jobs: LeadsJob[] }>(`/leads/jobs${kind ? `?kind=${kind}` : ''}`)
+}
+
+export function leadsJob(id: string) {
+  return request<LeadsJob>(`/leads/jobs/${id}`)
+}
+
+export function leadsAnnuler(id: string) {
+  return request<LeadsJob>(`/leads/jobs/${id}/annuler`, { method: 'POST' })
+}
+
+export function leadsAbandonner(id: string) {
+  return request<LeadsJob>(`/leads/jobs/${id}/abandonner`, { method: 'POST' })
+}
+
+export function leadsDoublons(id: string) {
+  return request<{
+    doublons: { dept: string; cle: number; nom: string | null; source: string; source_existante: string | null }[]
+  }>(`/leads/jobs/${id}/doublons`)
+}
+
+export function leadsComptage(sel: LeadsSelection) {
+  return request<{ job: LeadsJob }>('/leads/comptages', { method: 'POST', body: JSON.stringify(sel) })
+}
+
+export function leadsCreerExport(sel: LeadsSelection) {
+  return request<{ job: LeadsJob; url: string }>('/leads/exports', { method: 'POST', body: JSON.stringify(sel) })
+}
+
+export function leadsReprendreExport(id: string) {
+  return request<{ job: LeadsJob; url: string }>(`/leads/exports/${id}/reprise`, { method: 'POST' })
+}
+
+// Le téléchargement est un lien à usage unique (pas d'en-tête Authorization possible sur un lien).
+export function leadsUrlTelechargement(url: string) {
+  return `${API_URL}${url}`
+}
+
+export async function leadsImporter(file: File, source: string, reprendre?: string) {
+  const headers = await authHeader()
+  const form = new FormData()
+  form.set('file', file)
+  form.set('source', source)
+  if (reprendre) form.set('reprendre', reprendre)
+  const res = await safeFetch(`${API_URL}/leads/imports`, { method: 'POST', headers, body: form })
+  if (!res.ok) {
+    return throwForErrorResponse(res)
+  }
+  return safeReadJson<{ job: LeadsJob; colonnes_reconnues: Record<string, string>; colonnes_ignorees: string[] }>(res)
+}

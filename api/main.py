@@ -3377,3 +3377,12 @@ def patch_chantier_question(
         ctx.client, question_id, body.answer.strip(), body.comment.strip() if body.comment else None,
     )
     return list_chantier_questions(ctx.client, chantier_id)
+
+
+# ---------------------------------------------------------------
+# Base Leads à très grand volume (migration 0035) -- routes dans api/leads.py,
+# logique dans trieur/leads.py. Aucun écran existant n'est touché.
+# ---------------------------------------------------------------
+from api.leads import creer_routeur as _creer_routeur_leads  # noqa: E402
+
+app.include_router(_creer_routeur_leads(get_current_ctx))

@@ -168,6 +168,9 @@ export type RecordsPage = {
   page: number
   page_size: number
   total: number
+  // true : plus de `total` correspondances (compte plafonné côté serveur)
+  total_capped?: boolean
+  has_more?: boolean
   fetched: number
   rows: RecordRow[]
 }

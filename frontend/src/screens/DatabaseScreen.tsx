@@ -56,6 +56,9 @@ export function DatabaseScreen() {
 
   const [rows, setRows] = useState<RecordRow[]>([])
   const [total, setTotal] = useState(0)
+  // true : plus de `total` correspondances (le serveur ne compte pas au-delà d'un plafond)
+  const [totalCapped, setTotalCapped] = useState(false)
+  const [hasMoreRows, setHasMoreRows] = useState(false)
   const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
@@ -201,6 +204,8 @@ export function DatabaseScreen() {
         if (requestId !== requestIdRef.current) return
         setRows((prev) => (append ? [...prev, ...data.rows] : data.rows))
         setTotal(data.total)
+        setTotalCapped(Boolean(data.total_capped))
+        setHasMoreRows(Boolean(data.has_more))
         setPage(data.page)
         // Le lot chargé change (nouvelle page, nouvelle recherche...) :
         // une sélection sur d'anciennes positions n'a plus de sens --
@@ -287,7 +292,8 @@ export function DatabaseScreen() {
     setSelectedIds((prev) => (prev.length === rows.length ? [] : rows.map((r) => String(r._id))))
   }
 
-  const hasMore = rows.length < total
+  const hasMore = hasMoreRows
+  const totalLabel = totalCapped ? `${total}+` : String(total)
 
   return (
     <div className="mx-auto max-w-6xl p-4">
@@ -446,7 +452,7 @@ export function DatabaseScreen() {
                 {exporting === 'xlsx' ? 'Préparation…' : 'Exporter Excel'}
               </Button>
               <span className="text-xs text-[var(--muted)]">
-                Exporte tout l'environnement ({total}), avec la recherche/les filtres actuels.
+                Exporte tout l'environnement ({totalLabel}), avec la recherche/les filtres actuels.
               </span>
             </div>
           )}
@@ -544,7 +550,7 @@ export function DatabaseScreen() {
           {!loading && !error && hasMore && (
             <div className="mt-4 flex justify-center">
               <Button variant="secondary" onClick={handleLoadMore} disabled={loadingMore}>
-                {loadingMore ? 'Chargement…' : `Charger plus (${rows.length}/${total})`}
+                {loadingMore ? 'Chargement…' : `Charger plus (${rows.length}/${totalLabel})`}
               </Button>
             </div>
           )}

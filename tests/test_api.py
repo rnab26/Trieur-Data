@@ -238,6 +238,64 @@ class _FakePostgrest:
                 return SimpleNamespace(data=is_owner)
 
             return SimpleNamespace(execute=_execute)
+        # Reproduit trieur_data.count_org_records (migration 0034).
+        if name == "count_org_records":
+            def _execute():
+                n = sum(1 for r in self.tables.get("records", []) if r["org_id"] == params["p_org_id"])
+                return SimpleNamespace(data=n)
+
+            return SimpleNamespace(execute=_execute)
+        # Reproduit trieur_data.search_records (migration 0034) : recherche +
+        # filtres + page calculés "par la base" sur TOUTES les lignes de
+        # l'environnement (contrairement à l'ancien filtre sur le lot chargé).
+        if name == "search_records":
+            def _execute():
+                rows = [r for r in self.tables.get("records", []) if r["org_id"] == params["p_org_id"]]
+                rows.sort(key=lambda r: (r["created_at"], r["id"]), reverse=True)
+                needle = (params.get("p_search") or "").strip().lower()
+                if needle:
+                    rows = [
+                        r for r in rows
+                        if needle in " ".join(str(v) for v in r["data"].values() if v is not None).lower()
+                    ]
+                for col, spec in (params.get("p_filters") or {}).items():
+                    op, val = spec.get("op", "contient"), (spec.get("value") or "").lower()
+
+                    def _cell(r, col=col):
+                        v = r["data"].get(col)
+                        return "" if v is None else str(v).lower()
+
+                    tests = {
+                        "vide": lambda r: _cell(r) == "",
+                        "non vide": lambda r: _cell(r) != "",
+                        "égal à": lambda r, val=val: _cell(r) == val,
+                        "ne contient pas": lambda r, val=val: val not in _cell(r),
+                        "contient": lambda r, val=val: val in _cell(r),
+                    }
+                    rows = [r for r in rows if tests[op](r)]
+                total = len(rows)
+                after_id = params.get("p_after_id")
+                if after_id is not None:
+                    key = (params["p_after_created"], after_id)
+                    rows = [r for r in rows if (r["created_at"], r["id"]) < key]
+                    offset = 0
+                else:
+                    offset = params.get("p_offset", 0)
+                page = rows[offset: offset + params.get("p_limit", 300)]
+                out = []
+                for r in page:
+                    batch = r.get("import_batches") or {}
+                    out.append({
+                        "id": r["id"], "data": r["data"], "created_at": r["created_at"],
+                        "updated_at": r.get("updated_at"), "updated_by": r.get("updated_by"),
+                        "source_filename": batch.get("source_filename"), "imported_at": batch.get("imported_at"),
+                        "tags": ", ".join(sorted(
+                            t["tag"] for t in self.tables.get("record_tags", []) if t["record_id"] == r["id"]
+                        )), "total": min(total, params.get("p_total_cap", 10000) + 1) if params.get("p_with_total") else None,
+                    })
+                return SimpleNamespace(data=out)
+
+            return SimpleNamespace(execute=_execute)
         raise NotImplementedError(f"RPC non simulé dans ce faux client : {name}")
 
     def auth(self, _token):
@@ -445,6 +503,134 @@ def test_records_search_filters_current_page(client_factory):
     rows = res.json()["rows"]
     assert len(rows) == 1
     assert rows[0]["NOM"] == "Dupont"
+
+
+def test_records_search_reaches_beyond_the_first_page(client_factory):
+    """Régression d'échelle (chantier 6547bd6a) : la recherche portait sur le
+    seul lot chargé ; elle doit retrouver un client situé bien au-delà de la
+    première page, et `total` = nombre de correspondances (pas de l'environnement)."""
+    records = [
+        {**_record(i), "created_at": f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}Z",
+         "data": {"NOM": f"Client {i}", "VILLE": "Lyon" if i == 3 else "Paris"}}
+        for i in range(1, 241)
+    ]  # le plus ancien (i=1) est tout en bas ; "Lyon" = la 3e plus ancienne ligne
+    tc = client_factory(_make_client(records=records))
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+
+    res = tc.get("/orgs/org-1/records", params={"search": "lyon", "page_size": 5}, headers=headers)
+    body = res.json()
+    assert body["total"] == 1
+    assert [r["NOM"] for r in body["rows"]] == ["Client 3"]
+
+    res = tc.get("/orgs/org-1/records", params={"page_size": 5}, headers=headers)
+    assert res.json()["total"] == 240  # sans recherche : total de l'environnement
+
+
+def test_records_column_filter_reaches_beyond_the_first_page(client_factory):
+    records = [
+        {**_record(i), "created_at": f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}Z",
+         "data": {"NOM": f"Client {i}", "VILLE": "Lyon" if i == 3 else "Paris"}}
+        for i in range(1, 241)
+    ]
+    tc = client_factory(_make_client(records=records))
+    res = tc.get(
+        "/orgs/org-1/records",
+        params={"page_size": 5, "col_filters": json.dumps({"VILLE": {"op": "égal à", "value": "lyon"}})},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    body = res.json()
+    assert body["total"] == 1 and body["rows"][0]["NOM"] == "Client 3"
+
+
+def test_records_search_second_page_continues(client_factory):
+    records = [
+        {**_record(i), "created_at": f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}Z", "data": {"NOM": f"Paris {i}"}}
+        for i in range(1, 8)
+    ]
+    tc = client_factory(_make_client(records=records))
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    p1 = tc.get("/orgs/org-1/records", params={"search": "paris", "page_size": 3, "page": 1}, headers=headers).json()
+    p2 = tc.get("/orgs/org-1/records", params={"search": "paris", "page_size": 3, "page": 3}, headers=headers).json()
+    assert p1["total"] == 7 and len(p1["rows"]) == 3
+    assert [r["NOM"] for r in p2["rows"]] == ["Paris 1"]  # 7 lignes : pages 3+3+1
+
+
+def test_export_filters_whole_environment_in_pages(client_factory, monkeypatch):
+    """L'export parcourt TOUT l'environnement par curseur, pas seulement le
+    premier lot, avec la même recherche que la liste -- et jamais plus d'une
+    page à la fois côté base (page de 2 ici pour forcer plusieurs tours)."""
+    import trieur.db as dbmod
+
+    real = dbmod.iter_records_filtered
+    monkeypatch.setattr(
+        "api.main.iter_records_filtered",
+        lambda c, o, s, f, page_size=2: real(c, o, s, f, page_size=2),
+    )
+    records = [
+        {**_record(i), "created_at": f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}Z",
+         "data": {"NOM": f"Client {i}", "VILLE": "Lyon" if i % 3 == 0 else "Paris"}}
+        for i in range(1, 11)
+    ]
+    tc = client_factory(_make_client(records=records))
+    res = tc.get(
+        "/orgs/org-1/records/export",
+        params={"format": "csv", "search": "lyon"},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert res.status_code == 200
+    text = res.content.decode("utf-8-sig")
+    assert "Client 3" in text and "Client 6" in text and "Client 9" in text
+    assert "Client 1," not in text and "Client 2," not in text
+
+
+def test_records_search_total_is_capped_and_has_more_stays_correct(client_factory, monkeypatch):
+    """Compter toutes les correspondances est ruineux à grande échelle : le total
+    s'arrête à un plafond (`total_capped`), et `has_more` dit s'il reste des pages."""
+    monkeypatch.setattr("api.main.TOTAL_CAP", 4)
+    records = [
+        {**_record(i), "created_at": f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}Z", "data": {"NOM": f"Paris {i}"}}
+        for i in range(1, 11)
+    ]
+    tc = client_factory(_make_client(records=records))
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    p1 = tc.get("/orgs/org-1/records", params={"search": "paris", "page_size": 3}, headers=headers).json()
+    assert p1["total_capped"] is True and p1["total"] == 4 and p1["has_more"] is True
+    p4 = tc.get("/orgs/org-1/records", params={"search": "paris", "page_size": 3, "page": 4}, headers=headers).json()
+    assert p4["has_more"] is False and len(p4["rows"]) == 1
+    few = tc.get("/orgs/org-1/records", params={"search": "paris 10"}, headers=headers).json()
+    assert few["total_capped"] is False and few["total"] == 1 and few["has_more"] is False
+
+
+def test_export_refuses_beyond_the_row_cap(client_factory, monkeypatch):
+    """Un export trop gros est refusé proprement (413) plutôt que de saturer la mémoire."""
+    monkeypatch.setattr("api.main.EXPORT_MAX_ROWS", 2)
+    tc = client_factory(_make_client(records=[_record(i) for i in range(1, 4)]))
+    res = tc.get("/orgs/org-1/records/export", params={"format": "csv"}, headers={"Authorization": f"Bearer {TOKEN}"})
+    assert res.status_code == 413
+    assert "affine" in res.json()["detail"]
+
+
+def test_records_search_falls_back_when_migration_0034_is_missing(client_factory):
+    """Code déployé avant la migration : la recherche retombe sur l'ancien
+    comportement (lot chargé) au lieu de planter."""
+    fake = _make_client(records=[{**_record(1), "data": {"NOM": "Dupont"}}, {**_record(2), "data": {"NOM": "Martin"}}])
+    real_rpc = fake.postgrest.rpc
+
+    def rpc(name, params):
+        if name in ("search_records", "count_org_records"):
+            def _execute():
+                raise RuntimeError("{'code': 'PGRST202', 'message': 'Could not find the function'}")
+            return SimpleNamespace(execute=_execute)
+        return real_rpc(name, params)
+
+    fake.postgrest.rpc = rpc
+    tc = client_factory(fake)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    res = tc.get("/orgs/org-1/records", params={"search": "dupont"}, headers=headers)
+    assert res.status_code == 200 and [r["NOM"] for r in res.json()["rows"]] == ["Dupont"]
+    assert res.json()["total"] == 2
+    res = tc.get("/orgs/org-1/records/export", params={"format": "csv", "search": "martin"}, headers=headers)
+    assert res.status_code == 200 and "Martin" in res.content.decode("utf-8-sig")
 
 
 def test_records_invalid_col_filters_json_is_400(client_factory):

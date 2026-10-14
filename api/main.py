@@ -65,6 +65,13 @@ from trieur.db import (
     insert_pipeline_rows_only,
     is_pipeline_dedupe_lock_owner,
     list_all_records,
+    iter_records_filtered,
+    SearchUnavailable,
+    search_records,
+    split_db_filters,
+    EXPORT_MAX_ROWS,
+    TOTAL_CAP,
+    count_matching_records,
     list_all_prelevement_mandats,
     list_chantier_messages,
     list_chantier_questions,
@@ -562,25 +569,52 @@ def list_org_records(
     col_filters: str = Query("{}", description="JSON : {colonne: {op, value}}"),
     ctx: AuthCtx = Depends(require_org_access),
 ):
-    """Liste paginée des clients de l'environnement. NOTE (limite
-    connue, cohérente avec l'existant côté Streamlit -- voir
-    views/tab_database.py:_render_client_list) : `search`/`col_filters`
-    filtrent le LOT chargé pour cette page, pas tout l'historique --
-    même comportement que le "Charger plus" de l'interface actuelle,
-    pas une régression introduite ici."""
+    """Liste paginée des clients de l'environnement. `search`/`col_filters`
+    portent sur TOUT l'historique (calculés par la base, trieur_data.search_records),
+    `total` est alors le nombre de lignes qui correspondent. Seule exception :
+    un filtre sur "Modifié par" (nom résolu côté Python) ne filtre que la page
+    chargée."""
     parsed_filters = _parse_col_filters(col_filters)
     master_cols = get_org_master_columns(ctx.client, org_id)
-    total = count_records(ctx.client, org_id)
-    records = list_records(ctx.client, org_id, limit=page_size, offset=(page - 1) * page_size)
+    db_filters, python_filters = split_db_filters(parsed_filters)
+    offset = (page - 1) * page_size
 
-    rows = _apply_tags(ctx.client, _resolve_modifier_names(ctx.client, _build_rows(records, master_cols)))
-    rows = _filter_by_search(rows, search)
-    rows = _filter_by_columns(rows, parsed_filters)
+    use_db = bool(search.strip() or db_filters) and not python_filters
+    records = None
+    total_capped = False
+    if use_db:
+        # Recherche/filtres calculés par la base sur TOUT l'historique de
+        # l'environnement (migration 0034) ; `total` = lignes qui correspondent.
+        try:
+            records, total = search_records(
+                ctx.client, org_id, search, db_filters, limit=page_size, offset=offset, with_total=True,
+                total_cap=TOTAL_CAP,
+            )
+            total = total or 0
+            total_capped = total > TOTAL_CAP
+            total = min(total, TOTAL_CAP)
+            rows = _apply_tags(ctx.client, _resolve_modifier_names(ctx.client, _build_rows(records, master_cols)))
+        except SearchUnavailable:
+            records = None  # migration pas encore appliquée : ancien comportement ci-dessous
+    if records is None:
+        # Sans recherche, ou filtre sur "Modifié par" (nom résolu côté Python),
+        # ou base sans la migration 0034 : filtre sur la page chargée seulement.
+        total = count_records(ctx.client, org_id)
+        records = list_records(ctx.client, org_id, limit=page_size, offset=offset)
+        rows = _apply_tags(ctx.client, _resolve_modifier_names(ctx.client, _build_rows(records, master_cols)))
+        if search.strip() or parsed_filters:
+            rows = _filter_by_search(rows, search)
+            rows = _filter_by_columns(rows, parsed_filters)
 
+    # Reste-t-il des lignes après cette page ? (sans total exact, le client ne
+    # peut plus le déduire de total - lignes reçues.)
+    has_more = len(records) >= page_size if total_capped else (offset + len(records)) < total
     return {
         "page": page,
         "page_size": page_size,
         "total": total,
+        "total_capped": total_capped,  # True : "plus de `total`" correspondances
+        "has_more": has_more,
         "fetched": len(records),
         "rows": rows,
     }
@@ -709,10 +743,37 @@ def export_org_records(
     reference_known = {c for c in known_cols.split(",") if c} or requested_visible
 
     master_cols = get_org_master_columns(ctx.client, org_id)
-    all_records = list_all_records(ctx.client, org_id)
-    rows = _apply_tags(ctx.client, _resolve_modifier_names(ctx.client, _build_rows(all_records, master_cols)))
-    rows = _filter_by_search(rows, search)
-    rows = _filter_by_columns(rows, parsed_filters)
+    db_filters, python_filters = split_db_filters(parsed_filters)
+    rows = None
+    try:
+        if search.strip() or db_filters:
+            matching = count_matching_records(ctx.client, org_id, search, db_filters)
+        else:
+            matching = count_records(ctx.client, org_id)
+        if matching > EXPORT_MAX_ROWS:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"{matching} lignes à exporter : au-delà de {EXPORT_MAX_ROWS} lignes, "
+                    "affine la recherche ou les filtres (export par lots)."
+                ),
+            )
+        # Lignes lues par curseur (rapide à toute profondeur), recherche et
+        # filtres appliqués par la base ; seul un filtre sur "Modifié par"
+        # reste ici.
+        all_records = list(iter_records_filtered(ctx.client, org_id, search, db_filters))
+        tags_text = {r["id"]: r.get("tags_text") or "" for r in all_records}
+        rows = _resolve_modifier_names(ctx.client, _build_rows(all_records, master_cols))
+        for row in rows:
+            row["Étiquettes"] = tags_text.get(row["_id"], "")
+        rows = _filter_by_columns(rows, python_filters)
+    except SearchUnavailable:
+        rows = None  # migration 0034 pas encore appliquée : ancien parcours
+    if rows is None:
+        all_records = list_all_records(ctx.client, org_id)
+        rows = _apply_tags(ctx.client, _resolve_modifier_names(ctx.client, _build_rows(all_records, master_cols)))
+        rows = _filter_by_search(rows, search)
+        rows = _filter_by_columns(rows, parsed_filters)
 
     full_cols: list[str] = []
     for row in rows:

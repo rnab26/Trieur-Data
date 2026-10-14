@@ -58,6 +58,16 @@ class _FakePostgrest:
     def schema(self, _name):
         return self
 
+    def rpc(self, name, _params):
+        # Base SANS la migration 0034 : count_records doit retomber sur l'ancien
+        # comptage (select count=exact) au lieu de planter.
+        def _execute():
+            raise RuntimeError(
+                "{'code': 'PGRST202', 'message': 'Could not find the function trieur_data.%s'}" % name
+            )
+
+        return SimpleNamespace(execute=_execute)
+
     def table(self, _name):
         return self._table
 

@@ -4677,7 +4677,8 @@ humain).
   (prélèvements) » (ancien id `69ae9928`, bloqué : attend l'ICS et la
   comparaison d'un lot complet), « Base de données : tenir à l'échelle »
   (`148e1d51`, libre), « Historique, doublons, impayés et relevé bancaire »
-  (`538d1d12`, à cadrer). Rien n'a été supprimé ni modifié dans
+  (`538d1d12`, mis de côté : à traiter après le SEPA validé, comme demandé).
+  Rien n'a été supprimé ni modifié dans
   `trieur_data.chantiers`. Les 51 anciennes cases ouvertes de ce fichier n'ont
   pas été reprises (journal, pas suivi).
 - Reste dans l'appli du Trieur, inchangé : les demandes de règles du père de

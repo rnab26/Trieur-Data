@@ -4687,3 +4687,29 @@ humain).
   (`.claude/hooks/session-start.sh`, qui liste `trieur_data.chantiers`). Il
   montre les 3 mêmes chantiers que le cockpit central : tant qu'il reste, une
   session voit deux listes.
+
+
+## 2026-10-14 — Bouton « Demandes » du cockpit central dans le menu (administrateurs)
+
+- [x] Raphaël a répondu au questionnaire du cockpit central : emplacement = bouton dans le
+  menu, accès = l'équipe. Fait : un bouton « Demandes » dans le menu du Trieur, réservé aux
+  administrateurs (`useIsAdmin`, même règle que l'onglet Cockpit). Il ouvre la boîte de demandes
+  du cockpit central (écrire une demande ou un bug, voir où ça en est). Code :
+  `frontend/src/lib/cockpitCentral.ts` et `components/CockpitCentral.tsx` (une seule porte : rien
+  d'autre ne pose la balise du module). Sur écran étroit (< 640 px) le module pose son bouton
+  flottant habituel au lieu d'un bouton de plus dans le menu.
+- [x] Défaut trouvé en route et corrigé : sur téléphone (390 px), le menu d'un administrateur
+  faisait déjà 494 px (la page se dézoomait, le sélecteur de thème sortait de l'écran,
+  « Trieur de Data » se coupait sur 3 lignes). La rangée d'onglets défile maintenant au lieu
+  d'élargir la page (`overflow-x-auto`, onglets sur une ligne, l'onglet ouvert reste visible).
+  Ordinateur (1100 px) : menu identique au pixel près, comparé avant/après.
+- [x] Vérifié dans Chromium (33 contrôles, API et base du Trieur simulées, seul le module est
+  vraiment téléchargé) : personne de connecté et compte normal (rien ne se charge), administrateur
+  sur ordinateur et sur téléphone (ouvrir, fermer, Échap), déconnexion avec le panneau ouvert
+  (plus rien d'accroché). Garde-fous permanents : `tests/test_cockpit_central.py`.
+- Note : la clé du projet figure dans le code public (`COCKPIT_CLE`) ; elle sert seulement à
+  reconnaître le projet dans le cockpit, elle ne donne aucun accès à la base.
+- [ ] À décider : garder l'écran Cockpit du Trieur à côté du bouton (recommandé tant que le père
+  de Raphaël y écrit ses demandes de règles) ou le remplacer par le cockpit central.
+- [ ] À vérifier en production avec un vrai compte administrateur : le bouton « Demandes »
+  apparaît dans le menu (ordinateur) et ouvre le panneau (non vérifiable sans identifiants).

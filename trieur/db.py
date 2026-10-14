@@ -406,6 +406,9 @@ def add_org_master_columns(client: Client, org_id: str, new_cols: list[str]) -> 
 # doit être visible par tous les membres de cet environnement.
 # ---------------------------------------------------------------
 
+TAGS_IN_CHUNK = 100
+
+
 @st.cache_data(ttl=30, show_spinner=False)
 def list_org_tags(_client: Client, org_id: str) -> list[str]:
     """Étiquettes déjà utilisées dans cet environnement, triées -- sert à
@@ -423,10 +426,16 @@ def get_record_tags_map(_client: Client, record_ids: tuple[str, ...]) -> dict[st
     ids = tuple(sorted({i for i in record_ids if i}))
     if not ids:
         return {}
-    res = _td(_client, "record_tags").select("record_id, tag").in_("record_id", ids).execute()
     tags_by_record: dict[str, list[str]] = {}
-    for r in res.data or []:
-        tags_by_record.setdefault(r["record_id"], []).append(r["tag"])
+    # Par paquets : un `in_` de milliers d'identifiants fait une adresse trop
+    # longue pour le serveur (page de 2000 lignes, export complet).
+    for i in range(0, len(ids), TAGS_IN_CHUNK):
+        res = (
+            _td(_client, "record_tags").select("record_id, tag")
+            .in_("record_id", ids[i:i + TAGS_IN_CHUNK]).execute()
+        )
+        for r in res.data or []:
+            tags_by_record.setdefault(r["record_id"], []).append(r["tag"])
     for tags in tags_by_record.values():
         tags.sort()
     return tags_by_record
@@ -639,7 +648,26 @@ def import_dataframe(
 LIST_PAGE_SIZE = 300
 
 
+class SearchUnavailable(Exception):
+    """La migration 0034 n'est pas (encore) appliquée à cette base : l'appelant
+    retombe sur l'ancien comportement plutôt que de planter."""
+
+
+def _is_missing_function(exc: Exception) -> bool:
+    text = f"{getattr(exc, 'code', '')} {exc}"
+    return "PGRST202" in text or "Could not find the function" in text
+
+
 def count_records(client: Client, org_id: str) -> int:
+    # Fonction de la migration 0034 : l'appartenance est vérifiée une fois,
+    # sans la politique de lecture appelée ligne par ligne (16 s pour 500 000
+    # lignes mesurées avec l'ancien comptage). Repli : ancien comptage.
+    try:
+        res = client.postgrest.schema("trieur_data").rpc("count_org_records", {"p_org_id": org_id}).execute()
+        return int(res.data or 0)
+    except Exception as exc:  # noqa: BLE001 -- on ne rattrape que "fonction absente"
+        if not _is_missing_function(exc):
+            raise
     res = _td(client, "records").select("id", count="exact").eq("org_id", org_id).limit(1).execute()
     return res.count or 0
 
@@ -690,6 +718,128 @@ def list_all_records(client: Client, org_id: str, page_size: int = LIST_PAGE_SIZ
         all_rows.extend(page)
         offset += len(page)
     return all_rows
+
+
+# Colonnes d'affichage que la base ne sait pas filtrer (le nom du modifieur
+# est résolu depuis les profils côté Python, voir _resolve_modifier_names).
+# Un filtre sur l'une d'elles ne peut pas être appliqué par search_records :
+# l'appelant le garde côté Python (export : sur le résultat déjà réduit ;
+# liste paginée : retour à l'ancien comportement, voir api/main.py).
+COLUMNS_NOT_FILTERABLE_IN_DB = frozenset({"Modifié par"})
+
+# Au-delà, un export complet est refusé plutôt que de saturer la mémoire du
+# serveur (pandas + Excel tiennent tout en mémoire, ~1 Ko par ligne et par
+# copie). Réglable par la variable d'environnement EXPORT_MAX_ROWS (à monter
+# si l'instance a plus de mémoire). Voir api/main.py.
+import os as _os
+
+EXPORT_MAX_ROWS = int(_os.environ.get("EXPORT_MAX_ROWS", "250000"))
+
+# Le total affiché avec une recherche/un filtre est plafonné : compter des
+# centaines de milliers de correspondances coûtait ~25 s (mesuré), la page
+# elle-même quelques ms. Au-delà : "plus de TOTAL_CAP".
+TOTAL_CAP = 10_000
+
+
+def split_db_filters(col_filters: dict | None) -> tuple[dict, dict]:
+    """Sépare les filtres par colonne en (ceux que la base sait appliquer,
+    ceux qui restent à appliquer côté Python)."""
+    in_db: dict = {}
+    in_python: dict = {}
+    for col, spec in (col_filters or {}).items():
+        (in_python if col in COLUMNS_NOT_FILTERABLE_IN_DB else in_db)[col] = spec
+    return in_db, in_python
+
+
+def _rpc_row_to_record(row: dict) -> dict:
+    """Remet une ligne de search_records au même format que list_records
+    (data + import_batches imbriqué), pour que _build_rows s'en serve tel quel."""
+    return {
+        "id": row["id"],
+        "data": row["data"],
+        "created_at": row["created_at"],
+        "updated_at": row.get("updated_at"),
+        "updated_by": row.get("updated_by"),
+        "import_batches": {
+            "source_filename": row.get("source_filename"),
+            "imported_at": row.get("imported_at"),
+        },
+        "tags_text": row.get("tags") or "",
+    }
+
+
+def search_records(
+    client: Client,
+    org_id: str,
+    search: str = "",
+    col_filters: dict | None = None,
+    limit: int = LIST_PAGE_SIZE,
+    offset: int = 0,
+    after: tuple[str, str] | None = None,
+    with_total: bool = False,
+    total_cap: int = TOTAL_CAP,
+) -> tuple[list[dict], int | None]:
+    """Recherche + filtres par colonne + page, calculés PAR LA BASE
+    (trieur_data.search_records, migration 0034) : la recherche porte sur
+    tout l'historique de l'environnement, pas sur le lot déjà chargé.
+    `after` = (created_at, id) de la dernière ligne reçue : page suivante par
+    curseur (rapide à toute profondeur, contrairement à `offset`). Renvoie
+    (lignes au format list_records, total correspondant ou None). Le total
+    s'arrête à `total_cap` + 1 : une valeur > `total_cap` veut dire "plus de
+    `total_cap`" (voir TOTAL_CAP)."""
+    params = {
+        "p_org_id": org_id,
+        "p_search": search or "",
+        "p_filters": col_filters or {},
+        "p_limit": limit,
+        "p_offset": offset,
+        "p_with_total": with_total,
+        "p_total_cap": total_cap,
+    }
+    if after is not None:
+        params["p_after_created"], params["p_after_id"] = after
+    try:
+        res = client.postgrest.schema("trieur_data").rpc("search_records", params).execute()
+    except Exception as exc:  # noqa: BLE001
+        if _is_missing_function(exc):
+            raise SearchUnavailable(str(exc)) from exc
+        raise
+    rows = res.data or []
+    total = rows[0].get("total") if (with_total and rows) else None
+    return [_rpc_row_to_record(r) for r in rows], total
+
+
+def count_matching_records(client: Client, org_id: str, search: str = "", col_filters: dict | None = None) -> int:
+    """Nombre de lignes qui correspondent à la recherche/aux filtres (une
+    seule ligne lue côté réseau)."""
+    rows, total = search_records(
+        client, org_id, search, col_filters, limit=1, with_total=True, total_cap=EXPORT_MAX_ROWS,
+    )
+    return int(total or 0) if rows else 0
+
+
+def iter_records_filtered(
+    client: Client,
+    org_id: str,
+    search: str = "",
+    col_filters: dict | None = None,
+    page_size: int = 1000,
+):
+    """Parcourt TOUTES les lignes qui correspondent, page par page, par
+    curseur (created_at, id) : le coût d'une page ne dépend plus de sa
+    position (l'ancien parcours par offset relisait tout ce qui précède à
+    chaque page). Avance de ce qui est RÉELLEMENT renvoyé (limite serveur
+    max_rows possible), s'arrête à la première page vide. Un import
+    concurrent (lignes plus récentes) ne décale plus rien : le curseur
+    part de la dernière ligne reçue."""
+    after = None
+    while True:
+        page, _ = search_records(client, org_id, search, col_filters, limit=page_size, after=after)
+        if not page:
+            return
+        yield from page
+        last = page[-1]
+        after = (last["created_at"], last["id"])
 
 
 def get_record(client: Client, record_id: str) -> dict | None:

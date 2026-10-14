@@ -4720,3 +4720,34 @@ humain).
   même dans une phrase qui dit de ne pas l'utiliser. Le premier envoi de ce changement a été ignoré
   pour cette raison (événement « commit ignoré ») ; mise en ligne lancée à la main (API Render,
   `trigger_deploy`). Un message qui doit déployer ne contient jamais cette phrase.
+
+
+## 2026-10-14 — Base de données à l'échelle (centaines de milliers / millions de lignes) — chantier cockpit 6547bd6a
+
+Branche `agent/echelle-bdd` (pas fusionnée). Demande : mesurer à un volume réaliste, puis faire tenir recherche, filtres et export.
+
+**Mesure (schéma jetable `test_echelle_*`, copie de structure de `trieur_data.records`, 495 000 lignes fictives dans un environnement + 5 000 dans un autre, RLS active comme en production, rôle `authenticated`, supprimé à la fin ; aucune ligne dans les vraies tables, qui sont vides : 0 ligne, 72 ko).** La limite de temps d'une requête de l'appli est de **8 s** (rôle `authenticated`).
+
+| Requête (500 000 lignes) | Avant | Après |
+|---|---|---|
+| Compter les lignes de l'environnement | 16,4 s | 0,05 à 0,5 s |
+| Liste, page 1 (300 lignes) | 27 s | 3 à 40 ms |
+| Liste, page à la ligne 450 000 (décalage) | 42 s | 11 à 20 s (inchangé : voir limites) |
+| Page à la ligne 450 000 par curseur (export) | 45 s | 6 à 180 ms |
+| Recherche d'une valeur rare | 35 s* | 2 à 60 ms |
+| Recherche très large (tout correspond) + total | 35 s* | 0,3 à 0,4 s |
+| Filtre « contient » (800 villes) + total | 31 s* | 0,2 à 2 s |
+| Filtre « égal à » rare / large + total | 26 s* | 0,2 à 2,7 s / 0,3 à 1,2 s |
+| Filtre « Fichier source » + total | n/a | 0,01 à 0,8 s |
+| IBAN exact (doublons) | 6 ms | 6 ms (déjà indexé) |
+
+*Avant, recherche et filtres n'existaient pas côté base : ils filtraient en Python les 300 lignes déjà chargées (donc **ne trouvaient rien au-delà du lot chargé**, problème de justesse avant d'être un problème de vitesse). Les chiffres « avant » sont le coût d'un balayage complet équivalent. Premier passage = cache froid, second = chaud.
+
+**Causes mesurées** (`EXPLAIN (ANALYZE, BUFFERS)`) : (1) aucun index sur `(org_id, created_at)` : la liste triait tout l'environnement à chaque page ; (2) la politique de lecture `is_org_member(org_id)` (fonction `security definer`, donc appelée **une fois par ligne**) coûtait à elle seule ~16 s pour compter 500 000 lignes ; (3) recherche/filtres : aucun index de recherche, et ils ne portaient que sur le lot chargé ; (4) export : pages à décalage (coût croissant avec la profondeur) + `in_()` de milliers d'identifiants d'étiquettes (adresse trop longue) ; (5) compter toutes les correspondances d'une recherche large : ~25 s.
+
+**Fait** (`supabase/migrations/0034_records_echelle.sql`, idempotente, n'ajoute que des index et des fonctions) : index `records_org_created_idx` ; `record_search_text()` + index trigramme `records_search_trgm_idx` ; `search_records()` (recherche + filtres par colonne + page ou curseur + total plafonné à 10 000, appartenance vérifiée une fois) ; `count_org_records()`. Code : `trieur/db.py` (`search_records`, `iter_records_filtered` par curseur, `count_matching_records`, `split_db_filters`, `count_records` via la nouvelle fonction avec repli, `get_record_tags_map` par paquets de 100), `api/main.py` (liste et export passent par la base ; `total_capped`, `has_more` ; export refusé en 413 au-delà de `EXPORT_MAX_ROWS`, 250 000 par défaut, variable d'environnement), `frontend` (affiche « 10000+ », « Charger plus » suit `has_more`). **Repli** : si la migration n'est pas encore appliquée, l'API garde l'ancien comportement (aucune panne pendant le déploiement).
+- Tests : `tests/test_db_scale.py`, 8 tests ajoutés dans `tests/test_api.py` (dont : recherche et filtre qui retrouvent une ligne au-delà de la première page, export complet par curseur, total plafonné, repli sans migration, 413) ; banc SQL `python3 scripts/verifier_echelle_sql.py` (schéma jetable de 5 000 lignes, 21 contrôles : chaque résultat de `search_records` comparé à un comptage SQL indépendant, curseur sans doublon, non-membre sans accès ; 21/21).
+- Appliqué à la vraie base le 2026-10-14 : **seulement l'index `records_org_created_idx`** (table vide : coût nul). Les fonctions et l'index de recherche sont dans la migration, **à appliquer** (`scripts/sql.sh < …` fonction par fonction, ou à la fusion) ; ils n'ajoutent que du neuf.
+- [ ] À appliquer : le reste de la migration 0034 sur la vraie base. Sur une table déjà grosse, créer les deux index avec `create index concurrently` avant (la création bloque les écritures le temps de sa durée).
+- [ ] Limites connues, non traitées : (a) la liste par page (`offset`) reste lente très en profondeur (11 à 20 s à la ligne 450 000 ; rarement atteint, l'export et la recherche passent par curseur) ; (b) l'export tient tout en mémoire (pandas) : plafond 250 000 lignes, un vrai export en flux serait la suite ; (c) un filtre sur « Modifié par » (nom résolu côté serveur d'appli) ne porte toujours que sur la page chargée ; (d) l'écran Streamlit historique (`views/tab_database.py`) garde l'ancien filtre sur le lot chargé (l'interface React/API est celle qui bénéficie du changement) ; (e) la recherche côté base ne couvre pas le nom du modifieur (« Modifié par ») ; (f) l'index de recherche pèse (~le tiers de la table) et alourdit un peu les imports : à surveiller sur de très gros imports.
+- Piège rencontré : `scripts/sql.sh` retire le `;` final de CHAQUE ligne (sed par ligne) : un SQL de plusieurs lignes (fonction) échoue ; l'envoyer sur une seule ligne. Et la base coupe toute requête à 8 s : les mesures longues passent par une tâche pg_cron à usage unique (qui se désinscrit seule ; si elle échoue avant, elle recommence : surveiller).

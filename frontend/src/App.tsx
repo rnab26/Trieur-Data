@@ -1,8 +1,9 @@
-import { Component, lazy, Suspense, useEffect, useState, type ReactNode } from 'react'
+import { Component, lazy, Suspense, useEffect, useRef, useState, type ReactNode } from 'react'
 import { AuthProvider, useAuth } from '@/lib/AuthContext'
 import { useIsAdmin } from '@/lib/useAccount'
 import { LoginScreen } from '@/screens/LoginScreen'
 import { ThemeToggle } from '@/components/ThemeToggle'
+import { CockpitCentral } from '@/components/CockpitCentral'
 
 // Chargement à la demande, un chunk par écran (audit bundle-size) : la
 // plupart des comptes ne chargent jamais le Cockpit (réservé aux admins),
@@ -141,6 +142,13 @@ function AppContent() {
     }
   }
 
+  // Menu étroit (téléphone) : la rangée d'onglets défile au lieu d'élargir toute la page ; l'onglet
+  // ouvert reste visible (le dernier écran est mémorisé d'une visite à l'autre, ce peut être « Cockpit »).
+  const ongletActif = useRef<HTMLButtonElement | null>(null)
+  useEffect(() => {
+    ongletActif.current?.scrollIntoView?.({ inline: 'nearest', block: 'nearest' })
+  }, [ecran, isAdminLoaded])
+
   // Précharge les autres écrans dès que le statut admin est connu (donc
   // dès que la liste d'onglets définitive est connue) -- voir
   // prefetchEcrans ci-dessus.
@@ -202,13 +210,14 @@ function AppContent() {
   return (
     <div>
       <nav className="flex items-center justify-between gap-1 shadow-[inset_0_-1px_0_var(--border)] bg-[var(--card)] px-4 pt-2">
-        <div className="flex gap-1">
+        <div className="flex min-w-0 gap-1 overflow-x-auto">
           {onglets.map(([key, label]) => (
             <button
               key={key}
+              ref={ecran === key ? ongletActif : undefined}
               onClick={() => setEcran(key)}
               className={
-                'min-h-11 rounded-t-lg px-4 text-sm font-medium ' +
+                'min-h-11 shrink-0 whitespace-nowrap rounded-t-lg px-2 text-sm font-medium sm:px-4 ' +
                 (ecran === key
                   ? 'bg-[var(--background)] text-[var(--foreground)] font-semibold shadow-[inset_0_0_0_1px_var(--border)]'
                   : 'text-[var(--muted)] hover:text-[var(--foreground)]')
@@ -218,7 +227,9 @@ function AppContent() {
             </button>
           ))}
         </div>
-        <div className="pb-2">
+        <div className="flex shrink-0 items-center gap-2 pb-2">
+          {/* Cockpit central (14 oct. 2026) : même règle que l'onglet Cockpit, réservé aux administrateurs. */}
+          {isAdmin && <CockpitCentral />}
           <ThemeToggle />
         </div>
       </nav>

@@ -4661,3 +4661,28 @@ humain).
   (parse avec heure corrigé). Dans le fichier réel la colonne vaut 06/10/2026
   pour les 478 lignes -> tous les FRST tombent au plancher 12/10 (+ décalage
   remise). Demande 373b2246 : retour du père attendu sur un exemple chiffré.
+
+
+## 2026-10-14 — Projet branché sur le cockpit central
+
+- [x] Projet « Trieur de Data » (identifiant `trieur-data`) créé dans le
+  cockpit central (https://rnab26.github.io/Cockpit-General/). Fichiers du
+  cockpit ajoutés au dépôt : `.claude/hooks/cockpit-*.sh`,
+  `scripts/cockpit-*.sh`, `.claude/settings.json` (hooks et variable
+  `COCKPIT_PROJET`), bloc « Cockpit » en bas de `CLAUDE.md`. Aucun fichier de
+  l'appli ne change : l'envoi sur `main` porte `[skip render]` dans son message
+  (doc Render), donc pas de redéploiement.
+- [x] Les 3 chantiers ouverts du tableau Cockpit intégré à l'appli ont été
+  repris dans le cockpit central le 2026-10-14 : « Export bancaire SEPA
+  (prélèvements) » (ancien id `69ae9928`, bloqué : attend l'ICS et la
+  comparaison d'un lot complet), « Base de données : tenir à l'échelle »
+  (`148e1d51`, libre), « Historique, doublons, impayés et relevé bancaire »
+  (`538d1d12`, à cadrer). Rien n'a été supprimé ni modifié dans
+  `trieur_data.chantiers`. Les 51 anciennes cases ouvertes de ce fichier n'ont
+  pas été reprises (journal, pas suivi).
+- Reste dans l'appli du Trieur, inchangé : les demandes de règles du père de
+  Raphaël (`prelevement_rule_requests`) et leur écran.
+- [ ] À décider : garder ou couper l'ancien affichage au démarrage
+  (`.claude/hooks/session-start.sh`, qui liste `trieur_data.chantiers`). Il
+  montre les 3 mêmes chantiers que le cockpit central : tant qu'il reste, une
+  session voit deux listes.

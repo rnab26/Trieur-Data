@@ -2683,6 +2683,13 @@ def _build_prelevement_generate_response(
         }
 
     df_export_crm = pd.DataFrame([_export_crm_dict(e) for e in result.export_crm])
+    df_rectifiees = pd.DataFrame([
+        {
+            "Référence client": r.reference_client, "Nom": r.nom, "Champ": r.champ,
+            "Valeur avant": r.avant, "Valeur après": r.apres, "Correction": r.detail,
+        }
+        for r in result.rectifiees
+    ])
 
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
@@ -2700,6 +2707,9 @@ def _build_prelevement_generate_response(
         )
         (df_export_crm if not df_export_crm.empty else pd.DataFrame(columns=["Aucun client"])).to_excel(
             writer, index=False, sheet_name="export CRM",
+        )
+        (df_rectifiees if not df_rectifiees.empty else pd.DataFrame(columns=["Aucune valeur rectifiée"])).to_excel(
+            writer, index=False, sheet_name="Rectifiées",
         )
     buffer.seek(0)
 
@@ -2732,6 +2742,7 @@ def _build_prelevement_generate_response(
         "n_rcur": len(result.rcur),
         "n_fusions": n_fusions,
         "n_export_crm": len(result.export_crm),
+        "n_rectifiees": len(result.rectifiees),
     }
     # Signalement des mandats sans AUCUN numéro (ni Téléphone ni Mobile
     # trouvés sur la ligne CRM) -- décision de Raphaël (2026-09-22) : ne

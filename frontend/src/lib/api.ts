@@ -1193,6 +1193,7 @@ export type PrelevementSummary = {
   nRcur: number
   nFusions: number
   nSansTelephone: number
+  nRectifiees: number
 }
 
 export type PrelevementGenerateResult = {
@@ -1227,6 +1228,7 @@ type PrelevementGenerateApiResponse = {
     n_rcur: number
     n_fusions: number
     n_sans_telephone: number
+    n_rectifiees?: number
   }
   mandats: PrelevementMandatRow[]
   telephones_manquants: { reference_client: string; nom: string; motif: string }[]
@@ -1250,6 +1252,7 @@ function parsePrelevementGenerateResponse(data: PrelevementGenerateApiResponse):
       nRcur: data.summary.n_rcur,
       nFusions: data.summary.n_fusions,
       nSansTelephone: data.summary.n_sans_telephone,
+      nRectifiees: data.summary.n_rectifiees ?? 0,
     },
     mandats: data.mandats,
     telephonesManquants: data.telephones_manquants.map((t) => ({

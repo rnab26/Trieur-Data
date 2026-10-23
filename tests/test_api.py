@@ -2287,7 +2287,7 @@ def test_prelevement_generate_returns_mandat_rows_and_file_for_preview(client_fa
     assert "Date d'effet" in body["mandats"][0]
 
     wb = openpyxl.load_workbook(io.BytesIO(base64.b64decode(body["file_base64"])))
-    assert wb.sheetnames == ["Mandat", "FRST", "RCUR", "Exclus", "export CRM"]
+    assert wb.sheetnames == ["Mandat", "FRST", "RCUR", "Exclus", "export CRM", "Rectifiées"]
     export_crm_sheet = wb["export CRM"]
     header = [c.value for c in export_crm_sheet[1]]
     assert header[:3] == ["Référence du client", "RUM", "Statut"]

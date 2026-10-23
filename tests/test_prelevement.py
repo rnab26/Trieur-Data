@@ -14,6 +14,7 @@ from trieur.prelevement import (
     iban_checksum_valid,
     normalize_iban,
     pad_bic,
+    rectify_bic,
     split_nom_prenom,
     to_amount,
     to_code_postal,
@@ -591,6 +592,34 @@ def test_generate_mandats_excludes_bic_wrong_final_length():
     assert "bic" in result.exclus[0].raison.lower()
 
 
+def test_rectify_bic_regles_de_la_demande():
+    assert rectify_bic("cmbrfr2b") == ("CMBRFR2BXXX", ["minuscules passées en majuscules", '8 caractères : "XXX" ajouté'])
+    assert rectify_bic("CMBRFR2BXXX") == ("CMBRFR2BXXX", [])
+    bic, notes = rectify_bic("CMBRFR2BXXXYZ")  # 13 caractères
+    assert bic == "CMBRFR2BXXX"
+    assert 'supprimé en fin de BIC' in notes[0] and '"YZ"' in notes[0]
+    assert rectify_bic("CMBRFR2BX") == ("CMBRFR2BX", [])  # 9 : jamais deviné
+    assert rectify_bic(None) == ("", [])
+
+
+def test_generate_mandats_bic_trop_long_coupe_et_signale_dans_rectifiees():
+    """Demande du père de Raphaël : BIC trop long -> derniers caractères
+    supprimés ET signalé dans l'onglet des erreurs rectifiées."""
+    row = _base_row(**{"BIC": "cmbrfr2bxxxzz"})
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 9, 21))
+    assert result.exclus == []
+    assert {m.bic for m in result.mandats} == {"CMBRFR2BXXX"}
+    assert len(result.rectifiees) == 1
+    r = result.rectifiees[0]
+    assert (r.champ, r.avant, r.apres) == ("BIC", "cmbrfr2bxxxzz", "CMBRFR2BXXX")
+    assert "majuscules" in r.detail and '"ZZ"' in r.detail
+
+
+def test_generate_mandats_bic_deja_correct_n_est_pas_rectifie():
+    result = generate_mandats([_base_row(**{"BIC": "CMBRFR2BXXX"})], PrelevementRules(), today=date(2026, 9, 21))
+    assert result.rectifiees == []
+
+
 def test_generate_mandats_accepts_empty_bic():
     """Le BIC reste optionnel -- seule sa LONGUEUR, quand il est
     renseigné, est vérifiée (voir test ci-dessus)."""
@@ -908,25 +937,32 @@ def test_generate_mandats_one_bad_row_does_not_break_the_batch():
     assert len(result.exclus) == 1
 
 
-def test_to_code_postal_5_chiffres_recoit_un_zero():
-    assert to_code_postal("75001") == "075001"
-    assert to_code_postal("1000") == "001000"  # 01000 dont Excel a perdu le 0
-    assert to_code_postal("77380.0") == "077380"
+def test_to_code_postal_seul_un_code_a_4_chiffres_recoit_un_zero():
+    """Correction du père de Raphaël (2026-10-06, 23:42) : le 0 se rajoute
+    SEULEMENT si le code n'a que 4 chiffres."""
+    assert to_code_postal("1000") == "01000"  # 01000 dont Excel a perdu le 0
+    assert to_code_postal(1000.0) == "01000"  # nombre lu par pandas
+    assert to_code_postal("75001") == "75001"  # 5 chiffres : inchangé
+    assert to_code_postal("77380.0") == "77380"
+    assert to_code_postal(75001.0) == "75001"
+    assert to_code_postal(75001) == "75001"
+    assert to_code_postal("  75001 ") == "75001"
     assert to_code_postal("AB123") == "AB123"  # jamais deviné
-    assert to_code_postal("075001") == "075001"  # déjà 6 chiffres
-    assert to_code_postal(75001.0) == "075001"  # nombre lu par pandas
-    assert to_code_postal(75001) == "075001"
+    assert to_code_postal("075001") == "075001"  # autre longueur : inchangé
     assert to_code_postal(None) == ""
     assert to_code_postal(float("nan")) == ""
-    assert to_code_postal("  75001 ") == "075001"
 
 
-def test_generate_mandats_code_postal_sur_6_chiffres_partout():
-    """Cas signalé 2026-10-06 : 5 chiffres -> 0 devant, dans le fichier
-    mandats (FRST et RCUR) ET dans l'adresse complète de l'export CRM."""
+def test_generate_mandats_code_postal_4_chiffres_complete_partout():
+    """Cas signalé 2026-10-06 : 4 chiffres -> 0 devant, dans le fichier
+    mandats (FRST et RCUR) ET dans l'adresse complète de l'export CRM ;
+    5 chiffres -> inchangé."""
+    result = generate_mandats([_base_row(**{"Code postal": 1000})], PrelevementRules(), today=date(2026, 9, 21))
+    assert {m.code_postal for m in result.mandats} == {"01000"}
+    assert all("01000 Paris" in c.adresse_complete for c in result.export_crm)
     result = generate_mandats([_base_row(**{"Code postal": 75001})], PrelevementRules(), today=date(2026, 9, 21))
-    assert {m.code_postal for m in result.mandats} == {"075001"}
-    assert all("075001 Paris" in c.adresse_complete for c in result.export_crm)
+    assert {m.code_postal for m in result.mandats} == {"75001"}
+    assert all("75001 Paris" in c.adresse_complete for c in result.export_crm)
 
 
 def test_generate_mandats_export_crm_telephone_sans_point_zero():
@@ -937,7 +973,7 @@ def test_generate_mandats_export_crm_telephone_sans_point_zero():
     crm = result.export_crm[0]
     assert crm.telephone == "+33752946675"
     assert crm.mobile == "+33752946675"
-    assert "001000" in crm.adresse_complete
+    assert "01000" in crm.adresse_complete
 
 
 def test_generate_mandats_date_creation_avec_heure_et_date_premier_prelevement():

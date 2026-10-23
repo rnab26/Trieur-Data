@@ -208,6 +208,18 @@ class MandatRow:
 
 
 @dataclass
+class RectificationRow:
+    """Une valeur corrigée automatiquement (onglet "Rectifiées" du
+    fichier) : jamais une correction silencieuse."""
+    reference_client: str
+    nom: str
+    champ: str
+    avant: str
+    apres: str
+    detail: str
+
+
+@dataclass
 class ExclusionRow:
     reference_client: str
     nom: str
@@ -264,6 +276,7 @@ class GenerationResult:
     ooff: list[MandatRow] = field(default_factory=list)
     rcur: list[MandatRow] = field(default_factory=list)
     exclus: list[ExclusionRow] = field(default_factory=list)
+    rectifiees: list[RectificationRow] = field(default_factory=list)
     export_crm: list[ExportCrmRow] = field(default_factory=list)
 
 
@@ -291,14 +304,37 @@ def iban_checksum_valid(iban: str) -> bool:
 
 
 def pad_bic(raw: object) -> str:
-    """BIC à 8 caractères -> complété à 11 avec "XXX" (code d'agence
-    générique), comme la formule `IF(LEN(bic)=8,UPPER(bic)&"XXX",...)`
-    du fichier de référence -- un BIC à 11 caractères est déjà complet,
-    laissé tel quel (juste mis en majuscules)."""
+    """BIC rectifié, sans le détail des corrections (voir rectify_bic)."""
+    return rectify_bic(raw)[0]
+
+
+def rectify_bic(raw: object) -> tuple[str, list[str]]:
+    """Règle "BIC" (demande du père de Raphaël) : minuscules ->
+    majuscules ; un BIC doit faire 11 caractères : s'il en manque 3 (8
+    caractères, code d'agence absent) on ajoute "XXX" (comme la formule
+    `IF(LEN(bic)=8,UPPER(bic)&"XXX",...)` du fichier de référence) ;
+    s'il y en a trop, les derniers en trop sont supprimés. Renvoie (BIC
+    rectifié, corrections faites) : la liste alimente l'onglet
+    "Rectifiées" -- une troncature ne doit jamais être silencieuse. Une
+    autre longueur trop courte (9, 10 ou moins de 8) n'est jamais
+    devinée : renvoyée telle quelle, le mandat part alors en exclusion
+    (BIC de longueur invalide)."""
     if raw is None:
-        return ""
-    bic = str(raw).strip().upper()
-    return bic + "XXX" if len(bic) == 8 else bic
+        return "", []
+    if isinstance(raw, float) and raw != raw:  # NaN
+        return "", []
+    original = str(raw).strip()
+    bic = original.upper()
+    notes: list[str] = []
+    if bic != original:
+        notes.append("minuscules passées en majuscules")
+    if len(bic) == 8:
+        bic += "XXX"
+        notes.append('8 caractères : "XXX" ajouté')
+    elif len(bic) > 11:
+        notes.append(f'{len(bic)} caractères : "{bic[11:]}" supprimé en fin de BIC')
+        bic = bic[:11]
+    return bic, notes
 
 
 def to_amount(raw: object) -> float:
@@ -343,15 +379,16 @@ def to_amount(raw: object) -> float:
 
 
 def to_code_postal(raw: object) -> str:
-    """Règle "Code postal" (demande du père de Raphaël, 2026-10-06) :
-    le code postal sort sur 6 chiffres -- un 0 devant un code à 5
-    chiffres. Un code à 4 chiffres est un code "01xxx"..."09xxx" dont
-    Excel a perdu le 0 de tête (cellule lue comme un nombre) : il est
-    complété à 6 chiffres lui aussi (constaté sur 110 lignes du vrai
-    fichier du 2026-10-06). Une cellule lue comme NOMBRE (77380.0 sous
+    """Règle "Code postal" (demande du père de Raphaël, 2026-10-06,
+    corrigée le même jour à 23:42) : un code postal français fait 5
+    chiffres ; Excel perd le 0 de tête des codes "01xxx"..."09xxx"
+    (cellule lue comme un nombre) -> SEUL un code à 4 chiffres reçoit un
+    0 devant. Un code à 5 chiffres est laissé tel quel (la première
+    version ajoutait aussi un 0 aux codes à 5 chiffres : c'est ce que la
+    correction a retiré). Une cellule lue comme NOMBRE (77380.0 sous
     pandas) perd d'abord son ".0" -- même famille de bug que
-    to_telephone. Toute autre forme (lettres, déjà 6 chiffres, longueur
-    inattendue) est renvoyée telle quelle, jamais devinée."""
+    to_telephone. Toute autre forme (lettres, longueur inattendue) est
+    renvoyée telle quelle, jamais devinée."""
     if raw is None or raw == "":
         return ""
     if isinstance(raw, float) and raw != raw:  # NaN
@@ -362,8 +399,8 @@ def to_code_postal(raw: object) -> str:
         text = str(raw).strip()
         if text.endswith(".0") and text[:-2].isdigit():
             text = text[:-2]
-    if text.isdigit() and len(text) in (4, 5):
-        return text.zfill(6)
+    if text.isdigit() and len(text) == 4:
+        return text.zfill(5)
     return text
 
 
@@ -525,16 +562,23 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
             exclure("IBAN manquant ou invalide")
             continue
 
-        bic = pad_bic(_get(row, COL_BIC, keyed))
+        bic_brut = _get(row, COL_BIC, keyed)
+        bic, bic_corrections = rectify_bic(bic_brut)
         # BIC final toujours exactement 11 caractères (correction du père
         # de Raphaël, 2026-09-24, "vérifier la longueur du BIC final à 11
-        # caractères fixe") -- pad_bic complète un BIC à 8 caractères,
-        # mais ne peut rien faire d'un BIC d'une autre longueur (9, 10,
-        # 12+) : jamais deviné/tronqué, le mandat part en exclusion comme
-        # pour un IBAN invalide.
+        # caractères fixe") -- rectify_bic complète un BIC à 8 caractères
+        # et coupe un BIC trop long, mais ne devine rien d'un BIC de 9 ou
+        # 10 caractères : le mandat part en exclusion comme pour un IBAN
+        # invalide.
         if bic and len(bic) != 11:
             exclure("BIC de longueur invalide (11 caractères attendus)")
             continue
+        if bic_corrections:
+            result.rectifiees.append(RectificationRow(
+                reference_client=ref_client, nom=nom, champ="BIC",
+                avant=str(bic_brut).strip(), apres=bic,
+                detail=" ; ".join(bic_corrections),
+            ))
 
         rum = str(_get(row, COL_RUM, keyed) or "").strip()
         if not rum:
@@ -906,10 +950,24 @@ def explain_rules(rules: PrelevementRules) -> list[dict[str, str]]:
         {
             "titre": "Code postal",
             "detail": (
-                "Un code postal de 5 chiffres reçoit un 0 devant pour sortir "
-                "sur 6 chiffres (demande du père de Raphaël, 2026-10-06) -- "
-                "colonne Code_postal du fichier mandats ET Adresse complète de "
-                "l'export CRM. Toute autre longueur est laissée telle quelle."
+                "Un code postal de 4 chiffres (le 0 de tête perdu par Excel) reçoit "
+                "un 0 devant pour sortir sur 5 chiffres ; un code déjà à 5 chiffres "
+                "n'est pas modifié (demande du père de Raphaël, 2026-10-06, "
+                "corrigée à 23:42) -- colonne Code_postal du fichier mandats ET "
+                "Adresse complète de l'export CRM. Toute autre longueur est "
+                "laissée telle quelle."
+            ),
+        },
+        {
+            "titre": "BIC",
+            "detail": (
+                "Les minuscules passent en majuscules. Un BIC doit faire 11 "
+                "caractères : à 8 caractères (3 manquants) on ajoute \"XXX\" ; "
+                "s'il y a trop de caractères, les derniers en trop sont "
+                "supprimés. Chaque correction est listée dans l'onglet "
+                "\"Rectifiées\" du fichier (client, valeur avant, valeur après). "
+                "Un BIC de 9 ou 10 caractères n'est pas deviné : voir "
+                "\"Exclusions\"."
             ),
         },
         {

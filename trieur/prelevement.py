@@ -156,7 +156,7 @@ class PrelevementRules:
     # "passer de 3 à 4 jours ouvrés, il faut donc décaler au-delà si dans
     # les 4 jours il y a un samedi ou un dimanche") -- voir
     # add_business_days ci-dessous, jamais un simple +N jours calendaires.
-    delay_days: int = 4
+    delay_days: int = 3
     # Frais de dossier facturés UNE FOIS PAR PRODUIT au 1er prélèvement
     # (jamais sur les suivants) -- confirmé à 20€/produit en croisant le
     # fichier CRM de référence avec le vrai fichier de remise bancaire du
@@ -475,19 +475,17 @@ def add_business_days(d: date, n: int) -> date:
 
 
 def compute_first_prelevement_date(raw_scheduled: object, today: date, delay_days: int) -> date:
-    """La date du 1er prélèvement n'est JAMAIS avant aujourd'hui +
-    délai en JOURS OUVRÉS (4 par défaut depuis le 2026-09-24, voir
-    add_business_days -- avant cette date, 3 jours calendaires) :
-    `MAX(TODAY()+délai_ouvré, date_prévue)`. Si aucune date n'était
-    prévue au départ, le client n'est PAS exclu (changé le 2026-09-22,
-    demande du père de Raphaël, question posée -- réponse : "la date du
-    jour + délai") : utilise directement le plancher aujourd'hui +
-    délai ouvré."""
+    """Date du 1er prélèvement (FRST) -- règle du père de Raphaël du
+    2026-10-26 : la date se trouve dans la colonne "Date de premier
+    prélèvement" ; si elle est ABSENTE ou INFÉRIEURE à aujourd'hui +
+    `delay_days` jours, elle est remplacée par aujourd'hui + `delay_days`
+    jours OUVRÉS (samedi/dimanche sautés, voir add_business_days). Une
+    date plus lointaine est gardée telle quelle. Le client n'est jamais
+    exclu faute de date (2026-09-22)."""
     scheduled = _parse_date(raw_scheduled)
-    plancher = add_business_days(today, delay_days)
-    if scheduled is None:
-        return plancher
-    return max(plancher, scheduled)
+    if scheduled is None or scheduled < today + timedelta(days=delay_days):
+        return add_business_days(today, delay_days)
+    return scheduled
 
 
 def build_motif(rum: str, suffix: str) -> str:
@@ -731,13 +729,15 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
             # seuil corrigé le 2026-09-24, la première version codée ne
             # fonctionnait pas comme attendu) :
             # - date d'effet renseignée ET >= aujourd'hui + 2 jours ->
-            #   date du RCUR = date d'effet + 1 mois.
+            #   date du RCUR = date d'effet + PÉRIODICITÉ du contrat (règle
+            #   du 2026-10-26 : "qu'il faut décaler de la périodicité de
+            #   prélèvement" -- avant, toujours + 1 mois).
             # - sinon (pas de date d'effet, ou trop proche/passée) -> date
             #   du RCUR = date du FRST (déjà décalée par la règle
             #   "décalage remise" ci-dessus si plusieurs mandats) + 1 mois.
             if b["cols"] == [COL_OPTILIFE]:
                 if date_effet_raw is not None and date_effet_raw >= today + timedelta(days=2):
-                    date_rcur = _add_months(date_effet_raw, 1)
+                    date_rcur = _add_months(date_effet_raw, _mois_periodicite(periodicite_effective))
                 else:
                     date_rcur = _add_months(date_premiere_ligne, 1)
             else:
@@ -1039,24 +1039,23 @@ def explain_rules(rules: PrelevementRules) -> list[dict[str, str]]:
         {
             "titre": "Date du premier prélèvement",
             "detail": (
-                f"Jamais avant aujourd'hui + {rules.delay_days} jour(s) OUVRÉS "
-                f"(réglable, week-end sauté) : si la date prévue dans le fichier "
-                f"est déjà passée ou trop proche, repoussée à ce délai minimum. "
-                f"La date vient de la colonne \"Date de premier prélèvement\" du CRM. "
-                f"\"Date_signature_mandat\" = \"Date création\" (l'heure est ignorée). "
-                f"\"Date création\" (l'heure est ignorée). "
-                f"Si aucune date n'est renseignée, cette même valeur (aujourd'hui "
-                f"+ {rules.delay_days} jour(s) ouvrés) est utilisée directement, "
-                f"sans exclure le client."
+                f"FRST : la date se trouve dans la colonne \"Date de premier "
+                f"prélèvement\" du CRM. Si elle est absente ou inférieure à "
+                f"aujourd'hui + {rules.delay_days} jour(s), elle est remplacée par "
+                f"aujourd'hui + {rules.delay_days} jour(s) OUVRÉS (week-end sauté, "
+                f"réglable). Une date plus lointaine est gardée telle quelle, "
+                f"sans jamais exclure le client. \"Date_signature_mandat\" = "
+                f"\"Date création\" (l'heure est ignorée)."
             ),
         },
         {
             "titre": "date d'effet",
             "detail": (
-                "Uniquement pour le mandat Optilife, sur sa ligne RCUR (les "
+                "Uniquement pour le mandat Optilife/Optivie, sur sa ligne RCUR (les "
                 "autres produits, et le FRST Optilife lui-même, gardent la date "
                 "du 1er prélèvement normale) : date d'effet renseignée et >= "
-                "aujourd'hui + 2 jours -> date du RCUR = date d'effet + 1 mois. "
+                "aujourd'hui + 2 jours -> date du RCUR = date d'effet décalée de la "
+                "périodicité du contrat (règle du 2026-10-26). "
                 "Sinon (pas de date d'effet, ou trop proche/passée) -> date du "
                 "RCUR = date du FRST + 1 mois."
             ),

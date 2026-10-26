@@ -4751,3 +4751,11 @@ Branche `agent/echelle-bdd` (pas fusionnée). Demande : mesurer à un volume ré
 - [ ] À appliquer : le reste de la migration 0034 sur la vraie base. Sur une table déjà grosse, créer les deux index avec `create index concurrently` avant (la création bloque les écritures le temps de sa durée).
 - [ ] Limites connues, non traitées : (a) la liste par page (`offset`) reste lente très en profondeur (11 à 20 s à la ligne 450 000 ; rarement atteint, l'export et la recherche passent par curseur) ; (b) l'export tient tout en mémoire (pandas) : plafond 250 000 lignes, un vrai export en flux serait la suite ; (c) un filtre sur « Modifié par » (nom résolu côté serveur d'appli) ne porte toujours que sur la page chargée ; (d) l'écran Streamlit historique (`views/tab_database.py`) garde l'ancien filtre sur le lot chargé (l'interface React/API est celle qui bénéficie du changement) ; (e) la recherche côté base ne couvre pas le nom du modifieur (« Modifié par ») ; (f) l'index de recherche pèse (~le tiers de la table) et alourdit un peu les imports : à surveiller sur de très gros imports.
 - Piège rencontré : `scripts/sql.sh` retire le `;` final de CHAQUE ligne (sed par ligne) : un SQL de plusieurs lignes (fonction) échoue ; l'envoyer sur une seule ligne. Et la base coupe toute requête à 8 s : les mesures longues passent par une tâche pg_cron à usage unique (qui se désinscrit seule ; si elle échoue avant, elle recommence : surveiller).
+
+- 2026-10-26 (dates, demande 422bba16 du père de Raphaël) : FRST = colonne
+  "Date de premier prélèvement" ; absente ou < aujourd'hui + 3 jours ->
+  aujourd'hui + 3 jours OUVRÉS, sinon gardée telle quelle (plus de MAX avec
+  le plancher). Délai par défaut 4 -> 3 (réglable, valeur de l'environnement
+  Prélèvement mise à 3). RCUR Optilife/Optivie = date d'effet décalée de la
+  PÉRIODICITÉ (avant : toujours +1 mois). Gardé tel quel, non demandé :
+  seuil date d'effet >= aujourd'hui + 2 jours, repli FRST + 1 mois.

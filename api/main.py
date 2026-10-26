@@ -2283,7 +2283,7 @@ def _rules_from_row(rules_row: dict) -> PrelevementRules:
     return PrelevementRules(
         ics=rules_row.get("ics"),
         nature=rules_row.get("nature") or "CORE",
-        delay_days=rules_row.get("delay_days") if rules_row.get("delay_days") is not None else 4,
+        delay_days=rules_row.get("delay_days") if rules_row.get("delay_days") is not None else 3,
         frais_setup_eur=(
             rules_row.get("frais_setup_eur") if rules_row.get("frais_setup_eur") is not None else 20.0
         ),
@@ -2349,7 +2349,7 @@ class ColonneMandat(BaseModel):
 class PrelevementRulesUpdate(BaseModel):
     ics: Optional[str] = None
     nature: str = "CORE"
-    delay_days: int = 4
+    delay_days: int = 3
     frais_setup_eur: float = 20.0
     frais_par_produit: dict[str, float] = {}
     periodicites: dict[str, str] = {}

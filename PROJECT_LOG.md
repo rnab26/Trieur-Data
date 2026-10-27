@@ -4759,3 +4759,10 @@ Branche `agent/echelle-bdd` (pas fusionnée). Demande : mesurer à un volume ré
   Prélèvement mise à 3). RCUR Optilife/Optivie = date d'effet décalée de la
   PÉRIODICITÉ (avant : toujours +1 mois). Gardé tel quel, non demandé :
   seuil date d'effet >= aujourd'hui + 2 jours, repli FRST + 1 mois.
+- 2026-10-27 (dates, réponses du père dans l'écran des règles) : RCUR
+  Optilife/Optivie = date d'effet + 1 MOIS quelle que soit la périodicité
+  (le 26/10 j'avais codé "+ périodicité" : régression, ex. périodicité 2 mois
+  -> effet + 2 mois, d'où 10/03 au lieu de 10/02 sur Mayne Madeleine).
+  Corrigé. Le mandat au montant le plus élevé passe toujours en premier
+  (règle du 22/09 confirmée) : si Optilife n'est pas le plus cher du contrat,
+  il est repoussé d'un mois, c'est voulu.

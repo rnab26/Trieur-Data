@@ -737,7 +737,7 @@ def generate_mandats(rows: list[dict], rules: PrelevementRules, today: date | No
             #   "décalage remise" ci-dessus si plusieurs mandats) + 1 mois.
             if b["cols"] == [COL_OPTILIFE]:
                 if date_effet_raw is not None and date_effet_raw >= today + timedelta(days=2):
-                    date_rcur = _add_months(date_effet_raw, _mois_periodicite(periodicite_effective))
+                    date_rcur = _add_months(date_effet_raw, 1)
                 else:
                     date_rcur = _add_months(date_premiere_ligne, 1)
             else:
@@ -1054,8 +1054,8 @@ def explain_rules(rules: PrelevementRules) -> list[dict[str, str]]:
                 "Uniquement pour le mandat Optilife/Optivie, sur sa ligne RCUR (les "
                 "autres produits, et le FRST Optilife lui-même, gardent la date "
                 "du 1er prélèvement normale) : date d'effet renseignée et >= "
-                "aujourd'hui + 2 jours -> date du RCUR = date d'effet décalée de la "
-                "périodicité du contrat (règle du 2026-10-26). "
+                "aujourd'hui + 2 jours -> date du RCUR = date d'effet + 1 mois, "
+                "quelle que soit la périodicité (confirmé le 2026-10-27). "
                 "Sinon (pas de date d'effet, ou trop proche/passée) -> date du "
                 "RCUR = date du FRST + 1 mois."
             ),

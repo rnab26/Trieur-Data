@@ -999,13 +999,14 @@ def test_date_premier_prelevement_regle_2026_10_26():
     assert c("2026-11-10", today, 3) == date(2026, 11, 10)
 
 
-def test_optilife_rcur_date_effet_decalee_de_la_periodicite():
-    """Règle du 2026-10-26 : RCUR Optilife/Optivie = date d'effet + périodicité."""
+def test_optilife_rcur_date_effet_plus_un_mois_quelle_que_soit_la_periodicite():
+    """Confirmé par le père de Raphaël le 2026-10-27 : RCUR Optilife/Optivie
+    = date d'effet + 1 mois, même pour une périodicité de 2, 3 ou 12 mois."""
     today = date(2026, 10, 6)
-    for periodicite, attendu in (("Mensuelle", "01/12/2026"), ("Trimestrielle", "01/02/2027"), ("annuelle", "01/11/2027")):
+    for periodicite in ("Mensuelle", "Bimestrielle", "Trimestrielle", "annuelle"):
         row = _base_row(**{
-            "Date d'effet du nouveau contrat (OPTILIFE)": "01/11/2026",
+            "Date d'effet du nouveau contrat (OPTILIFE)": "10/01/2027",
             "Périodicité (Mensuel/trimestre/annuel)             ": periodicite,
         })
         result = generate_mandats([row], PrelevementRules(), today=today)
-        assert result.rcur[0].date_premiere_echeance == attendu, periodicite
+        assert result.rcur[0].date_premiere_echeance == "10/02/2027", periodicite

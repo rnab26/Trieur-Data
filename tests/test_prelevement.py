@@ -1010,3 +1010,24 @@ def test_optilife_rcur_date_effet_plus_un_mois_quelle_que_soit_la_periodicite():
         })
         result = generate_mandats([row], PrelevementRules(), today=today)
         assert result.rcur[0].date_premiere_echeance == "10/02/2027", periodicite
+
+
+def test_cas_mayne_madeleine_optilife_plus_cher_garde_sa_date():
+    """Cas réel du père de Raphaël (2026-10-27) : MAYNE MADELEINE, Optilife 99 +
+    MYJURIS 19,90 + IMMO 5,90, mensuelle, 1er prélèvement CRM 10/11/2026, date
+    d'effet 10/01/2027. Optilife (le plus cher) garde son FRST au 10/11/2026 ;
+    son RCUR = date d'effet + 1 mois = 10/02/2027 ; le mandat J-IM est repoussé."""
+    row = _base_row(**{
+        "Nom complet": "MAYNE MADELEINE",
+        "Date création": "12/08/2026 11:54",
+        "Date de premier prélèvement": "2026-11-10 00:00:00",
+        "Date d'effet du nouveau contrat (OPTILIFE)": "10/01/2027",
+        "Optilife": 99.0, "MYJURIS & MYHOSPI": 19.9, "IMMO": 5.9,
+    })
+    result = generate_mandats([row], PrelevementRules(), today=date(2026, 10, 27))
+    par = {(m.motif[-1], m.type_sequence): m.date_premiere_echeance for m in result.mandats}
+    assert par[("O", "FRST")] == "10/11/2026"
+    assert par[("O", "RCUR")] == "10/02/2027"
+    assert par[("M", "FRST")] == "10/12/2026"  # mandat J-IM repoussé d'un mois
+    assert par[("M", "RCUR")] == "10/01/2027"
+    assert {m.date_signature_mandat for m in result.mandats} == {"12/08/2026"}
